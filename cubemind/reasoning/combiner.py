@@ -20,12 +20,61 @@ import math
 
 import numpy as np
 
+# GPU bridge
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
+
+# -- GPU helpers ---------------------------------------------------------------
+
+
+def _gpu_attn_scores(Q: np.ndarray, K: np.ndarray, d: int) -> np.ndarray:
+    """Q @ K^T / sqrt(d) — GPU-accelerated with numpy fallback."""
+    if _bridge is not None:
+        try:
+            result = _bridge.attention_scores(
+                np.asarray(Q, dtype=np.float32),
+                np.asarray(K, dtype=np.float32),
+            )
+            if result is not None:
+                return np.asarray(result, dtype=np.float32)
+        except Exception:
+            pass
+    return (Q @ K.T / math.sqrt(d)).astype(np.float32)
+
+
+def _gpu_attn_output(weights: np.ndarray, V: np.ndarray) -> np.ndarray:
+    """weights @ V — GPU-accelerated with numpy fallback."""
+    if _bridge is not None:
+        try:
+            result = _bridge.attention_output(
+                np.asarray(weights, dtype=np.float32),
+                np.asarray(V, dtype=np.float32),
+            )
+            if result is not None:
+                return np.asarray(result, dtype=np.float32)
+        except Exception:
+            pass
+    return (weights @ V).astype(np.float32)
+
 
 # -- Utility -------------------------------------------------------------------
 
 
 def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
-    """Numerically stable softmax."""
+    """Numerically stable softmax — GPU-accelerated when available."""
+    if _bridge is not None:
+        try:
+            result = _bridge.softmax(np.asarray(x, dtype=np.float32), dim=axis)
+            if result is not None:
+                return np.asarray(result, dtype=np.float32)
+        except Exception:
+            pass
     x_shifted = x - np.max(x, axis=axis, keepdims=True)
     exp_x = np.exp(x_shifted)
     return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
@@ -37,7 +86,7 @@ def scaled_dot_product_attention(
     V: np.ndarray,
     mask: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Standard scaled dot-product attention.
+    """Standard scaled dot-product attention — GPU-accelerated when available.
 
     Args:
         Q: Queries, shape (n, d)
@@ -49,11 +98,11 @@ def scaled_dot_product_attention(
         Attention output, shape (n, d_v)
     """
     d = Q.shape[-1]
-    scores = Q @ K.T / math.sqrt(d)  # (n, m)
+    scores = _gpu_attn_scores(Q, K, d)
     if mask is not None:
         scores = np.where(mask, scores, -1e9)
-    weights = _softmax(scores, axis=-1)  # (n, m)
-    return weights @ V  # (n, d_v)
+    weights = _softmax(scores, axis=-1)
+    return _gpu_attn_output(weights, V)
 
 
 # -- Combiner-Axial Attention --------------------------------------------------
@@ -135,10 +184,14 @@ class CombinerAxialAttention:
             # Local query summary via max-pool
             q_r = np.max(Q_blocks[r], axis=0)  # (d,)
 
-            # Local attention: softmax(q_r . K_r^T / sqrt(d)) . V_r
-            scores = q_r @ K_blocks[r].T / math.sqrt(d)  # (s,)
-            weights = _softmax(scores)  # (s,)
-            value_expectations[r] = weights @ V_blocks[r]  # (d,)
+            # Local attention: softmax(q_r . K_r^T / sqrt(d)) . V_r (GPU)
+            scores = _gpu_attn_scores(
+                q_r.reshape(1, -1), K_blocks[r], d
+            ).ravel()
+            weights = _softmax(scores)
+            value_expectations[r] = _gpu_attn_output(
+                weights.reshape(1, -1), V_blocks[r]
+            ).ravel()
 
         return key_summaries, value_expectations
 
@@ -159,10 +212,25 @@ class CombinerAxialAttention:
         # Determine block size
         s = self.block_size if self.block_size > 0 else max(1, int(math.sqrt(L)))
 
-        # Project to Q, K, V
-        Q = X @ self.W_Q  # (L, d_model)
-        K = X @ self.W_K
-        V = X @ self.W_V
+        # Project to Q, K, V — GPU-accelerated when available
+        X_f32 = X.astype(np.float32)
+        Q = K = V = None
+        if _bridge is not None:
+            try:
+                # linear(X, W.T, None) = X @ (W.T).T = X @ W
+                _Q = _bridge.linear(X_f32, self.W_Q.T, None)
+                _K = _bridge.linear(X_f32, self.W_K.T, None)
+                _V = _bridge.linear(X_f32, self.W_V.T, None)
+                if _Q is not None and _K is not None and _V is not None:
+                    Q = np.asarray(_Q, dtype=np.float32)
+                    K = np.asarray(_K, dtype=np.float32)
+                    V = np.asarray(_V, dtype=np.float32)
+            except Exception:
+                pass
+        if Q is None:
+            Q = X_f32 @ self.W_Q
+            K = X_f32 @ self.W_K
+            V = X_f32 @ self.W_V
 
         # Pad sequence to be divisible by s
         n_blocks = math.ceil(L / s)
@@ -206,11 +274,11 @@ class CombinerAxialAttention:
                 V_b = V_blocks[b]
                 block_start = b * s
 
-                # -- Direct attention scores within this block --
-                direct_scores = Q_b @ K_b.T / math.sqrt(d_h)  # (s, s)
+                # -- Direct attention scores within this block (GPU) --
+                direct_scores = _gpu_attn_scores(Q_b, K_b, d_h)
 
-                # -- Mixing scores for each summary block --
-                mix_scores = Q_b @ key_summaries.T / math.sqrt(d_h)  # (s, n_blocks)
+                # -- Mixing scores for each summary block (GPU) --
+                mix_scores = _gpu_attn_scores(Q_b, key_summaries, d_h)
 
                 # Exclude current block from mix_scores to avoid double-counting
                 mix_scores[:, b] = -1e9
@@ -222,11 +290,11 @@ class CombinerAxialAttention:
                 direct_weights = all_weights[:, :s]  # (s, s)
                 mix_weights = all_weights[:, s:]  # (s, n_blocks)
 
-                # Direct contribution
-                direct_out = direct_weights @ V_b  # (s, d_h)
+                # Direct contribution (GPU)
+                direct_out = _gpu_attn_output(direct_weights, V_b)
 
-                # Summary contribution
-                summary_out = mix_weights @ value_expectations  # (s, d_h)
+                # Summary contribution (GPU)
+                summary_out = _gpu_attn_output(mix_weights, value_expectations)
 
                 output_heads[block_start : block_start + s, h, :] = (
                     direct_out + summary_out

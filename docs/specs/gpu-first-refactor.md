@@ -154,11 +154,11 @@ CubeMind should batch wherever possible:
 
 ## Implementation Order
 
-1. HYLA (biggest impact — 3 matmuls per forward)
-2. Hippocampal DG projection
-3. CVL encoders
-4. Cache similarity
-5. Combiner attention
-6. Model pipeline wiring
-7. Parameter VulkanTensor wrapping
-8. Benchmark GPU vs CPU speedup
+1. ~~HYLA (biggest impact — 3 matmuls per forward)~~ ✅ Done (b361918)
+2. ~~Hippocampal DG projection~~ ✅ Done (b361918)
+3. ~~CVL encoders~~ ✅ Done (b361918)
+4. ~~Cache similarity~~ ✅ Done — GPU dot-product via `_bridge.linear()`
+5. ~~Combiner attention~~ ✅ Done — GPU QKV projections, softmax, attention scores/output
+6. Model pipeline wiring — **deferred**: inter-stage data is small (2048-dim), upload/download overhead negligible
+7. Parameter VulkanTensor wrapping — **blocked**: grilly bridge `_ensure_f32_contiguous` downloads VulkanTensor via `__array__`, re-uploads. Needs grilly-side fix to detect VulkanTensor and pass C++ Tensor directly. Critical for HYLA W_H (2GB matrix uploaded every forward).
+8. ~~Benchmark GPU vs CPU speedup~~ ✅ Done — see `benchmarks/gpu_vs_cpu.py`

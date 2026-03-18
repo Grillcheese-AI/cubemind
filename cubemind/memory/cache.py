@@ -31,6 +31,15 @@ try:
 except ImportError:
     _HAS_FAISS = False
 
+# GPU bridge
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -170,8 +179,47 @@ class VSACache:
                 np.zeros((batch, k), dtype=np.int32),
             )
 
-        self._ensure_index()
         k_actual = min(k, self._size)
+
+        # GPU fast path: float dot-product similarity (equivalent to Hamming
+        # for bipolar vectors since cosine = dot / d_vsa).
+        if _bridge is not None:
+            try:
+                q_f32 = np.sign(q).astype(np.float32)
+                keys_f32 = self.keys[: self._size].astype(np.float32)
+                # linear(q, keys, None) = q @ keys^T → (batch, size)
+                dots = _bridge.linear(q_f32, keys_f32, None)
+                if dots is not None:
+                    dots = np.asarray(dots, dtype=np.float32)
+                    sims_full = dots / self.d_vsa
+                    if k_actual < sims_full.shape[1]:
+                        part_idx = np.argpartition(
+                            -sims_full, k_actual, axis=1
+                        )[:, :k_actual]
+                        row_idx = np.arange(batch)[:, None]
+                        part_sims = sims_full[row_idx, part_idx]
+                        sorted_order = np.argsort(-part_sims, axis=1)
+                        indices = part_idx[row_idx, sorted_order]
+                        sims = part_sims[row_idx, sorted_order]
+                    else:
+                        sorted_order = np.argsort(-sims_full, axis=1)
+                        indices = sorted_order[:, :k_actual]
+                        row_idx = np.arange(batch)[:, None]
+                        sims = sims_full[row_idx, indices]
+                    indices = indices.astype(np.int32)
+                    if k_actual < k:
+                        pad = k - k_actual
+                        indices = np.pad(indices, ((0, 0), (0, pad)))
+                        sims = np.pad(
+                            sims, ((0, 0), (0, pad)), constant_values=0.0
+                        )
+                    retrieved_keys = self.keys[indices]
+                    return sims, retrieved_keys, indices
+            except Exception:
+                pass
+
+        # CPU fallback: FAISS or numpy Hamming
+        self._ensure_index()
 
         q_packed = _to_packed(np.sign(q).astype(np.int8))
 
