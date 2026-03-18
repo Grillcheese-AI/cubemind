@@ -365,6 +365,37 @@ class BlockCodes:
             return _BlockCodeOps.to_flat(a)
         return a.reshape(*a.shape[:-2], -1)
 
+    def pmf_to_vector(
+        self, codebook: np.ndarray, pmf: np.ndarray
+    ) -> np.ndarray:
+        """Convert a probability distribution over codebook entries to a block-code vector.
+
+        IBM's pmf2vec — weighted sum of codebook entries.
+
+        Args:
+            codebook: Codebook (n, k, l).
+            pmf: Probability distribution (n,) or (batch, n).
+
+        Returns:
+            Weighted vector (k, l) or (batch, k, l).
+        """
+        if _BLOCK_CODE_OPS_AVAILABLE:
+            try:
+                result = _BlockCodeOps.pmf_to_vector(codebook, pmf)
+                if result is not None:
+                    return result
+            except Exception:
+                pass
+
+        n, k, l = codebook.shape
+        pmf = np.asarray(pmf, dtype=np.float32)
+        cb_flat = codebook.reshape(n, -1)
+
+        if pmf.ndim == 1:
+            return (pmf @ cb_flat).reshape(k, l).astype(np.float32)
+        else:
+            return (pmf @ cb_flat).reshape(-1, k, l).astype(np.float32)
+
     # ── Private numpy implementations (always available) ──────────────────────
 
     @staticmethod
