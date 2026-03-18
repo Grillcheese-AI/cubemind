@@ -7,3 +7,4 @@ build/
 .pytest_cache/
 *.egg
 .ruff_cache/
+cubemind_pipeline.html
