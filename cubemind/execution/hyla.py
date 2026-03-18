@@ -1,0 +1,172 @@
+"""HYLA -- Hypernetwork Linear Attention with Hyperfan init and MIP normalization.
+
+Implements the core module from "Hypernetworks for Faster Transformer Generation":
+a hypernetwork maps VSA block-code embeddings to mainnet weight matrices, using
+Hyperfan initialization (Chang et al., 2020) adapted for block-code variance and
+Multi-head Instance-Prior (MIP) normalization for stable per-block statistics.
+
+Validates Theorem 3 (Hyperfan initialization preserves signal variance through
+the hypernetwork output layer for block-code conditioned weight generation).
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from cubemind.core import EPS, K_BLOCKS, L_BLOCK, hyperfan_init
+
+
+# -- Activation ----------------------------------------------------------------
+
+
+def gelu(x: np.ndarray) -> np.ndarray:
+    """Gaussian Error Linear Unit (exact form).
+
+    GELU(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+    """
+    from scipy.special import erf
+
+    return x * 0.5 * (1.0 + erf(x / np.sqrt(2.0)))
+
+
+# -- HYLA ----------------------------------------------------------------------
+
+
+class HYLA:
+    """Hypernetwork Linear Attention module.
+
+    Maps a VSA block-code embedding e (d_vsa,) through a two-layer hypernetwork
+    to produce a mainnet weight matrix W (d_out, d_vsa), then applies W @ x.
+
+    Hypernetwork architecture::
+
+        h = GELU(e @ W_h^T + b_h)             # hidden layer  (d_hidden,)
+        W = reshape(h @ W_H^T, d_out, d_vsa)  # output weights
+
+    MIP normalization is applied to the embedding before the hypernetwork,
+    normalizing each of the k blocks independently and applying learnable
+    affine parameters (gamma, beta) per block.
+
+    Args:
+        d_vsa: Total VSA dimension (must equal k * l).
+        d_hidden: Hypernetwork hidden layer size.
+        d_out: Mainnet output dimension.
+        k: Number of blocks.
+        l: Block length.
+        seed: Random seed for reproducibility.
+        init: Initialization scheme -- 'hyperfan' or 'xavier'.
+    """
+
+    def __init__(
+        self,
+        d_vsa: int,
+        d_hidden: int,
+        d_out: int,
+        k: int = K_BLOCKS,
+        l: int = L_BLOCK,
+        seed: int = 42,
+        init: str = "hyperfan",
+    ) -> None:
+        assert d_vsa == k * l, f"d_vsa ({d_vsa}) must equal k*l ({k}*{l}={k * l})"
+
+        self.d_vsa = d_vsa
+        self.d_hidden = d_hidden
+        self.d_out = d_out
+        self.k = k
+        self.l = l
+
+        rng = np.random.default_rng(seed)
+
+        # -- Hypernet hidden layer (Linear_h): d_vsa -> d_hidden ---------------
+        # Standard Xavier initialization for the first layer
+        xavier_std_h = np.sqrt(2.0 / (d_vsa + d_hidden))
+        self.W_h = rng.normal(0, xavier_std_h, size=(d_hidden, d_vsa)).astype(
+            np.float32
+        )
+        self.b_h = np.zeros(d_hidden, dtype=np.float32)
+
+        # -- Hypernet output layer (Linear_H): d_hidden -> d_out * d_vsa -------
+        if init == "hyperfan":
+            # Hyperfan-in: accounts for block-code embedding variance (Theorem 3)
+            self.W_H = hyperfan_init(
+                fan_out=d_out,
+                fan_in=d_vsa,
+                d_k=d_hidden,
+                l=l,
+                has_bias=False,
+                activation="gelu",
+                rng=rng,
+            )
+        elif init == "xavier":
+            xavier_std_H = np.sqrt(2.0 / (d_hidden + d_out * d_vsa))
+            self.W_H = rng.normal(
+                0, xavier_std_H, size=(d_out * d_vsa, d_hidden)
+            ).astype(np.float32)
+        else:
+            raise ValueError(f"Unknown init scheme: {init!r}")
+
+        # -- MIP affine parameters (per block) ---------------------------------
+        self.gamma = np.ones(k, dtype=np.float32)
+        self.beta = np.zeros(k, dtype=np.float32)
+
+    # -- MIP normalization -----------------------------------------------------
+
+    def mip_normalize(self, e_flat: np.ndarray) -> np.ndarray:
+        """Multi-head Instance-Prior normalization.
+
+        Reshapes the flat embedding to (k, l), normalizes each block to zero mean
+        and unit variance, then applies learnable affine transform per block.
+
+        Args:
+            e_flat: Flat embedding vector (d_vsa,).
+
+        Returns:
+            MIP-normalized flat embedding (d_vsa,).
+        """
+        blocks = e_flat.reshape(self.k, self.l)  # (k, l)
+
+        # Per-block normalization
+        mean = blocks.mean(axis=1, keepdims=True)  # (k, 1)
+        var = blocks.var(axis=1, keepdims=True)  # (k, 1)
+        blocks_norm = (blocks - mean) / np.sqrt(var + EPS)
+
+        # Learnable affine per block
+        blocks_out = self.gamma[:, None] * blocks_norm + self.beta[:, None]
+
+        return blocks_out.reshape(self.d_vsa)
+
+    # -- Weight generation -----------------------------------------------------
+
+    def generate_weights(self, e_flat: np.ndarray) -> np.ndarray:
+        """Generate mainnet weight matrix from a VSA embedding.
+
+        Args:
+            e_flat: Flat embedding vector (d_vsa,).
+
+        Returns:
+            Weight matrix (d_out, d_vsa).
+        """
+        e_norm = self.mip_normalize(e_flat)
+
+        # Hidden layer: h = GELU(e @ W_h^T + b_h)
+        h = gelu(e_norm @ self.W_h.T + self.b_h)  # (d_hidden,)
+
+        # Output layer: W_flat = h @ W_H^T
+        W_flat = h @ self.W_H.T  # (d_out * d_vsa,)
+
+        return W_flat.reshape(self.d_out, self.d_vsa).astype(np.float32)
+
+    # -- Forward pass ----------------------------------------------------------
+
+    def forward(self, x: np.ndarray, e_flat: np.ndarray) -> np.ndarray:
+        """Apply hypernetwork-generated weights to input.
+
+        Args:
+            x: Input vector (d_vsa,).
+            e_flat: Embedding that parameterizes the weight matrix (d_vsa,).
+
+        Returns:
+            Output vector (d_out,).
+        """
+        W = self.generate_weights(e_flat)  # (d_out, d_vsa)
+        return W @ x  # (d_out,)
