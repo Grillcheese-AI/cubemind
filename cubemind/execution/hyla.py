@@ -20,13 +20,11 @@ from cubemind.core import EPS, K_BLOCKS, L_BLOCK, hyperfan_init
 
 
 def gelu(x: np.ndarray) -> np.ndarray:
-    """Gaussian Error Linear Unit (exact form).
+    """Gaussian Error Linear Unit (tanh approximation — no scipy dependency).
 
-    GELU(x) = x * 0.5 * (1 + erf(x / sqrt(2)))
+    GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
     """
-    from scipy.special import erf
-
-    return x * 0.5 * (1.0 + erf(x / np.sqrt(2.0)))
+    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
 
 
 # -- HYLA ----------------------------------------------------------------------
