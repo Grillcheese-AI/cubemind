@@ -18,6 +18,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# GPU bridge
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
 
 # -- Episode dataclass ---------------------------------------------------------
 
@@ -96,9 +105,28 @@ class HippocampalMemory:
         Returns:
             Sparse DG code (dg_dim,).
         """
-        # Random projection + ReLU
-        projected = self._dg_proj @ embedding  # (dg_dim,)
-        projected = np.maximum(projected, 0.0)  # ReLU
+        # Random projection + ReLU (GPU when available)
+        if _bridge is not None:
+            try:
+                projected = _bridge.linear(embedding.reshape(1, -1), self._dg_proj, None)
+                if projected is not None:
+                    projected = np.asarray(projected, dtype=np.float32).ravel()
+                    relu_result = _bridge.relu(projected)
+                    if relu_result is not None:
+                        projected = np.asarray(relu_result, dtype=np.float32).ravel()
+                    else:
+                        projected = np.maximum(projected, 0.0)
+                    # k-WTA below handles the rest
+                    projected = projected  # skip numpy fallback
+                else:
+                    projected = self._dg_proj @ embedding
+                    projected = np.maximum(projected, 0.0)
+            except Exception:
+                projected = self._dg_proj @ embedding
+                projected = np.maximum(projected, 0.0)
+        else:
+            projected = self._dg_proj @ embedding
+            projected = np.maximum(projected, 0.0)
 
         # k-winners-take-all: keep only top-k% activations
         k = max(1, int(self.dg_dim * self.dg_sparsity))

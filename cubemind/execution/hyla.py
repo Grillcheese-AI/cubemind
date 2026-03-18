@@ -15,16 +15,30 @@ import numpy as np
 
 from cubemind.core import EPS, K_BLOCKS, L_BLOCK, hyperfan_init
 
+# -- GPU bridge (grilly GPU ops) -----------------------------------------------
+
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
 
 # -- Activation ----------------------------------------------------------------
 
 
 def gelu(x: np.ndarray) -> np.ndarray:
-    """Gaussian Error Linear Unit (tanh approximation — no scipy dependency).
-
-    GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
-    """
-    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
+    """GELU — GPU-accelerated when grilly bridge is available."""
+    if _bridge is not None:
+        try:
+            result = _bridge.gelu(x)
+            if result is not None:
+                return np.asarray(result, dtype=np.float32) if not isinstance(result, np.ndarray) else result
+        except Exception:
+            pass
+    return (0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))).astype(np.float32)
 
 
 # -- HYLA ----------------------------------------------------------------------
@@ -146,12 +160,22 @@ class HYLA:
         """
         e_norm = self.mip_normalize(e_flat)
 
-        # Hidden layer: h = GELU(e @ W_h^T + b_h)
-        h = gelu(e_norm @ self.W_h.T + self.b_h)  # (d_hidden,)
+        # Hidden layer: h = GELU(Linear(e_norm))
+        if _bridge is not None:
+            try:
+                h = _bridge.linear(e_norm.reshape(1, -1), self.W_h, self.b_h)
+                if h is not None:
+                    h = np.asarray(h, dtype=np.float32).ravel()
+                    h = gelu(h)  # GPU GELU
+                    W_flat = _bridge.linear(h.reshape(1, -1), self.W_H, None)
+                    if W_flat is not None:
+                        return np.asarray(W_flat, dtype=np.float32).reshape(self.d_out, self.d_vsa)
+            except Exception:
+                pass
 
-        # Output layer: W_flat = h @ W_H^T
-        W_flat = h @ self.W_H.T  # (d_out * d_vsa,)
-
+        # CPU fallback
+        h = gelu(e_norm @ self.W_h.T + self.b_h)
+        W_flat = h @ self.W_H.T
         return W_flat.reshape(self.d_out, self.d_vsa).astype(np.float32)
 
     # -- Forward pass ----------------------------------------------------------
@@ -167,4 +191,12 @@ class HYLA:
             Output vector (d_out,).
         """
         W = self.generate_weights(e_flat)  # (d_out, d_vsa)
-        return W @ x  # (d_out,)
+        # GPU matmul for the final output
+        if _bridge is not None:
+            try:
+                result = _bridge.linear(x.reshape(1, -1), W, None)
+                if result is not None:
+                    return np.asarray(result, dtype=np.float32).ravel()
+            except Exception:
+                pass
+        return (W @ x).astype(np.float32)

@@ -15,6 +15,15 @@ from __future__ import annotations
 
 import numpy as np
 
+# GPU bridge
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
 
 # -- Helpers -------------------------------------------------------------------
 
@@ -173,11 +182,18 @@ class ContrastiveValueEstimator:
             L2-normalized embedding (d_latent,)
         """
         x = np.concatenate([state, action]).astype(np.float32)
+        if _bridge is not None:
+            try:
+                h = _bridge.linear(x.reshape(1, -1), self.W_phi, self.b_phi)
+                if h is not None:
+                    h = np.asarray(h, dtype=np.float32).ravel()
+                    norm = np.linalg.norm(h)
+                    return h / norm if norm > 0 else h
+            except Exception:
+                pass
         h = self.W_phi @ x + self.b_phi
         norm = np.linalg.norm(h)
-        if norm > 0:
-            h = h / norm
-        return h
+        return h / norm if norm > 0 else h
 
     def encode_future_state(self, state: np.ndarray) -> np.ndarray:
         """Encode a future state through the psi encoder.
