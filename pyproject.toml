@@ -1,0 +1,22 @@
+[project]
+name = "cubemind"
+version = "2.0.0"
+description = "Neuro-vector-symbolic architecture for compositional reasoning on consumer hardware"
+requires-python = ">=3.10"
+dependencies = [
+    "grilly>=0.5.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
