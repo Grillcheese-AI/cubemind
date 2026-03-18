@@ -54,9 +54,11 @@ class CubeMindRouter:
         self._name_to_idx = {name: i for i, name in enumerate(topic_names)}
 
         # DSelect-k gate for sparse expert selection
+        # Cap k at num_experts to prevent ValueError
+        gate_k = min(top_k, len(topic_names))
         self.gate = DSelectKGate(
             num_experts=len(topic_names),
-            k=top_k,
+            k=gate_k,
         )
 
     @property

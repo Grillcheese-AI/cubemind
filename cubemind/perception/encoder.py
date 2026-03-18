@@ -65,6 +65,8 @@ class Encoder:
         Returns:
             Block-code array of shape (N, k, l).
         """
+        if not texts:
+            return np.empty((0, self.k, self.l), dtype=np.float32)
         if self._batch_encoder:
             try:
                 vecs = self._batch_encoder.encode_sentences(texts)
@@ -106,7 +108,9 @@ class Encoder:
             Discrete block-code (k, l).
         """
         words = text.lower().split()
-        result = self.bc.random_discrete(seed=0)  # base vector
+        if not words:
+            return self.bc.random_discrete(seed=0)
+        result = np.zeros((self.k, self.l), dtype=np.float32)
         for i, word in enumerate(words):
             h = int(hashlib.sha256(word.encode()).hexdigest(), 16)
             word_vec = self.bc.random_discrete(seed=h % (2**31))

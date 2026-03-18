@@ -76,8 +76,12 @@ class HDCPacked:
                     return float(result[0])
             except Exception:
                 pass
-        xor = np.bitwise_xor(a, b)
-        hamming = sum(bin(w).count("1") for w in xor)
+        xor = np.bitwise_xor(a, b).astype(np.uint64)
+        # Vectorized popcount via parallel bit counting (no Python string ops)
+        xor = xor - ((xor >> 1) & np.uint64(0x5555555555555555))
+        xor = (xor & np.uint64(0x3333333333333333)) + ((xor >> 2) & np.uint64(0x3333333333333333))
+        xor = (xor + (xor >> 4)) & np.uint64(0x0F0F0F0F0F0F0F0F)
+        hamming = int(((xor * np.uint64(0x0101010101010101)) >> 56).sum())
         return 1.0 - hamming / self.dim
 
     def permute(self, a: np.ndarray, shift: int = 1) -> np.ndarray:
@@ -130,7 +134,16 @@ class HDCPacked:
         """
         if not vectors:
             raise ValueError("Cannot bundle an empty list of vectors")
-        # Unpack all to bits, take majority vote
+        # Try GPU bridge first
+        if self._bridge:
+            try:
+                stacked = np.stack(vectors)
+                result = self._bridge.hdc_bundle_packed(stacked, self.words)
+                if result is not None:
+                    return result
+            except Exception:
+                pass
+        # CPU fallback: unpack to bits, majority vote
         n = len(vectors)
         bit_sum = np.zeros(self.dim, dtype=np.int32)
         for v in vectors:
