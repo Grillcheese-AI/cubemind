@@ -22,5 +22,11 @@ include = ["cubemind*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.uv]
+# Exclude onnx: transitive dep from grilly not used by cubemind.
+# onnx <= 1.20.1 has CVE-2026-28500 (supply-chain attack via onnx.hub.load silent=True)
+# and no patched version exists yet. Safe to exclude since cubemind never imports onnx.
+exclude-dependencies = ["onnx"]
+
 [tool.ruff]
 line-length = 100
