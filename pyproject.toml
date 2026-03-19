@@ -6,7 +6,7 @@ license = {text = "BSL-1.1"}
 requires-python = ">=3.12"
 dependencies = [
     "datasets>=4.8.2",
-    "grilly>=0.5.0",
+    "grilly>=0.5.3",
     "numpy>=1.24",
     "pillow>=12.1.1",
 ]
@@ -29,6 +29,9 @@ testpaths = ["tests"]
 # onnx <= 1.20.1 has CVE-2026-28500 (supply-chain attack via onnx.hub.load silent=True)
 # and no patched version exists yet. Safe to exclude since cubemind never imports onnx.
 exclude-dependencies = ["onnx"]
+
+[tool.uv.sources]
+grilly = { path = "../grilly", editable = true }
 
 [tool.ruff]
 line-length = 100
