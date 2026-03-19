@@ -316,23 +316,231 @@ def encode_panel_metadata(
     return bc.discretize(bc.bundle(entity_codes))
 
 
+# ── Multi-View Observation Sequences ──────────────────────────────────────────
+#
+# Ported from the proven eval_iraven_learned.py approach. Three views capture
+# different structural patterns in the panel sequence:
+#   absolute:   raw panel vectors (captures direct patterns)
+#   delta:      unbind(p_{t+1}, p_t) (captures transformations)
+#   row_bundle: bundle per row (captures cross-row structure)
+
+
+def make_views(
+    panel_vecs: list[np.ndarray],
+    bc: BlockCodes,
+) -> dict[str, list[np.ndarray]]:
+    """Create three observation views from panel vectors.
+
+    Args:
+        panel_vecs: List of block-code panel vectors (8 context or 9 with answer).
+        bc: BlockCodes instance for bind/unbind/bundle ops.
+
+    Returns:
+        Dict mapping view name to list of observation vectors.
+    """
+    views = {}
+
+    # Absolute: raw sequence
+    views["absolute"] = list(panel_vecs)
+
+    # Delta: consecutive differences via unbinding
+    deltas = []
+    for t in range(len(panel_vecs) - 1):
+        deltas.append(bc.unbind(panel_vecs[t + 1], panel_vecs[t]))
+    views["delta"] = deltas if deltas else list(panel_vecs)
+
+    # Row bundle: group into rows of 3
+    row_bundles = []
+    if len(panel_vecs) >= 3:
+        row_bundles.append(bc.bundle([panel_vecs[0], panel_vecs[1], panel_vecs[2]]))
+    if len(panel_vecs) >= 6:
+        row_bundles.append(bc.bundle([panel_vecs[3], panel_vecs[4], panel_vecs[5]]))
+    remaining = list(panel_vecs[6:])
+    if remaining:
+        row_bundles.append(
+            bc.bundle(remaining) if len(remaining) >= 2 else remaining[0]
+        )
+    views["row_bundle"] = row_bundles if row_bundles else list(panel_vecs)
+
+    return views
+
+
+def train_multiview_hmms(
+    train_problems: list[dict],
+    bc: BlockCodes,
+    use_metadata: bool = True,
+    n_states: int = 16,
+    em_epochs: int = 20,
+    batch_size: int = 30,
+    temperature: float = 40.0,
+    seed: int = 42,
+) -> dict:
+    """Train one HMM per view using Baum-Welch EM on training problems.
+
+    Args:
+        train_problems: List of RAVEN problem dicts (with panels, choices, target).
+        bc: BlockCodes instance.
+        use_metadata: Use XML metadata encoding.
+        n_states: Number of HMM codebook states.
+        em_epochs: Number of Baum-Welch EM epochs.
+        batch_size: Batch size for EM updates.
+        temperature: Emission softmax temperature.
+        seed: Random seed.
+
+    Returns:
+        Dict mapping view name to trained HMMRule.
+    """
+    from cubemind.reasoning.hmm_rule import HMMRule
+
+    # Build codebook for HMM states
+    codebook = bc.codebook_discrete(n_states, seed=seed)
+
+    # Encode all training problems and build multi-view sequences
+    view_sequences: dict[str, list[list[np.ndarray]]] = {
+        "absolute": [], "delta": [], "row_bundle": [],
+    }
+
+    for prob in train_problems:
+        # Encode context panels
+        if use_metadata and prob.get("metadata"):
+            ctx_vecs = [
+                encode_panel_metadata(prob["metadata"], i, bc)
+                for i in range(len(prob["panels"]))
+            ]
+        else:
+            ctx_vecs = [encode_panel_image(p, bc) for p in prob["panels"]]
+
+        # Append correct answer to make a 9-panel training sequence
+        target_idx = prob.get("target")
+        if target_idx is not None:
+            answer_vec = encode_panel_image(prob["choices"][target_idx], bc)
+            full_seq = ctx_vecs + [answer_vec]
+        else:
+            full_seq = ctx_vecs
+
+        views = make_views(full_seq, bc)
+        for vname in view_sequences:
+            view_sequences[vname].append(views[vname])
+
+    # Train one HMM per view
+    view_seeds = {"absolute": seed + 100, "delta": seed + 200, "row_bundle": seed + 300}
+    hmms = {}
+
+    for vname in ["absolute", "delta", "row_bundle"]:
+        seqs = view_sequences[vname]
+        hmm = HMMRule(codebook, temperature=temperature, seed=view_seeds[vname])
+
+        if not seqs:
+            hmms[vname] = hmm
+            continue
+
+        n_seqs = len(seqs)
+        for epoch in range(em_epochs):
+            indices = list(range(n_seqs))
+            np.random.default_rng(seed + epoch).shuffle(indices)
+
+            epoch_ll = 0.0
+            n_batches = 0
+            for start in range(0, n_seqs, batch_size):
+                batch_idx = indices[start : start + batch_size]
+                batch = [seqs[i] for i in batch_idx]
+                batch = [s for s in batch if len(s) >= 2]
+                if not batch:
+                    continue
+                ll = hmm.train_step_em(batch)
+                epoch_ll += ll
+                n_batches += 1
+
+            avg_ll = epoch_ll / max(n_batches, 1)
+            if (epoch + 1) % 5 == 0 or epoch == 0:
+                print(
+                    f"    {vname:>12} epoch {epoch+1:2d}/{em_epochs}: avg_ll={avg_ll:.4f}",
+                    flush=True,
+                )
+
+        hmms[vname] = hmm
+
+    return hmms
+
+
+def predict_multiview(
+    ctx_vecs: list[np.ndarray],
+    cand_vecs: list[np.ndarray],
+    hmms: dict,
+    bc: BlockCodes,
+) -> int:
+    """Predict the best answer using multi-view HMM routing.
+
+    For each view:
+      1. Run HMM forward on context to get detection confidence (normalized LL)
+      2. Predict next panel vector via posterior-weighted transition
+      3. Score all candidates against prediction via similarity
+
+    Route via the view with highest confidence.
+
+    Args:
+        ctx_vecs: List of 8 context panel block-codes.
+        cand_vecs: List of 8 candidate answer block-codes.
+        hmms: Dict mapping view name to trained HMMRule.
+        bc: BlockCodes instance.
+
+    Returns:
+        Predicted answer index (0-7).
+    """
+    from cubemind.reasoning.hmm_rule import _logsumexp
+
+    best_view_score = -np.inf
+    best_candidate_idx = 0
+
+    for view_name, hmm in hmms.items():
+        views = make_views(ctx_vecs, bc)
+        obs_seq = views[view_name]
+
+        if len(obs_seq) < 2:
+            continue
+
+        # Detection confidence: length-normalized log-likelihood
+        try:
+            log_ll, log_alpha = hmm.forward(obs_seq)
+            norm_ll = log_ll / len(obs_seq)
+        except Exception:
+            norm_ll = -np.inf
+
+        # Predict next panel vector
+        try:
+            predicted = hmm.predict(obs_seq)
+        except Exception:
+            continue
+
+        # Score candidates via similarity
+        predicted_disc = bc.discretize(predicted)
+        cand_scores = np.array([
+            bc.similarity(predicted_disc, cv) for cv in cand_vecs
+        ])
+
+        if norm_ll > best_view_score:
+            best_view_score = norm_ll
+            best_candidate_idx = int(np.argmax(cand_scores))
+
+    return best_candidate_idx
+
+
 # ── Evaluation ────────────────────────────────────────────────────────────────
 
 
 def evaluate_problem_dataset(
-    model,
     problem: dict,
+    hmms: dict,
     bc: BlockCodes,
     use_metadata: bool = True,
 ) -> tuple[bool, int, float]:
-    """Evaluate CubeMind on a single RAVEN problem from the dataset.
+    """Evaluate on a single RAVEN problem using multi-view HMM routing.
 
     Args:
-        model: CubeMind instance.
         problem: Dict with panels, choices, target, metadata.
+        hmms: Dict mapping view name to trained HMMRule.
         bc: BlockCodes instance.
         use_metadata: If True, encode from XML metadata (NVSA-style).
-            If False, encode from panel images directly.
 
     Returns:
         (correct, predicted_idx, latency_ms)
@@ -351,43 +559,18 @@ def evaluate_problem_dataset(
             for panel in problem["panels"]
         ]
 
-    # Predict the missing panel using HMM ensemble
-    prediction, hmm_weights = model.hmm.predict(context_codes)
+    # Encode answer choices
+    choice_codes = [encode_panel_image(choice, bc) for choice in problem["choices"]]
 
-    # Encode each answer choice
-    n_choices = len(problem["choices"])
-    if use_metadata and problem.get("metadata"):
-        # For choices, encode from metadata at panel indices 8..15
-        # (or use image encoding as fallback since metadata may not cover choices)
-        choice_codes = [
-            encode_panel_image(choice, bc)
-            for choice in problem["choices"]
-        ]
-    else:
-        choice_codes = [
-            encode_panel_image(choice, bc)
-            for choice in problem["choices"]
-        ]
-
-    # Find the choice most similar to the prediction
-    prediction_disc = bc.discretize(prediction)
-    best_idx = -1
-    best_sim = -1.0
-    for i, choice_code in enumerate(choice_codes):
-        sim = bc.similarity(prediction_disc, choice_code)
-        if sim > best_sim:
-            best_sim = sim
-            best_idx = i
+    # Multi-view prediction
+    pred_idx = predict_multiview(context_codes, choice_codes, hmms, bc)
 
     latency = (time.perf_counter() - t0) * 1000
 
     target = problem.get("target")
-    if target is not None:
-        correct = best_idx == target
-    else:
-        correct = False  # Cannot evaluate without target
+    correct = pred_idx == target if target is not None else False
 
-    return correct, best_idx, latency
+    return correct, pred_idx, latency
 
 
 # ── Synthetic Fallback (original code, preserved for offline testing) ─────────
@@ -575,43 +758,42 @@ def run_iraven_benchmark(
                 for i in range(n)
             ]
 
-        # ── Optional training ─────────────────────────────────────────────
+        # ── Multi-view EM training ────────────────────────────────────────
+        hmms = None
         if train_first and not is_synthetic:
             try:
                 train_data = load_raven_split(config, train_split, cache_dir)
                 train_data = train_data[:train_problems]
                 logger.info(
-                    "Training on %d %s problems for %d epochs",
+                    "Training multi-view HMMs on %d %s problems (%d EM epochs)",
                     len(train_data), config, train_epochs,
                 )
-                for epoch in range(train_epochs):
-                    for prob in train_data:
-                        # Encode context and target
-                        if use_metadata and prob.get("metadata"):
-                            ctx = [
-                                encode_panel_metadata(prob["metadata"], i, bc)
-                                for i in range(len(prob["panels"]))
-                            ]
-                        else:
-                            ctx = [
-                                encode_panel_image(p, bc) for p in prob["panels"]
-                            ]
-                        target_idx = prob.get("target")
-                        if target_idx is not None:
-                            target_code = encode_panel_image(
-                                prob["choices"][target_idx], bc
-                            )
-                            model.train_step(ctx, target_code, lr=train_lr)
+                hmms = train_multiview_hmms(
+                    train_data, bc,
+                    use_metadata=use_metadata,
+                    n_states=model.codebook.shape[0],
+                    em_epochs=train_epochs,
+                    temperature=40.0,
+                    seed=seed,
+                )
             except Exception as e:
                 logger.warning("Training failed for %s: %s", config, e)
 
         elif train_first and is_synthetic:
-            # Train on synthetic data
-            for epoch in range(train_epochs):
-                for i in range(min(20, len(problems))):
-                    prob = problems[i]
-                    target_code = prob["choices"][prob["target"]]
-                    model.train_step(prob["panels"], target_code, lr=train_lr)
+            # Train on synthetic data using multi-view EM
+            hmms = train_multiview_hmms(
+                problems[:min(50, len(problems))], bc,
+                use_metadata=False,
+                n_states=model.codebook.shape[0],
+                em_epochs=train_epochs,
+                temperature=40.0,
+                seed=seed,
+            )
+
+        # Fall back to model's HMM ensemble if multi-view training failed
+        if hmms is None:
+            from cubemind.reasoning.hmm_rule import HMMRule
+            hmms = {"absolute": model.hmm.rules[0]}
 
         # ── Evaluate ──────────────────────────────────────────────────────
         config_correct = 0
@@ -625,7 +807,7 @@ def run_iraven_benchmark(
                 )
             else:
                 correct, pred_idx, latency = evaluate_problem_dataset(
-                    model, prob, bc, use_metadata=use_metadata
+                    prob, hmms, bc, use_metadata=use_metadata
                 )
 
             config_correct += int(correct)
