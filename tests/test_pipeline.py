@@ -3,19 +3,19 @@
 import numpy as np
 import pytest
 
-from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.model import CubeMind
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.routing.router import CubeMindRouter
 
-K, L = K_BLOCKS, L_BLOCK
+# Small dims for tests — full K_BLOCKS/L_BLOCK uses 1GB+ per HYLA instance
+K, L = 4, 32
 
 
 class TestCubeMindPipeline:
 
     @pytest.fixture(autouse=True)
     def setup(self):
-        self.model = CubeMind(k=K, l=L, n_codebook=8, d_hidden=64, cache_size=100)
+        self.model = CubeMind(k=K, l=L, n_codebook=8, d_hidden=16, cache_size=100)
 
     def test_forward_without_router(self):
         """Forward pass works without a router (no routing stage)."""

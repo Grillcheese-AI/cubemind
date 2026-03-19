@@ -254,12 +254,32 @@ class HMMRule:
 
         return log_beta
 
-    # -- Training (finite difference) ------------------------------------------
+    # -- Training ----------------------------------------------------------------
+
+    def _nll_loss(self, observations: list[np.ndarray], target: np.ndarray) -> float:
+        """Negative log-likelihood of the target under predicted next-state distribution.
+
+        Much stronger gradient signal than MSE on reconstructed vectors:
+        -log(P(target_state | observations)) has gradient -1/p, which is large
+        when the model assigns low probability to the correct answer.
+        """
+        _, log_alpha = self.forward(observations)
+        log_alpha_T = log_alpha[-1]
+        log_norm = _logsumexp(log_alpha_T)
+        posterior = np.exp(log_alpha_T - log_norm)
+        next_dist = posterior @ self.A  # predicted next-state distribution
+
+        # Find which codebook entry best matches the target
+        sims = self._bc.similarity_batch(target, self.codebook.astype(np.float32))
+        target_idx = int(np.argmax(sims))
+
+        # NLL: -log P(correct entry)
+        p_target = float(np.clip(next_dist[target_idx], 1e-12, 1.0))
+        return -np.log(p_target)
 
     def _loss(self, observations: list[np.ndarray], target: np.ndarray) -> float:
-        """MSE loss between prediction and target."""
-        pred = self.predict(observations)
-        return float(np.mean((pred.astype(np.float64) - target.astype(np.float64)) ** 2))
+        """Loss for gradient computation — uses NLL for strong gradient signal."""
+        return self._nll_loss(observations, target)
 
     def train_step(
         self,
@@ -267,11 +287,16 @@ class HMMRule:
         target: np.ndarray,
         lr: float = 0.01,
     ) -> float:
-        """One gradient step via finite differences on _log_A and _log_pi.
+        """One supervised gradient step via central finite differences on NLL.
+
+        Uses negative log-likelihood of the target under the predicted
+        next-state distribution. Gradient signal is -1/p (large when wrong).
+
+        For unsupervised pre-training, use train_step_em() separately.
 
         Returns the loss *before* the update.
         """
-        eps = 1e-4
+        eps = 1e-2  # larger eps for near-uniform transitions
         base_loss = self._loss(observations, target)
 
         # Gradient for _log_A
@@ -280,16 +305,20 @@ class HMMRule:
             for j in range(self.n_states):
                 self._log_A[i, j] += eps
                 loss_plus = self._loss(observations, target)
-                self._log_A[i, j] -= eps
-                grad_A[i, j] = (loss_plus - base_loss) / eps
+                self._log_A[i, j] -= 2 * eps
+                loss_minus = self._loss(observations, target)
+                self._log_A[i, j] += eps  # restore
+                grad_A[i, j] = (loss_plus - loss_minus) / (2 * eps)
 
         # Gradient for _log_pi
         grad_pi = np.zeros_like(self._log_pi)
         for i in range(self.n_states):
             self._log_pi[i] += eps
             loss_plus = self._loss(observations, target)
-            self._log_pi[i] -= eps
-            grad_pi[i] = (loss_plus - base_loss) / eps
+            self._log_pi[i] -= 2 * eps
+            loss_minus = self._loss(observations, target)
+            self._log_pi[i] += eps  # restore
+            grad_pi[i] = (loss_plus - loss_minus) / (2 * eps)
 
         # Update
         self._log_A -= lr * grad_A
@@ -489,3 +518,210 @@ class HMMEnsemble:
                 rule._log_A += lr * diversity_weight * grad_div
 
         return losses
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Multi-View HMM — separate HMMs for absolute, delta, row_bundle views
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class MultiViewHMM:
+    """Multi-view HMM with per-view specialization and routing.
+
+    Trains three separate HMMs on different observation views:
+      - absolute: raw panel vectors (captures direct patterns)
+      - delta: unbind(p_{t+1}, p_t) (captures transformations between panels)
+      - row_bundle: bundle per row (captures row-level structure)
+
+    Prediction routes to the view with highest normalized log-likelihood
+    (detection confidence), then returns that view's predicted next panel.
+
+    Args:
+        codebook: Block-code codebook (n_states, k, l).
+        bc: BlockCodes instance for bind/unbind/bundle ops.
+        temperature: Emission softmax temperature.
+        seed: Random seed.
+    """
+
+    VIEW_NAMES = ["absolute", "delta", "row_bundle"]
+
+    def __init__(
+        self,
+        codebook: np.ndarray,
+        bc,
+        temperature: float = 40.0,
+        seed: int = 42,
+    ) -> None:
+        self._bc = bc
+        self.hmms = {
+            "absolute": HMMRule(codebook, temperature=temperature, seed=seed + 100),
+            "delta": HMMRule(codebook, temperature=temperature, seed=seed + 200),
+            "row_bundle": HMMRule(codebook, temperature=temperature, seed=seed + 300),
+        }
+
+    # -- View construction -----------------------------------------------------
+
+    def make_views(self, panel_vecs: list[np.ndarray]) -> dict[str, list[np.ndarray]]:
+        """Create three observation views from panel vectors.
+
+        Args:
+            panel_vecs: Block-code vectors for panels (8 context or 9 with answer).
+
+        Returns:
+            Dict mapping view name to list of observation vectors.
+        """
+        bc = self._bc
+        views = {}
+
+        views["absolute"] = list(panel_vecs)
+
+        deltas = []
+        for t in range(len(panel_vecs) - 1):
+            deltas.append(bc.unbind(panel_vecs[t + 1], panel_vecs[t]))
+        views["delta"] = deltas if deltas else list(panel_vecs)
+
+        row_bundles = []
+        if len(panel_vecs) >= 3:
+            row_bundles.append(bc.bundle([panel_vecs[0], panel_vecs[1], panel_vecs[2]]))
+        if len(panel_vecs) >= 6:
+            row_bundles.append(bc.bundle([panel_vecs[3], panel_vecs[4], panel_vecs[5]]))
+        remaining = list(panel_vecs[6:])
+        if remaining:
+            row_bundles.append(
+                bc.bundle(remaining) if len(remaining) >= 2 else remaining[0]
+            )
+        views["row_bundle"] = row_bundles if row_bundles else list(panel_vecs)
+
+        return views
+
+    # -- Training (Baum-Welch EM) ----------------------------------------------
+
+    def train_em(
+        self,
+        sequences: list[list[np.ndarray]],
+        em_epochs: int = 20,
+        batch_size: int = 30,
+        seed: int = 42,
+        verbose: bool = False,
+    ) -> dict[str, float]:
+        """Train all view HMMs via Baum-Welch EM.
+
+        Each sequence should include the correct answer appended (9 panels).
+
+        Args:
+            sequences: List of full panel sequences (each 9 vectors).
+            em_epochs: Number of EM epochs per view.
+            batch_size: Batch size for EM updates.
+            seed: Random seed for shuffling.
+            verbose: Print per-epoch log-likelihood.
+
+        Returns:
+            Dict mapping view name to final average log-likelihood.
+        """
+        # Build per-view observation sequences
+        view_seqs: dict[str, list[list[np.ndarray]]] = {v: [] for v in self.VIEW_NAMES}
+        for seq in sequences:
+            views = self.make_views(seq)
+            for vname in view_seqs:
+                view_seqs[vname].append(views[vname])
+
+        final_lls = {}
+        for vname in self.VIEW_NAMES:
+            seqs = view_seqs[vname]
+            hmm = self.hmms[vname]
+            n_seqs = len(seqs)
+            avg_ll = 0.0
+
+            for epoch in range(em_epochs):
+                indices = list(range(n_seqs))
+                np.random.default_rng(seed + epoch).shuffle(indices)
+
+                epoch_ll = 0.0
+                n_batches = 0
+                for start in range(0, n_seqs, batch_size):
+                    batch_idx = indices[start : start + batch_size]
+                    batch = [seqs[i] for i in batch_idx if len(seqs[i]) >= 2]
+                    if not batch:
+                        continue
+                    ll = hmm.train_step_em(batch)
+                    epoch_ll += ll
+                    n_batches += 1
+
+                avg_ll = epoch_ll / max(n_batches, 1)
+                if verbose and ((epoch + 1) % 5 == 0 or epoch == 0):
+                    print(f"    {vname:>12} epoch {epoch+1:2d}/{em_epochs}: "
+                          f"avg_ll={avg_ll:.4f}", flush=True)
+
+            final_lls[vname] = avg_ll
+
+        return final_lls
+
+    # -- Prediction (multi-view routing) ---------------------------------------
+
+    def predict(
+        self,
+        context_vecs: list[np.ndarray],
+    ) -> tuple[np.ndarray, str, float]:
+        """Predict the next panel via multi-view routing.
+
+        Selects the view with highest normalized log-likelihood (detection
+        confidence), then returns that view's predicted next vector.
+
+        Args:
+            context_vecs: List of 8 context panel block-codes.
+
+        Returns:
+            Tuple of (predicted_vector, best_view_name, best_confidence).
+        """
+        views = self.make_views(context_vecs)
+        best_view = "absolute"
+        best_score = -np.inf
+        best_prediction = None
+
+        for vname, hmm in self.hmms.items():
+            obs_seq = views[vname]
+            if len(obs_seq) < 2:
+                continue
+
+            try:
+                log_ll, _ = hmm.forward(obs_seq)
+                norm_ll = log_ll / len(obs_seq)
+            except Exception:
+                norm_ll = -np.inf
+
+            try:
+                predicted = hmm.predict(obs_seq)
+            except Exception:
+                continue
+
+            if norm_ll > best_score:
+                best_score = norm_ll
+                best_view = vname
+                best_prediction = predicted
+
+        if best_prediction is None:
+            best_prediction = self.hmms["absolute"].predict(views["absolute"])
+
+        return best_prediction, best_view, float(best_score)
+
+    def score_candidates(
+        self,
+        context_vecs: list[np.ndarray],
+        candidate_vecs: list[np.ndarray],
+    ) -> int:
+        """Score candidate answers and return the best index.
+
+        Args:
+            context_vecs: List of 8 context panel block-codes.
+            candidate_vecs: List of 8 candidate answer block-codes.
+
+        Returns:
+            Index of the best-matching candidate (0-7).
+        """
+        prediction, _, _ = self.predict(context_vecs)
+        prediction_disc = self._bc.discretize(prediction)
+
+        scores = np.array([
+            self._bc.similarity(prediction_disc, cv) for cv in candidate_vecs
+        ])
+        return int(np.argmax(scores))

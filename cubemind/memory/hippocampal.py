@@ -27,6 +27,12 @@ try:
 except Exception:
     pass
 
+_VulkanTensor = None
+try:
+    from grilly.utils.tensor_conversion import VulkanTensor as _VulkanTensor
+except Exception:
+    pass
+
 
 # -- Episode dataclass ---------------------------------------------------------
 
@@ -85,6 +91,10 @@ class HippocampalMemory:
         self._dg_proj = rng.normal(0, std, size=(self.dg_dim, d_model)).astype(
             np.float32
         )
+
+        # Wrap DG projection in VulkanTensor for linear_t fast path
+        if _VulkanTensor is not None:
+            self._dg_proj = _VulkanTensor(self._dg_proj)
 
         # Episode storage
         self._episodes: list[Episode] = []

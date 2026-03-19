@@ -24,6 +24,12 @@ try:
 except Exception:
     pass
 
+_VulkanTensor = None
+try:
+    from grilly.utils.tensor_conversion import VulkanTensor as _VulkanTensor
+except Exception:
+    pass
+
 
 # -- Helpers -------------------------------------------------------------------
 
@@ -161,6 +167,11 @@ class ContrastiveValueEstimator:
             np.float32
         )
         self.b_psi = np.zeros(d_latent, dtype=np.float32)
+
+        # Wrap weight matrices in VulkanTensor for linear_t fast path
+        if _VulkanTensor is not None:
+            self.W_phi = _VulkanTensor(self.W_phi)
+            self.W_psi = _VulkanTensor(self.W_psi)
 
         # RFF parameters
         self.W_rff = rng.standard_normal(size=(d_rff, d_latent)).astype(np.float32)

@@ -251,7 +251,7 @@ class CubeMind:
         Returns:
             Total log-likelihood across all sequences.
         """
-        total_ll = self.hmm.rules[0].baum_welch_step(sequences, smoothing)
+        total_ll = self.hmm.rules[0].train_step_em(sequences, smoothing)
         metrics.record("training.em_log_likelihood", total_ll)
         return total_ll
 
