@@ -216,11 +216,15 @@ def _stable_seed(name: str) -> int:
 
 
 def _build_role_vectors(bc: BlockCodes) -> dict[str, np.ndarray]:
-    """Build deterministic role vectors for each attribute slot."""
-    return {
+    """Build deterministic role vectors for attribute slots AND spatial positions."""
+    roles = {
         attr: bc.random_discrete(seed=_stable_seed(f"role_{attr}"))
         for attr in ATTRS
     }
+    # Spatial position roles for grid configs (up to 9 for 3x3)
+    for i in range(9):
+        roles[f"pos_{i}"] = bc.random_discrete(seed=_stable_seed(f"role_pos_{i}"))
+    return roles
 
 
 def _build_attr_codebooks(bc: BlockCodes) -> dict[str, np.ndarray]:
@@ -273,7 +277,13 @@ def encode_entity_nvsa(entity_attrs: dict, bc: BlockCodes) -> np.ndarray:
 
 
 def encode_panel_nvsa(entities: list[dict], bc: BlockCodes) -> np.ndarray:
-    """Encode a full panel: role-filler encode each entity, then bundle.
+    """Encode a full panel: role-filler encode each entity, bind to position, then bundle.
+
+    Each entity is bound to a spatial position role before bundling.
+    This preserves which object is where in the grid — critical for
+    distribute configs where spatial arrangement follows rules.
+
+    Panel = (Obj0 x Pos0) + (Obj1 x Pos1) + ... + (ObjN x PosN)
 
     Args:
         entities: List of entity dicts, each with Type/Size/Color/Angle.
@@ -285,10 +295,18 @@ def encode_panel_nvsa(entities: list[dict], bc: BlockCodes) -> np.ndarray:
     if not entities:
         return bc.random_discrete(seed=0)
 
-    entity_vecs = [encode_entity_nvsa(e, bc) for e in entities]
-    if len(entity_vecs) == 1:
-        return bc.discretize(entity_vecs[0])
-    return bc.discretize(bc.bundle(entity_vecs))
+    roles, _ = _get_encoding_tables(bc)
+
+    positioned = []
+    for i, e in enumerate(entities):
+        ent_vec = encode_entity_nvsa(e, bc)
+        # Bind entity to its spatial position
+        pos_role = roles.get(f"pos_{i}", roles["pos_0"])
+        positioned.append(bc.bind(pos_role, ent_vec))
+
+    if len(positioned) == 1:
+        return bc.discretize(positioned[0])
+    return bc.discretize(bc.bundle(positioned))
 
 
 def parse_panel_entities(metadata_xml: str, panel_index: int) -> list[dict]:
