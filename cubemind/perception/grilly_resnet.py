@@ -118,7 +118,11 @@ class ResNet18:
         for block in self.layer4:
             x = block.forward(x)
 
-        # Global average pool
+        # Global average pool (matches pretrained ImageNet weights)
+        # NOTE: Isohanni 2025 showed max pool is better for subtle features
+        # (99.7% vs 96.9%) but requires full backbone fine-tuning.
+        # Use avg pool with frozen pretrained weights, switch to max pool
+        # when fine-tuning the full backbone.
         x = x.mean(axis=(2, 3))  # (N, 512)
 
         if self.fc is not None:
