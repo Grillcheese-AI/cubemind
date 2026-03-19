@@ -637,7 +637,6 @@ def evaluate_problem_dataset(
         (correct, predicted_idx, latency_ms)
     """
     from cubemind.reasoning.rule_detectors import score_candidates as detector_score
-    from collections import Counter
 
     t0 = time.perf_counter()
 
@@ -660,6 +659,12 @@ def evaluate_problem_dataset(
         target = problem.get("target")
         return pred_idx == target if target is not None else False, pred_idx, latency
 
+    # Grid configs have multiple entities per panel — use Sinkhorn alignment
+    is_grid = config in (
+        "distribute_four", "distribute_nine",
+        "in_distribute_four_out_center_single",
+    )
+
     # Multi-component scoring: accumulate detector scores across all components
     # n_choices = 8 for all RAVEN configs (even when images aren't loaded)
     n_choices = len(problem["choices"]) if problem["choices"] else 8
@@ -667,9 +672,26 @@ def evaluate_problem_dataset(
     attrs_to_check = ["Type", "Size", "Color", "Number"]
 
     for comp in components:
-        comp_scores = detector_score(
-            comp["context"], comp["candidates"], attrs=attrs_to_check
-        )
+        # ── Grid configs: use position-aware scoring ────────────────
+        if is_grid and use_metadata and problem.get("metadata"):
+            # Primary: aggregated detector scoring
+            comp_scores = detector_score(
+                comp["context"], comp["candidates"], attrs=attrs_to_check
+            )
+
+            # Position tiebreaker: extract bbox-based position fingerprints
+            # and use position distribution rules to disambiguate tied candidates
+            pos_scores = _score_position_rules(
+                problem["metadata"], config, n_choices,
+            )
+            for i in range(n_choices):
+                comp_scores[i] += pos_scores[i]
+
+        else:
+            # ── Standard aggregated path for single/compound configs ─
+            comp_scores = detector_score(
+                comp["context"], comp["candidates"], attrs=attrs_to_check
+            )
 
         # VSA set-completion scoring for distribution rules.
         # When integer detectors tie, this breaks ties using bundled
@@ -866,6 +888,215 @@ def parse_problem_components(
                               "context_entities": context_entities,
                               "candidate_entities": candidate_entities})
         return components
+
+
+# ── Position-Aware Scoring (Grid Configs) ────────────────────────────────────
+
+
+def _extract_position_signature(metadata_xml: str, panel_index: int) -> tuple:
+    """Extract a position signature from entity bboxes in a panel.
+
+    Returns a sorted tuple of discretized bbox centers, which uniquely
+    identifies the spatial layout of entities in the panel.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(metadata_xml)
+    except ET.ParseError:
+        return ()
+
+    panels = root.findall(".//Panel")
+    if panel_index >= len(panels):
+        return ()
+
+    entities = panels[panel_index].findall(".//Entity")
+    if not entities:
+        return ()
+
+    positions = []
+    for e in entities:
+        bbox_str = e.get("bbox", "")
+        if bbox_str:
+            try:
+                bbox = eval(bbox_str) if isinstance(bbox_str, str) else bbox_str
+                # Discretize to grid positions (round to nearest 0.25)
+                cx = round(bbox[0] * 4) / 4
+                cy = round(bbox[1] * 4) / 4
+                positions.append((cx, cy))
+            except Exception:
+                pass
+
+    return tuple(sorted(positions))
+
+
+def _score_position_rules(
+    metadata_xml: str,
+    config: str,
+    n_choices: int,
+) -> list[float]:
+    """Score candidates by position pattern consistency across rows.
+
+    Extracts position signatures from all panels and checks if the
+    candidate's position layout is consistent with the row/column
+    patterns established by the context panels.
+
+    Args:
+        metadata_xml: XML metadata string.
+        config: RAVEN configuration name.
+        n_choices: Number of candidates (typically 8).
+
+    Returns:
+        List of position-based scores per candidate.
+    """
+    scores = [0.0] * n_choices
+
+    # Extract position signatures for context panels
+    ctx_sigs = [_extract_position_signature(metadata_xml, i) for i in range(8)]
+    cand_sigs = [_extract_position_signature(metadata_xml, 8 + i) for i in range(n_choices)]
+
+    # Row-wise position pattern: panels [0,1,2], [3,4,5], [6,7,?]
+    # Check if position signatures follow a row-wise rule
+
+    # Pattern: constant position within rows
+    r0_const = ctx_sigs[0] == ctx_sigs[1] == ctx_sigs[2]
+    r1_const = ctx_sigs[3] == ctx_sigs[4] == ctx_sigs[5]
+
+    if r0_const and r1_const:
+        # Row-constant: candidate should match row2 known panels
+        expected = ctx_sigs[6]
+        for i in range(n_choices):
+            if cand_sigs[i] == expected:
+                scores[i] += 3.0
+
+    # Pattern: column-wise position consistency
+    # Column 2 panels: [2, 5, ?]
+    if ctx_sigs[2] == ctx_sigs[5]:
+        for i in range(n_choices):
+            if cand_sigs[i] == ctx_sigs[2]:
+                scores[i] += 2.0
+
+    # Pattern: distribute-three on positions
+    # Each row contains a permutation of the same set of position signatures
+    r0_set = set(ctx_sigs[0:3])
+    r1_set = set(ctx_sigs[3:6])
+    if r0_set == r1_set and len(r0_set) >= 2:
+        r2_known = set(ctx_sigs[6:8])
+        missing = r0_set - r2_known
+        if len(missing) == 1:
+            expected_sig = missing.pop()
+            for i in range(n_choices):
+                if cand_sigs[i] == expected_sig:
+                    scores[i] += 4.0
+
+    # Pattern: position count consistency (entity count = position count)
+    r0_counts = [len(s) for s in ctx_sigs[0:3]]
+    r1_counts = [len(s) for s in ctx_sigs[3:6]]
+    r2_counts = [len(s) for s in ctx_sigs[6:8]]
+
+    # Apply same number-detection logic to position counts
+    # Constant: all same count per row
+    if len(set(r0_counts)) == 1 and len(set(r1_counts)) == 1:
+        if r2_counts and len(set(r2_counts)) == 1:
+            expected_count = r2_counts[0]
+            for i in range(n_choices):
+                if len(cand_sigs[i]) == expected_count:
+                    scores[i] += 1.5
+
+    return scores
+
+
+# ── Entity Set Consistency Scoring (Grid Configs) ────────────────────────────
+
+
+def _entity_attr_multiset(entities: list[dict], attr: str) -> tuple:
+    """Extract sorted multiset of an attribute from entities."""
+    return tuple(sorted(e.get(attr, -1) for e in entities))
+
+
+def _score_entity_set_consistency(
+    context_entities: list[list[dict]],
+    candidate_entities: list[list[dict]],
+    attrs: tuple = ("Type", "Size", "Color"),
+) -> list[float]:
+    """Score candidates by entity attribute set consistency across rows.
+
+    In distribute configs, each row's entity attribute multisets follow
+    rules (constant set, progression of counts, etc.). This scores
+    candidates by how well they complete the row 2 pattern relative
+    to rows 0 and 1.
+
+    Args:
+        context_entities: 8 panels, each a list of entity dicts.
+        candidate_entities: 8 candidates, each a list of entity dicts.
+        attrs: Attributes to compare.
+
+    Returns:
+        List of 8 scores (higher = better).
+    """
+    n = len(candidate_entities)
+    scores = [0.0] * n
+
+    # Row panels: row0 = [0,1,2], row1 = [3,4,5], row2 = [6,7,?]
+    for attr in attrs:
+        # Build per-row multisets
+        row0 = [_entity_attr_multiset(context_entities[i], attr) for i in range(3)]
+        row1 = [_entity_attr_multiset(context_entities[i], attr) for i in range(3, 6)]
+        row2_known = [_entity_attr_multiset(context_entities[i], attr) for i in range(6, 8)]
+
+        # Check if rows 0 and 1 share a pattern
+        # Pattern 1: same multiset across all panels in a row (constant)
+        r0_const = len(set(row0)) == 1
+        r1_const = len(set(row1)) == 1
+
+        if r0_const and r1_const:
+            # Constant rule: each row has identical entity sets
+            # Row 2's candidate should match row2_known pattern
+            expected = row2_known[0] if row2_known else row0[0]
+            for i in range(n):
+                cand_set = _entity_attr_multiset(candidate_entities[i], attr)
+                if cand_set == expected:
+                    scores[i] += 2.0
+
+        # Pattern 2: same multiset across ALL rows (distribute)
+        all_sets = set(row0 + row1)
+        if len(all_sets) == 1:
+            expected = row0[0]
+            for i in range(n):
+                cand_set = _entity_attr_multiset(candidate_entities[i], attr)
+                if cand_set == expected:
+                    scores[i] += 3.0
+
+        # Pattern 3: column-wise consistency
+        for col in range(3):
+            col_sets = []
+            if col < 3:
+                col_sets.append(_entity_attr_multiset(context_entities[col], attr))
+            if col + 3 < 6:
+                col_sets.append(_entity_attr_multiset(context_entities[col + 3], attr))
+            if len(col_sets) == 2 and col_sets[0] == col_sets[1] and col == 2:
+                # Column 2 is constant — candidate should match
+                for i in range(n):
+                    cand_set = _entity_attr_multiset(candidate_entities[i], attr)
+                    if cand_set == col_sets[0]:
+                        scores[i] += 1.5
+
+    # Entity count consistency
+    row0_counts = [len(context_entities[i]) for i in range(3)]
+    row1_counts = [len(context_entities[i]) for i in range(3, 6)]
+    row2_known_counts = [len(context_entities[i]) for i in range(6, 8)]
+
+    # Check count pattern across rows
+    for i in range(n):
+        cand_count = len(candidate_entities[i])
+        # If count follows same pattern as rows 0 and 1
+        if (row0_counts[2] == row1_counts[2]
+                and len(row2_known_counts) >= 1
+                and row2_known_counts[0] == row0_counts[0]):
+            if cand_count == row0_counts[2]:
+                scores[i] += 2.0
+
+    return scores
 
 
 # ── VSA Set-Completion Scoring (Distribution Rules) ──────────────────────────
