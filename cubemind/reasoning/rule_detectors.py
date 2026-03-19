@@ -88,7 +88,7 @@ def detect_arithmetic(grid) -> int | None:
         if numerator % cc != 0:
             continue
         val = numerator // cc
-        if 0 <= val <= 9:
+        if val >= 0:  # no upper bound — supports OOD attribute ranges
             return val
     return None
 
