@@ -652,6 +652,27 @@ def evaluate_problem_dataset(
         comp_scores = detector_score(
             comp["context"], comp["candidates"], attrs=attrs_to_check
         )
+
+        # VSA set-completion scoring for distribution rules.
+        # When integer detectors tie, this breaks ties using bundled
+        # row signatures — the candidate that makes Row 2 match the
+        # Master Set (average of Row 0 + Row 1 signatures) wins.
+        if use_metadata and problem.get("metadata"):
+            try:
+                ctx_codes = [
+                    encode_panel_from_metadata(problem["metadata"], i, bc)
+                    for i in range(8)
+                ]
+                cand_codes = [
+                    encode_panel_from_metadata(problem["metadata"], 8 + i, bc)
+                    for i in range(n_choices)
+                ]
+                dist_scores = _score_distribution_rule(ctx_codes, cand_codes, bc)
+                # Add as small tiebreaker (0.5x weight)
+                for i in range(n_choices):
+                    comp_scores[i] += dist_scores[i] * 0.5
+            except Exception:
+                pass
         for i in range(n_choices):
             combined_scores[i] += comp_scores[i]
 
@@ -826,6 +847,61 @@ def parse_problem_components(
                               "context_entities": context_entities,
                               "candidate_entities": candidate_entities})
         return components
+
+
+# ── VSA Set-Completion Scoring (Distribution Rules) ──────────────────────────
+
+
+def _score_distribution_rule(
+    context_vecs: list[np.ndarray],
+    cand_vecs: list[np.ndarray],
+    bc: BlockCodes,
+) -> list[float]:
+    """Score candidates by VSA set distribution (bundling).
+
+    For distribution rules, each row is a permutation of the same attribute set.
+    The bundled signature of a complete row should match a "master set" derived
+    from the known rows. The candidate that makes Row 2 most similar to the
+    master set is the best answer.
+
+    Also checks column-wise distribution for additional signal.
+
+    Args:
+        context_vecs: 8 block-code vectors for context panels.
+        cand_vecs: 8 block-code vectors for candidates.
+        bc: BlockCodes instance.
+
+    Returns:
+        List of 8 similarity scores (higher = better set completion).
+    """
+    # Row signatures
+    row0_sig = bc.bundle([context_vecs[0], context_vecs[1], context_vecs[2]])
+    row1_sig = bc.bundle([context_vecs[3], context_vecs[4], context_vecs[5]])
+    master_row = bc.bundle([row0_sig, row1_sig])
+
+    # Column signatures
+    col0_sig = bc.bundle([context_vecs[0], context_vecs[3], context_vecs[6]])
+    col1_sig = bc.bundle([context_vecs[1], context_vecs[4], context_vecs[7]])
+    master_col = bc.bundle([col0_sig, col1_sig])
+
+    scores = []
+    for cand in cand_vecs:
+        # Row completion: Row 2 + candidate should match master row
+        row2_sig = bc.bundle([context_vecs[6], context_vecs[7], cand])
+        row_sim = float(bc.similarity(
+            bc.discretize(master_row), bc.discretize(row2_sig)
+        ))
+
+        # Column completion: Col 2 + candidate should match master col
+        col2_sig = bc.bundle([context_vecs[2], context_vecs[5], cand])
+        col_sim = float(bc.similarity(
+            bc.discretize(master_col), bc.discretize(col2_sig)
+        ))
+
+        # Take the max of row and column signals
+        scores.append(max(row_sim, col_sim))
+
+    return scores
 
 
 # ── Synthetic Fallback (original code, preserved for offline testing) ─────────
