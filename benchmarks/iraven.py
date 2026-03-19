@@ -1,20 +1,52 @@
-"""iRaven benchmark for CubeMind.
+"""I-RAVEN benchmark for CubeMind.
 
-Evaluates CubeMind on the I-RAVEN visual reasoning dataset.
-Target: 97.5% accuracy on Center Single configuration.
+Evaluates CubeMind on the RAVEN visual reasoning dataset (Raven's Progressive
+Matrices). Uses HuggingFaceM4/RAVEN from Hugging Face, which provides 7
+configurations with 2000 test problems each.
 
-The benchmark generates block-code representations of Raven's
-Progressive Matrices problems and evaluates CubeMind's ability
-to identify the correct answer panel.
+Dataset: https://huggingface.co/datasets/HuggingFaceM4/RAVEN
+Paper:   https://arxiv.org/abs/1903.02741
+
+Each problem has 8 context panels (a 3x3 grid with the bottom-right missing)
+and 8 answer choices. The model must pick the correct answer. Visual attributes
+(shape, size, color, angle) follow relational rules (Progression, Arithmetic,
+Constant, Distribute Three) that the model must detect.
+
+CubeMind approach:
+  1. Encode each panel image as a block-code vector via the perception encoder
+  2. Feed context panel block-codes through the HMM ensemble to predict the
+     missing panel's block-code
+  3. Compare prediction to each choice's block-code via similarity
+  4. Select the choice with highest similarity
+
+Configurations map to CubeMind paper naming:
+  - center_single                              -> Center
+  - distribute_four                            -> 2x2 Grid
+  - distribute_nine                            -> 3x3 Grid
+  - left_center_single_right_center_single     -> Left-Right (L-R)
+  - up_center_single_down_center_single        -> Up-Down (U-D)
+  - in_center_single_out_center_single         -> Out-In (O-IC)
+  - in_distribute_four_out_center_single       -> In-Out (O-IG)
 
 Usage:
     from benchmarks.iraven import run_iraven_benchmark
     results = run_iraven_benchmark(model)
+
+    # Or run a specific configuration
+    results = run_iraven_benchmark(model, configs=["center_single"])
+
+    # CLI
+    python -m benchmarks.iraven
+    python -m benchmarks.iraven --configs center_single distribute_four
+    python -m benchmarks.iraven --max-problems 100 --no-train
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -22,21 +54,356 @@ from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.telemetry import metrics
 
+logger = logging.getLogger(__name__)
 
-def generate_iraven_problem(
+# ── Dataset Configuration ─────────────────────────────────────────────────────
+
+DATASET_ID = "HuggingFaceM4/RAVEN"
+
+# All 7 RAVEN configurations
+ALL_CONFIGS = [
+    "center_single",
+    "distribute_four",
+    "distribute_nine",
+    "left_center_single_right_center_single",
+    "up_center_single_down_center_single",
+    "in_center_single_out_center_single",
+    "in_distribute_four_out_center_single",
+]
+
+# Mapping from HF config names to short display names (paper-style)
+CONFIG_DISPLAY_NAMES = {
+    "center_single": "Center",
+    "distribute_four": "2x2 Grid",
+    "distribute_nine": "3x3 Grid",
+    "left_center_single_right_center_single": "L-R",
+    "up_center_single_down_center_single": "U-D",
+    "in_center_single_out_center_single": "O-IC",
+    "in_distribute_four_out_center_single": "O-IG",
+}
+
+
+# ── Dataset Loading ───────────────────────────────────────────────────────────
+
+
+def _check_datasets_available() -> bool:
+    """Check if the HuggingFace datasets library is installed."""
+    try:
+        import datasets  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def _check_pillow_available() -> bool:
+    """Check if Pillow is installed for image processing."""
+    try:
+        from PIL import Image  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def load_raven_split(
+    config: str = "center_single",
+    split: str = "test",
+    cache_dir: str | Path | None = None,
+) -> list[dict]:
+    """Load a split of the RAVEN dataset from Hugging Face.
+
+    Each returned dict has:
+        - panels: list of 8 PIL images (context panels)
+        - choices: list of 8 PIL images (answer choices)
+        - target: int (correct answer index, 0-7)
+        - metadata: str (XML with rules and attributes)
+
+    Args:
+        config: Dataset configuration name (e.g. "center_single").
+        split: Dataset split ("train", "validation", or "test").
+        cache_dir: Optional cache directory for downloaded data.
+
+    Returns:
+        List of problem dicts.
+
+    Raises:
+        ImportError: If datasets or Pillow are not installed.
+        ValueError: If config is not a valid RAVEN configuration.
+    """
+    if not _check_datasets_available():
+        raise ImportError(
+            "The 'datasets' library is required for the RAVEN benchmark. "
+            "Install it with: pip install datasets"
+        )
+    if not _check_pillow_available():
+        raise ImportError(
+            "Pillow is required for the RAVEN benchmark. "
+            "Install it with: pip install Pillow"
+        )
+
+    if config not in ALL_CONFIGS:
+        raise ValueError(
+            f"Unknown RAVEN config '{config}'. "
+            f"Valid configs: {', '.join(ALL_CONFIGS)}"
+        )
+
+    import datasets
+
+    logger.info("Loading RAVEN dataset: config=%s, split=%s", config, split)
+
+    kwargs = {}
+    if cache_dir is not None:
+        kwargs["cache_dir"] = str(cache_dir)
+
+    ds = datasets.load_dataset(DATASET_ID, name=config, split=split, **kwargs)
+
+    problems = []
+    for row in ds:
+        problems.append({
+            "panels": row["panels"],
+            "choices": row["choices"],
+            "target": row.get("target", None),
+            "metadata": row.get("metadata", ""),
+        })
+
+    logger.info("Loaded %d problems from %s/%s", len(problems), config, split)
+    return problems
+
+
+# ── Panel Encoding ────────────────────────────────────────────────────────────
+
+
+def encode_panel_image(
+    image,
+    bc: BlockCodes,
+    target_size: tuple[int, int] = (80, 80),
+) -> np.ndarray:
+    """Encode a single panel image to a block-code vector.
+
+    Converts the image to grayscale, resizes, flattens to a feature vector,
+    and projects to a discrete block-code via block-wise argmax.
+
+    For a real production system this would use a learned CNN or ViT encoder.
+    This version uses a deterministic projection that captures enough spatial
+    structure for the HMM to detect relational rules.
+
+    Args:
+        image: PIL Image of a RAVEN panel.
+        bc: BlockCodes instance.
+        target_size: Resize target (height, width).
+
+    Returns:
+        Discrete block-code vector of shape (k, l).
+    """
+    from PIL import Image
+
+    if not isinstance(image, Image.Image):
+        image = Image.open(image)
+
+    # Convert to grayscale and resize
+    img = image.convert("L").resize(target_size, Image.Resampling.BILINEAR)
+    pixels = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
+
+    # Flatten and project to d_vsa dimensions
+    flat = pixels.ravel()
+    d_vsa = bc.k * bc.l
+
+    if flat.size >= d_vsa:
+        # Subsample or truncate to d_vsa
+        indices = np.linspace(0, flat.size - 1, d_vsa, dtype=int)
+        projected = flat[indices]
+    else:
+        # Tile to fill d_vsa dimensions
+        repeats = (d_vsa // flat.size) + 1
+        projected = np.tile(flat, repeats)[:d_vsa]
+
+    # Reshape to (k, l) blocks and discretize (argmax per block)
+    block_vec = projected.reshape(bc.k, bc.l)
+    return bc.discretize(block_vec)
+
+
+def encode_panel_metadata(
+    metadata_xml: str,
+    panel_index: int,
+    bc: BlockCodes,
+) -> np.ndarray:
+    """Encode a panel's attributes from XML metadata to a block-code.
+
+    Extracts shape type, size, color, and angle from the metadata XML
+    and encodes each attribute as a block-code, then bundles them.
+
+    This approach is closer to how NVSA (Hersche et al. 2023) works --
+    encoding symbolic attributes rather than raw pixels.
+
+    Args:
+        metadata_xml: XML metadata string from the RAVEN dataset.
+        panel_index: Index of the panel (0-7 for context, 0-7 for choices).
+        bc: BlockCodes instance.
+
+    Returns:
+        Discrete block-code vector of shape (k, l).
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(metadata_xml)
+    except ET.ParseError:
+        # Fallback to random if metadata is malformed
+        return bc.random_discrete(seed=panel_index)
+
+    # Extract attributes from the panel's entities.
+    # RAVEN metadata structure:
+    #   <Data><Panels>
+    #     <Panel><Struct name="Singleton"><Component><Layout>
+    #       <Entity Angle="7" Color="5" Size="3" Type="triangle"/>
+    #     </Layout></Component></Struct></Panel>
+    #     ...
+    #   </Panels></Data>
+    # We use .//Panel to find all Panel elements, then .//Entity to find
+    # all Entity elements at any depth within that panel.
+    panels = root.findall(".//Panel")
+    if panel_index >= len(panels):
+        return bc.random_discrete(seed=panel_index)
+
+    panel = panels[panel_index]
+    entities = panel.findall(".//Entity")
+
+    if not entities:
+        return bc.random_discrete(seed=panel_index)
+
+    # Encode each entity's attributes as block-codes and bundle them
+    entity_codes = []
+    for ent_idx, entity in enumerate(entities):
+        attr_codes = []
+
+        # Type attribute -> block-code
+        etype = entity.get("Type", "0")
+        type_seed = hash(f"type_{etype}") % (2**31)
+        type_bc = bc.random_discrete(seed=type_seed)
+        role_type = bc.random_discrete(seed=hash("role_type") % (2**31))
+        attr_codes.append(bc.bind(type_bc, role_type))
+
+        # Size attribute -> block-code
+        esize = entity.get("Size", "0")
+        size_seed = hash(f"size_{esize}") % (2**31)
+        size_bc = bc.random_discrete(seed=size_seed)
+        role_size = bc.random_discrete(seed=hash("role_size") % (2**31))
+        attr_codes.append(bc.bind(size_bc, role_size))
+
+        # Color attribute -> block-code
+        ecolor = entity.get("Color", "0")
+        color_seed = hash(f"color_{ecolor}") % (2**31)
+        color_bc = bc.random_discrete(seed=color_seed)
+        role_color = bc.random_discrete(seed=hash("role_color") % (2**31))
+        attr_codes.append(bc.bind(color_bc, role_color))
+
+        # Angle attribute -> block-code
+        eangle = entity.get("Angle", "0")
+        angle_seed = hash(f"angle_{eangle}") % (2**31)
+        angle_bc = bc.random_discrete(seed=angle_seed)
+        role_angle = bc.random_discrete(seed=hash("role_angle") % (2**31))
+        attr_codes.append(bc.bind(angle_bc, role_angle))
+
+        # Bundle attributes for this entity
+        entity_code = bc.bundle(attr_codes)
+
+        # Bind with entity position role
+        ent_role = bc.random_discrete(seed=hash(f"entity_{ent_idx}") % (2**31))
+        entity_codes.append(bc.bind(entity_code, ent_role))
+
+    # Bundle all entities into a single panel representation
+    return bc.discretize(bc.bundle(entity_codes))
+
+
+# ── Evaluation ────────────────────────────────────────────────────────────────
+
+
+def evaluate_problem_dataset(
+    model,
+    problem: dict,
+    bc: BlockCodes,
+    use_metadata: bool = True,
+) -> tuple[bool, int, float]:
+    """Evaluate CubeMind on a single RAVEN problem from the dataset.
+
+    Args:
+        model: CubeMind instance.
+        problem: Dict with panels, choices, target, metadata.
+        bc: BlockCodes instance.
+        use_metadata: If True, encode from XML metadata (NVSA-style).
+            If False, encode from panel images directly.
+
+    Returns:
+        (correct, predicted_idx, latency_ms)
+    """
+    t0 = time.perf_counter()
+
+    # Encode context panels (8 panels)
+    if use_metadata and problem.get("metadata"):
+        context_codes = [
+            encode_panel_metadata(problem["metadata"], i, bc)
+            for i in range(len(problem["panels"]))
+        ]
+    else:
+        context_codes = [
+            encode_panel_image(panel, bc)
+            for panel in problem["panels"]
+        ]
+
+    # Predict the missing panel using HMM ensemble
+    prediction, hmm_weights = model.hmm.predict(context_codes)
+
+    # Encode each answer choice
+    n_choices = len(problem["choices"])
+    if use_metadata and problem.get("metadata"):
+        # For choices, encode from metadata at panel indices 8..15
+        # (or use image encoding as fallback since metadata may not cover choices)
+        choice_codes = [
+            encode_panel_image(choice, bc)
+            for choice in problem["choices"]
+        ]
+    else:
+        choice_codes = [
+            encode_panel_image(choice, bc)
+            for choice in problem["choices"]
+        ]
+
+    # Find the choice most similar to the prediction
+    prediction_disc = bc.discretize(prediction)
+    best_idx = -1
+    best_sim = -1.0
+    for i, choice_code in enumerate(choice_codes):
+        sim = bc.similarity(prediction_disc, choice_code)
+        if sim > best_sim:
+            best_sim = sim
+            best_idx = i
+
+    latency = (time.perf_counter() - t0) * 1000
+
+    target = problem.get("target")
+    if target is not None:
+        correct = best_idx == target
+    else:
+        correct = False  # Cannot evaluate without target
+
+    return correct, best_idx, latency
+
+
+# ── Synthetic Fallback (original code, preserved for offline testing) ─────────
+
+
+def generate_synthetic_problem(
     bc: BlockCodes,
     n_context: int = 8,
     n_choices: int = 8,
     seed: int = 0,
 ) -> dict:
-    """Generate a synthetic iRaven-style problem as block codes.
+    """Generate a synthetic RAVEN-style problem as block codes.
 
-    A real iRaven problem has a 3x3 grid of panels with visual attributes
-    (shape, size, color, position) that follow rules. The answer panel
-    completes the pattern.
-
-    This synthetic version creates block-code sequences with learnable
-    patterns that CubeMind's HMM can detect.
+    Used as a fallback when the real dataset is not available. Creates
+    block-code sequences with learnable patterns that CubeMind's HMM
+    can detect.
 
     Args:
         bc: BlockCodes instance.
@@ -45,8 +412,8 @@ def generate_iraven_problem(
         seed: Random seed.
 
     Returns:
-        Dict with: context (list of block-codes), choices (list),
-        correct_idx (int), rule_type (str).
+        Dict with: panels (list of block-codes), choices (list),
+        target (int), rule_type (str).
     """
     rng = np.random.default_rng(seed)
 
@@ -54,48 +421,47 @@ def generate_iraven_problem(
     rule = bc.random_discrete(seed=int(rng.integers(0, 2**31)))
 
     # Context panels follow the rule: each panel = bind(prev, rule)
-    context = []
+    panels = []
     current = bc.random_discrete(seed=int(rng.integers(0, 2**31)))
     for _ in range(n_context):
-        context.append(current)
+        panels.append(current)
         current = bc.bind(current, rule)
 
     # Correct answer is the next in sequence
     correct = current
 
     # Generate distractors
-    correct_idx = int(rng.integers(0, n_choices))
+    target = int(rng.integers(0, n_choices))
     choices = []
     for i in range(n_choices):
-        if i == correct_idx:
+        if i == target:
             choices.append(correct)
         else:
             choices.append(bc.random_discrete(seed=int(rng.integers(0, 2**31))))
 
     return {
-        "context": context,
+        "panels": panels,
         "choices": choices,
-        "correct_idx": correct_idx,
+        "target": target,
         "rule_type": "sequential_bind",
+        "metadata": None,
     }
 
 
-def evaluate_problem(model, problem: dict) -> tuple[bool, float]:
-    """Evaluate CubeMind on a single iRaven problem.
+def evaluate_synthetic_problem(model, problem: dict) -> tuple[bool, int, float]:
+    """Evaluate CubeMind on a synthetic problem (block-code inputs).
 
     Args:
         model: CubeMind instance.
-        problem: Dict from generate_iraven_problem.
+        problem: Dict from generate_synthetic_problem.
 
     Returns:
-        (correct: bool, latency_ms: float)
+        (correct, predicted_idx, latency_ms)
     """
     t0 = time.perf_counter()
 
-    # Use HMM to predict the next panel from context
-    prediction, weights = model.hmm.predict(problem["context"])
+    prediction, weights = model.hmm.predict(problem["panels"])
 
-    # Find the closest choice to the prediction
     bc = BlockCodes(K_BLOCKS, L_BLOCK)
     best_idx = -1
     best_sim = -1.0
@@ -106,75 +472,360 @@ def evaluate_problem(model, problem: dict) -> tuple[bool, float]:
             best_idx = i
 
     latency = (time.perf_counter() - t0) * 1000
-    correct = best_idx == problem["correct_idx"]
+    correct = best_idx == problem["target"]
 
-    return correct, latency
+    return correct, best_idx, latency
+
+
+# ── Main Benchmark Runner ─────────────────────────────────────────────────────
 
 
 def run_iraven_benchmark(
     model,
-    n_problems: int = 200,
-    n_context: int = 8,
-    n_choices: int = 8,
-    seed: int = 42,
+    configs: list[str] | None = None,
+    split: str = "test",
+    max_problems: int | None = None,
     train_first: bool = True,
-    train_epochs: int = 5,
+    train_split: str = "train",
+    train_epochs: int = 3,
+    train_problems: int = 50,
     train_lr: float = 0.05,
+    use_metadata: bool = True,
+    use_synthetic_fallback: bool = True,
+    cache_dir: str | Path | None = None,
+    seed: int = 42,
 ) -> dict:
-    """Run the full iRaven benchmark.
+    """Run the full I-RAVEN benchmark on the real dataset.
+
+    Downloads and evaluates CubeMind on the HuggingFaceM4/RAVEN dataset
+    across all (or selected) configurations. Falls back to synthetic
+    problems if the dataset library is not available.
 
     Args:
         model: CubeMind instance.
-        n_problems: Number of problems to evaluate.
-        n_context: Context panels per problem.
-        n_choices: Answer choices per problem.
-        seed: Random seed.
-        train_first: Whether to train the HMM on a few examples first.
-        train_epochs: Training epochs if train_first.
+        configs: List of configuration names to evaluate. None = all 7.
+        split: Evaluation split ("test" or "validation").
+        max_problems: Maximum problems per configuration (None = all).
+        train_first: Whether to train the HMM on training data first.
+        train_split: Split to use for training ("train").
+        train_epochs: Number of training epochs.
+        train_problems: Number of training problems per config.
         train_lr: Training learning rate.
+        use_metadata: Use XML metadata encoding (NVSA-style) vs raw images.
+        use_synthetic_fallback: Fall back to synthetic data if dataset
+            loading fails.
+        cache_dir: Cache directory for dataset downloads.
+        seed: Random seed.
 
     Returns:
-        Dict with: accuracy, latency_ms, n_problems, correct_count,
-        per_problem (list of dicts).
+        Dict with:
+            overall_accuracy: float
+            overall_latency_ms: float
+            per_config: dict mapping config name to per-config results
+            n_total: int
+            n_correct: int
+            dataset_source: str ("HuggingFaceM4/RAVEN" or "synthetic")
+            wall_clock_s: float
     """
+    if configs is None:
+        configs = list(ALL_CONFIGS)
+
     bc = BlockCodes(K_BLOCKS, L_BLOCK)
+    dataset_available = _check_datasets_available() and _check_pillow_available()
 
-    # Optional: train HMM on a few examples to learn the rule structure
-    if train_first:
-        for epoch in range(train_epochs):
-            for i in range(min(20, n_problems)):
-                prob = generate_iraven_problem(bc, n_context, n_choices, seed=seed + i)
-                target = prob["choices"][prob["correct_idx"]]
-                model.train_step(prob["context"], target, lr=train_lr)
-
-    # Evaluate
-    correct_count = 0
+    benchmark_start = time.perf_counter()
+    per_config = {}
+    total_correct = 0
+    total_problems = 0
     total_latency = 0.0
-    per_problem = []
+    dataset_source = "synthetic"
 
-    for i in range(n_problems):
-        prob = generate_iraven_problem(bc, n_context, n_choices, seed=seed + 10000 + i)
-        correct, latency = evaluate_problem(model, prob)
+    for config in configs:
+        display_name = CONFIG_DISPLAY_NAMES.get(config, config)
+        logger.info("Evaluating config: %s (%s)", config, display_name)
 
-        correct_count += int(correct)
-        total_latency += latency
-        per_problem.append({
-            "idx": i,
-            "correct": correct,
-            "latency_ms": latency,
-            "rule_type": prob["rule_type"],
-        })
+        # ── Load dataset ──────────────────────────────────────────────────
+        problems = None
+        is_synthetic = True
 
-    accuracy = correct_count / n_problems
-    avg_latency = total_latency / n_problems
+        if dataset_available:
+            try:
+                problems = load_raven_split(config, split, cache_dir)
+                if max_problems is not None:
+                    problems = problems[:max_problems]
+                is_synthetic = False
+                dataset_source = DATASET_ID
+            except Exception as e:
+                logger.warning(
+                    "Failed to load RAVEN/%s: %s. Falling back to synthetic.",
+                    config, e,
+                )
 
-    metrics.record("benchmark.iraven_accuracy", accuracy)
-    metrics.record("benchmark.iraven_latency_ms", avg_latency)
+        if problems is None:
+            if not use_synthetic_fallback:
+                logger.error(
+                    "Dataset not available and synthetic fallback disabled. "
+                    "Install 'datasets' and 'Pillow': "
+                    "pip install datasets Pillow"
+                )
+                continue
+            n = max_problems if max_problems else 200
+            problems = [
+                generate_synthetic_problem(bc, seed=seed + i)
+                for i in range(n)
+            ]
+
+        # ── Optional training ─────────────────────────────────────────────
+        if train_first and not is_synthetic:
+            try:
+                train_data = load_raven_split(config, train_split, cache_dir)
+                train_data = train_data[:train_problems]
+                logger.info(
+                    "Training on %d %s problems for %d epochs",
+                    len(train_data), config, train_epochs,
+                )
+                for epoch in range(train_epochs):
+                    for prob in train_data:
+                        # Encode context and target
+                        if use_metadata and prob.get("metadata"):
+                            ctx = [
+                                encode_panel_metadata(prob["metadata"], i, bc)
+                                for i in range(len(prob["panels"]))
+                            ]
+                        else:
+                            ctx = [
+                                encode_panel_image(p, bc) for p in prob["panels"]
+                            ]
+                        target_idx = prob.get("target")
+                        if target_idx is not None:
+                            target_code = encode_panel_image(
+                                prob["choices"][target_idx], bc
+                            )
+                            model.train_step(ctx, target_code, lr=train_lr)
+            except Exception as e:
+                logger.warning("Training failed for %s: %s", config, e)
+
+        elif train_first and is_synthetic:
+            # Train on synthetic data
+            for epoch in range(train_epochs):
+                for i in range(min(20, len(problems))):
+                    prob = problems[i]
+                    target_code = prob["choices"][prob["target"]]
+                    model.train_step(prob["panels"], target_code, lr=train_lr)
+
+        # ── Evaluate ──────────────────────────────────────────────────────
+        config_correct = 0
+        config_latency = 0.0
+        config_results = []
+
+        for idx, prob in enumerate(problems):
+            if is_synthetic:
+                correct, pred_idx, latency = evaluate_synthetic_problem(
+                    model, prob
+                )
+            else:
+                correct, pred_idx, latency = evaluate_problem_dataset(
+                    model, prob, bc, use_metadata=use_metadata
+                )
+
+            config_correct += int(correct)
+            config_latency += latency
+            config_results.append({
+                "idx": idx,
+                "correct": correct,
+                "predicted": pred_idx,
+                "target": prob.get("target"),
+                "latency_ms": latency,
+            })
+
+        n_eval = len(problems)
+        config_accuracy = config_correct / max(n_eval, 1)
+        config_avg_latency = config_latency / max(n_eval, 1)
+
+        per_config[config] = {
+            "display_name": display_name,
+            "accuracy": config_accuracy,
+            "correct_count": config_correct,
+            "n_problems": n_eval,
+            "avg_latency_ms": config_avg_latency,
+            "is_synthetic": is_synthetic,
+            "per_problem": config_results,
+        }
+
+        total_correct += config_correct
+        total_problems += n_eval
+        total_latency += config_latency
+
+        metrics.record(f"benchmark.iraven.{config}.accuracy", config_accuracy)
+        metrics.record(
+            f"benchmark.iraven.{config}.latency_ms", config_avg_latency
+        )
+
+        logger.info(
+            "  %s: %.1f%% (%d/%d) avg=%.1fms",
+            display_name,
+            config_accuracy * 100,
+            config_correct,
+            n_eval,
+            config_avg_latency,
+        )
+
+    # ── Aggregate ─────────────────────────────────────────────────────────
+    overall_accuracy = total_correct / max(total_problems, 1)
+    overall_avg_latency = total_latency / max(total_problems, 1)
+    wall_clock = time.perf_counter() - benchmark_start
+
+    metrics.record("benchmark.iraven.overall_accuracy", overall_accuracy)
+    metrics.record("benchmark.iraven.overall_latency_ms", overall_avg_latency)
 
     return {
-        "accuracy": accuracy,
-        "latency_ms": avg_latency,
-        "n_problems": n_problems,
-        "correct_count": correct_count,
-        "per_problem": per_problem,
+        "overall_accuracy": overall_accuracy,
+        "overall_latency_ms": overall_avg_latency,
+        "per_config": per_config,
+        "n_total": total_problems,
+        "n_correct": total_correct,
+        "dataset_source": dataset_source,
+        "wall_clock_s": wall_clock,
+        "configs_evaluated": configs,
     }
+
+
+# ── Pretty Printing ───────────────────────────────────────────────────────────
+
+
+def print_results(results: dict) -> None:
+    """Print benchmark results in a readable table format."""
+    print()
+    print("=" * 72)
+    print("  I-RAVEN Benchmark Results")
+    print(f"  Dataset: {results['dataset_source']}")
+    print(f"  Wall clock: {results['wall_clock_s']:.1f}s")
+    print("=" * 72)
+    print()
+    print(f"  {'Configuration':<35} {'Accuracy':>10} {'N':>6} {'Latency':>10}")
+    print("  " + "-" * 65)
+
+    for config_name, config_data in results["per_config"].items():
+        display = config_data["display_name"]
+        acc = config_data["accuracy"] * 100
+        n = config_data["n_problems"]
+        lat = config_data["avg_latency_ms"]
+        syn = " (syn)" if config_data["is_synthetic"] else ""
+        print(f"  {display + syn:<35} {acc:>9.1f}% {n:>6} {lat:>8.1f}ms")
+
+    print("  " + "-" * 65)
+    overall_acc = results["overall_accuracy"] * 100
+    n_total = results["n_total"]
+    overall_lat = results["overall_latency_ms"]
+    print(f"  {'Overall':<35} {overall_acc:>9.1f}% {n_total:>6} {overall_lat:>8.1f}ms")
+    print()
+
+    # Context
+    print(f"  Random baseline: 12.5% (1/8 choices)")
+    print(f"  NVSA (Hersche 2023) target: ~87.7% overall")
+    print(f"  CubeMind target: 97.5% on Center Single")
+    print()
+
+
+# ── CLI Entry Point ───────────────────────────────────────────────────────────
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Run the I-RAVEN benchmark on CubeMind",
+    )
+    parser.add_argument(
+        "--configs",
+        nargs="+",
+        choices=ALL_CONFIGS,
+        default=None,
+        help="Configurations to evaluate (default: all 7)",
+    )
+    parser.add_argument(
+        "--split",
+        default="test",
+        choices=["test", "validation", "train"],
+        help="Dataset split to evaluate on",
+    )
+    parser.add_argument(
+        "--max-problems",
+        type=int,
+        default=None,
+        help="Max problems per config (default: all)",
+    )
+    parser.add_argument(
+        "--no-train",
+        action="store_true",
+        help="Skip training phase",
+    )
+    parser.add_argument(
+        "--train-epochs",
+        type=int,
+        default=3,
+        help="Training epochs (default: 3)",
+    )
+    parser.add_argument(
+        "--train-problems",
+        type=int,
+        default=50,
+        help="Training problems per config (default: 50)",
+    )
+    parser.add_argument(
+        "--use-images",
+        action="store_true",
+        help="Encode from images instead of metadata",
+    )
+    parser.add_argument(
+        "--no-synthetic-fallback",
+        action="store_true",
+        help="Fail instead of falling back to synthetic data",
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help="Cache directory for dataset downloads",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed (default: 42)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+    )
+
+    from cubemind.model import CubeMind
+
+    logger.info("Initializing CubeMind model...")
+    model = CubeMind(
+        n_codebook=16,
+        n_hmm_rules=4,
+        cache_size=1000,
+        d_hidden=128,
+        seed=args.seed,
+    )
+
+    results = run_iraven_benchmark(
+        model,
+        configs=args.configs,
+        split=args.split,
+        max_problems=args.max_problems,
+        train_first=not args.no_train,
+        train_epochs=args.train_epochs,
+        train_problems=args.train_problems,
+        use_metadata=not args.use_images,
+        use_synthetic_fallback=not args.no_synthetic_fallback,
+        cache_dir=args.cache_dir,
+        seed=args.seed,
+    )
+
+    print_results(results)
+
+
+if __name__ == "__main__":
+    main()
