@@ -30,6 +30,50 @@ from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.perception.cnn_encoder import CNNEncoder
 
+# benchmarks.iraven lives at project root but grilly's editable install
+# shadows the `benchmarks` namespace. Use importlib to load from explicit path.
+import importlib.util as _ilu
+from pathlib import Path as _Path
+
+def _fix_grilly_shadowing():
+    """Fix grilly editable install shadowing datasets and benchmarks packages."""
+    import sys
+    # Remove grilly source dirs from sys.path so HF datasets isn't shadowed
+    grilly_src = [p for p in sys.path
+                  if 'grilly' in p.lower() and 'cubemind' not in p.lower()
+                  and 'site-packages' not in p.lower()]
+    for p in grilly_src:
+        sys.path.remove(p)
+    # Purge cached grilly-shadowed modules
+    for key in list(sys.modules):
+        if key == 'datasets' or key.startswith('datasets.'):
+            mod = sys.modules[key]
+            if mod and hasattr(mod, '__file__') and mod.__file__ and 'grilly' in str(mod.__file__):
+                del sys.modules[key]
+        if key == 'benchmarks' or key.startswith('benchmarks.'):
+            del sys.modules[key]
+    return grilly_src
+
+def _load_iraven():
+    _iraven_path = _Path(__file__).resolve().parent.parent.parent / "benchmarks" / "iraven.py"
+    spec = _ilu.spec_from_file_location("benchmarks.iraven", _iraven_path)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+# Force-load HF datasets from site-packages, bypassing grilly's editable
+# install finder hook which shadows it with grilly/datasets/.
+import sys as _sys
+_venv_sp = [p for p in _sys.path if 'site-packages' in p and 'cubemind' in p]
+if _venv_sp:
+    _ds_spec = _ilu.find_spec('datasets', [_venv_sp[0]])
+    if _ds_spec and _ds_spec.origin and 'site-packages' in _ds_spec.origin:
+        _hf_datasets = _ilu.module_from_spec(_ds_spec)
+        _ds_spec.loader.exec_module(_hf_datasets)
+        _sys.modules['datasets'] = _hf_datasets
+
+_iraven = _load_iraven()
+
 logger = logging.getLogger(__name__)
 
 # ── Try grilly DisARM for gradient estimation ───────────────────────────────
@@ -120,17 +164,8 @@ def encode_target_from_metadata(
     """Encode the ground-truth block-code from XML metadata.
 
     Uses the same NVSA role-filler encoding as the benchmark pipeline.
-
-    Args:
-        metadata_xml: XML metadata string.
-        panel_index: Panel index (0-7 context, 8-15 choices).
-        bc: BlockCodes instance.
-
-    Returns:
-        Discrete one-hot block-code (k, l).
     """
-    from benchmarks.iraven import encode_panel_from_metadata
-    return encode_panel_from_metadata(metadata_xml, panel_index, bc)
+    return _iraven.encode_panel_from_metadata(metadata_xml, panel_index, bc)
 
 
 # ── SGD optimizer (pure numpy fallback) ─────────────────────────────────────
@@ -218,9 +253,14 @@ def train_epoch(
             # Forward
             pred = encoder.forward(img)
 
-            # Loss + output gradient
-            loss, grad = block_cross_entropy(pred, target, encoder.k, encoder.l)
+            # Loss + output gradient (cosine similarity loss for smoother gradients)
+            loss, grad = similarity_loss(pred, target, bc)
             total_loss += loss
+
+            # Clip gradient to prevent NaN
+            grad_norm = np.linalg.norm(grad)
+            if grad_norm > 1.0:
+                grad = grad / grad_norm
 
             # Backward through full conv stack
             encoder.backward(grad)
@@ -266,8 +306,7 @@ def evaluate(
     Returns:
         Dict with evaluation metrics.
     """
-    from benchmarks.iraven import evaluate_problem_dataset, train_multiview_hmms
-    from cubemind.model import CubeMind
+    # Available via _iraven module if needed
 
     total_sim = 0.0
     n_panels = 0
@@ -324,13 +363,45 @@ def main():
     params = encoder.get_parameters()
     optimizer = SimpleSGD(params, lr=args.lr, momentum=args.momentum)
 
-    # Load training data
-    from benchmarks.iraven import load_raven_split
+    def _load_split(config, split, max_n):
+        """Load RAVEN split via parquet (bypasses HF datasets RLock issue)."""
+        import pyarrow.parquet as pq
+        from huggingface_hub import hf_hub_download
+        from PIL import Image
+        import io
+
+        logger.info("Loading %s/%s (max %d, parquet)...", config, split, max_n)
+        # Download parquet file from HF hub
+        path = hf_hub_download(
+            repo_id="HuggingFaceM4/RAVEN", repo_type="dataset",
+            filename=f"{config}/{split}-00000-of-00001.parquet",
+        )
+        table = pq.read_table(path)
+        problems = []
+        for i in range(min(max_n, len(table))):
+            row = {col: table.column(col)[i].as_py() for col in table.column_names}
+            # Decode panel images from bytes
+            panels = []
+            if "panels" in row and row["panels"]:
+                for p in row["panels"]:
+                    if isinstance(p, dict) and "bytes" in p:
+                        panels.append(Image.open(io.BytesIO(p["bytes"])))
+                    elif isinstance(p, Image.Image):
+                        panels.append(p)
+            problems.append({
+                "panels": panels,
+                "choices": [],
+                "target": row.get("target"),
+                "metadata": row.get("metadata", ""),
+            })
+        logger.info("Loaded %d problems with %d panels each",
+                     len(problems), len(problems[0]["panels"]) if problems else 0)
+        return problems
 
     for config in args.configs:
         logger.info("Loading %s train/test splits...", config)
-        train_problems = load_raven_split(config, "train")[:args.max_train]
-        test_problems = load_raven_split(config, "test")[:args.max_eval]
+        train_problems = _load_split(config, "train", args.max_train)
+        test_problems = _load_split(config, "test", args.max_eval)
 
         for epoch in range(args.epochs):
             # Train

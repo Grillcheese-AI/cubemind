@@ -1,19 +1,19 @@
 """VSA-CNN Perception Frontend — Image to Spatial Block-Codes.
 
-Lightweight CNN using grilly._bridge GPU ops directly for zero-copy
-Vulkan compute. Converts 80x80 grayscale RAVEN panels into per-position
-block-code VSA vectors via spatial grid extraction.
+Lightweight CNN using grilly.nn modules (Conv2d, MaxPool2d, Linear) with
+full forward/backward via the GEMM-based im2col conv2d path.
 
 Architecture:
     Image (1, 80, 80)
-    -> Conv(1,32,3)+GELU+MaxPool(2)     -> (32, 40, 40)
-    -> Conv(32,64,3)+GELU+MaxPool(2)    -> (64, 20, 20)
-    -> Conv(64,128,3)+GELU+MaxPool(2)   -> (128, 10, 10)
-    -> AdaptiveAvgPool(grid_h, grid_w)  -> (128, gh, gw)
-    -> Per-position Linear(128, k*l)    -> (n_pos, k*l)
-    -> BlockSoftmax(tau)                -> (n_pos, k, l)
+    -> Conv(1,32,3,pad=1)+GELU+MaxPool(2)     -> (32, 40, 40)
+    -> Conv(32,64,3,pad=1)+GELU+MaxPool(2)    -> (64, 20, 20)
+    -> Conv(64,128,3,pad=1)+GELU+MaxPool(2)   -> (128, 10, 10)
+    -> AdaptiveAvgPool(grid_h, grid_w)         -> (128, gh, gw)
+    -> Per-position Linear(128, k*l)           -> (n_pos, k*l)
+    -> BlockSoftmax(tau)                       -> (n_pos, k, l)
 
-All ops dispatched via grilly.backend._bridge (Vulkan compute shaders).
+Uses grilly.nn.Conv2d GEMM path (im2col + gemm_mnk) for GPU forward
+and conv2d_backward_input/weight for full gradient flow.
 """
 
 from __future__ import annotations
@@ -22,7 +22,16 @@ import numpy as np
 
 from cubemind.core import K_BLOCKS, L_BLOCK
 
-# ── GPU bridge ──────────────────────────────────────────────────────────────
+# ── Import grilly nn modules ────────────────────────────────────────────────
+
+_GRILLY_NN = False
+try:
+    from grilly.nn.conv import Conv2d as _Conv2d
+    from grilly.nn.pooling import MaxPool2d as _MaxPool2d
+    from grilly.nn.linear import Linear as _Linear
+    _GRILLY_NN = True
+except Exception:
+    pass
 
 _bridge = None
 try:
@@ -40,71 +49,33 @@ def _ensure_f32(x):
     return np.ascontiguousarray(x, dtype=np.float32)
 
 
-def _conv2d_gelu(x, w, b):
-    """Fused 3x3 Conv2d + GELU via _bridge or numpy fallback."""
+def _gelu(x: np.ndarray) -> np.ndarray:
+    """GELU activation via _bridge or numpy."""
     if _bridge is not None:
-        r = _bridge.conv2d_3x3_gelu(_ensure_f32(x), _ensure_f32(w), _ensure_f32(b))
+        r = _bridge.gelu(_ensure_f32(x))
         if r is not None:
             return np.asarray(r, dtype=np.float32)
-        # Fall back to separate conv + gelu
-        r = _bridge.conv2d(_ensure_f32(x), _ensure_f32(w), _ensure_f32(b),
-                           (1, 1), (1, 1))
-        if r is not None:
-            r2 = _bridge.gelu(np.asarray(r, dtype=np.float32))
-            if r2 is not None:
-                return np.asarray(r2, dtype=np.float32)
-            return np.asarray(r, dtype=np.float32)
-    # Numpy fallback
-    conv_out = _conv2d_numpy(x, w, b, padding=1, stride=1)
-    return (0.5 * conv_out * (1.0 + np.tanh(
-        np.sqrt(2.0 / np.pi) * (conv_out + 0.044715 * conv_out ** 3)))).astype(np.float32)
+    return (0.5 * x * (1.0 + np.tanh(
+        np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))).astype(np.float32)
 
 
-def _maxpool2d(x, kernel=2, stride=2):
+def _gelu_backward(x: np.ndarray, grad: np.ndarray) -> np.ndarray:
+    """GELU backward via _bridge or numpy approximation."""
     if _bridge is not None:
-        r = _bridge.maxpool2x2(_ensure_f32(x))
+        r = _bridge.gelu_backward(_ensure_f32(grad), _ensure_f32(x))
         if r is not None:
             return np.asarray(r, dtype=np.float32)
-        # Fall back to general maxpool
-        r = _bridge.maxpool2d(_ensure_f32(x), kernel, stride)
-        if r is not None:
-            return np.asarray(r, dtype=np.float32)
-    return _maxpool2d_numpy(x, kernel, stride)
+    # Approximate GELU derivative
+    s = 1.0 / (1.0 + np.exp(-1.702 * x))
+    return (grad * s * (1.0 + 1.702 * x * (1.0 - s))).astype(np.float32)
 
 
-def _linear(x, w, b):
-    if _bridge is not None:
-        r = _bridge.linear(_ensure_f32(x), _ensure_f32(w), _ensure_f32(b))
-        if r is not None:
-            return np.asarray(r, dtype=np.float32)
-    return (x @ w.T + b).astype(np.float32)
-
-
-def _softmax(x, axis=-1):
-    if _bridge is not None:
-        r = _bridge.softmax(_ensure_f32(x), axis)
-        if r is not None:
-            return np.asarray(r, dtype=np.float32)
-    z = x.astype(np.float64)
-    z -= z.max(axis=axis, keepdims=True)
-    e = np.exp(z)
-    return (e / e.sum(axis=axis, keepdims=True)).astype(np.float32)
-
-
-def _adaptive_avg_pool2d(x, output_size):
-    """Adaptive average pooling via _bridge or numpy fallback."""
+def _adaptive_avg_pool2d(x: np.ndarray, output_size: tuple[int, int]) -> np.ndarray:
+    """Adaptive average pooling to fixed spatial size."""
     if x.ndim == 3:
         x = x[np.newaxis]
     n, c, h, w = x.shape
     oh, ow = output_size
-
-    # GPU path for 3x3 output
-    if _bridge is not None and oh == 3 and ow == 3:
-        r = _bridge.adaptive_avgpool_3x3(_ensure_f32(x))
-        if r is not None:
-            return np.asarray(r, dtype=np.float32).reshape(n, c, 3, 3)
-
-    # Numpy fallback
     out = np.zeros((n, c, oh, ow), dtype=np.float32)
     for i in range(oh):
         h0, h1 = (i * h) // oh, ((i + 1) * h) // oh
@@ -114,35 +85,49 @@ def _adaptive_avg_pool2d(x, output_size):
     return out
 
 
-def _block_softmax(logits, k, l, tau=1.0):
+def _adaptive_avg_pool2d_backward(
+    grad: np.ndarray, input_shape: tuple, output_size: tuple[int, int],
+) -> np.ndarray:
+    """Backward for adaptive avg pool: distribute gradient evenly."""
+    n, c, h, w = input_shape
+    oh, ow = output_size
+    g_in = np.zeros(input_shape, dtype=np.float32)
+    for i in range(oh):
+        h0, h1 = (i * h) // oh, ((i + 1) * h) // oh
+        for j in range(ow):
+            w0, w1 = (j * w) // ow, ((j + 1) * w) // ow
+            region_size = (h1 - h0) * (w1 - w0)
+            g_in[:, :, h0:h1, w0:w1] += grad[:, :, i:i+1, j:j+1] / region_size
+    return g_in
+
+
+def _block_softmax(logits: np.ndarray, k: int, l: int, tau: float = 1.0) -> np.ndarray:
     """Block-wise softmax with temperature."""
-    z = logits.reshape(-1, k, l).astype(np.float32) / max(tau, 1e-8)
-    # Per-block softmax along last dim
-    result = np.zeros_like(z)
-    for b in range(z.shape[0]):
-        for j in range(k):
-            result[b, j] = _softmax(z[b, j:j+1], axis=-1)
+    z = logits.reshape(-1, k, l).astype(np.float64) / max(tau, 1e-8)
+    z -= z.max(axis=-1, keepdims=True)
+    exp_z = np.exp(z)
+    result = (exp_z / exp_z.sum(axis=-1, keepdims=True)).astype(np.float32)
     return result.squeeze(0) if result.shape[0] == 1 else result
 
 
-# ── Numpy fallbacks ─────────────────────────────────────────────────────────
+# ── Numpy conv2d fallback ───────────────────────────────────────────────────
 
 
-def _conv2d_numpy(x, w, b, padding=1, stride=1):
-    """Minimal numpy conv2d."""
+def _conv2d_numpy(x, w, b, padding=1):
+    """Minimal numpy conv2d for CPU fallback."""
     n, ci, hi, wi = x.shape
     co, _, kh, kw = w.shape
     if padding > 0:
         x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
     _, _, hp, wp = x.shape
-    ho = (hp - kh) // stride + 1
-    wo = (wp - kw) // stride + 1
+    ho = hp - kh + 1
+    wo = wp - kw + 1
     out = np.zeros((n, co, ho, wo), dtype=np.float32)
     for oc in range(co):
         for khi in range(kh):
             for kwi in range(kw):
                 out[:, oc] += (
-                    x[:, :, khi:khi + ho * stride:stride, kwi:kwi + wo * stride:stride]
+                    x[:, :, khi:khi + ho, kwi:kwi + wo]
                     * w[oc, :, khi, kwi].reshape(1, ci, 1, 1)
                 ).sum(axis=1)
         out[:, oc] += b[oc]
@@ -164,12 +149,15 @@ def _maxpool2d_numpy(x, kernel=2, stride=2):
 
 
 class CNNEncoder:
-    """Lightweight VSA-CNN using _bridge GPU ops.
+    """Lightweight VSA-CNN with full backward via grilly.nn modules.
+
+    Uses grilly.nn.Conv2d (GEMM path with im2col) for GPU-accelerated
+    forward and backward. Falls back to numpy for CPU-only environments.
 
     Args:
         k: Number of blocks per code.
         l: Block length.
-        channels: Conv channel widths.
+        channels: Conv channel widths per layer.
         grid_size: Spatial grid for position extraction.
         temperature: Gumbel-Softmax temperature.
         seed: Random seed.
@@ -191,35 +179,37 @@ class CNNEncoder:
         self.n_positions = grid_size[0] * grid_size[1]
         self.temperature = temperature
         self.channels = channels
-        self._use_grilly = _bridge is not None
+        self._use_grilly = _GRILLY_NN
 
-        rng = np.random.default_rng(seed)
         ch_in = [1] + list(channels)
 
-        # Init conv weights: He initialization
-        self.conv_w = []
-        self.conv_b = []
-        for i in range(len(channels)):
-            fan_in = ch_in[i] * 3 * 3
-            w = (rng.standard_normal((channels[i], ch_in[i], 3, 3))
-                 * np.sqrt(2.0 / fan_in)).astype(np.float32)
-            b = np.zeros(channels[i], dtype=np.float32)
-            self.conv_w.append(w)
-            self.conv_b.append(b)
+        if _GRILLY_NN:
+            # GPU path: grilly nn modules with GEMM conv2d + backward
+            self.convs = []
+            self.pools = []
+            for i in range(len(channels)):
+                self.convs.append(_Conv2d(ch_in[i], channels[i],
+                                          kernel_size=3, padding=1))
+                self.pools.append(_MaxPool2d(kernel_size=2, stride=2))
+            self.proj = _Linear(channels[-1], self.d_vsa)
+        else:
+            # CPU fallback: numpy weights
+            rng = np.random.default_rng(seed)
+            self.conv_w = []
+            self.conv_b = []
+            for i in range(len(channels)):
+                fan_in = ch_in[i] * 9
+                w = (rng.standard_normal((channels[i], ch_in[i], 3, 3))
+                     * np.sqrt(2.0 / fan_in)).astype(np.float32)
+                b = np.zeros(channels[i], dtype=np.float32)
+                self.conv_w.append(w)
+                self.conv_b.append(b)
+            fan_in = channels[-1]
+            self.proj_w = (rng.standard_normal((self.d_vsa, fan_in))
+                           * np.sqrt(2.0 / fan_in)).astype(np.float32)
+            self.proj_b = np.zeros(self.d_vsa, dtype=np.float32)
 
-        # Projection head: Linear(channels[-1], d_vsa)
-        fan_in = channels[-1]
-        self.proj_w = (rng.standard_normal((self.d_vsa, fan_in))
-                       * np.sqrt(2.0 / fan_in)).astype(np.float32)
-        self.proj_b = np.zeros(self.d_vsa, dtype=np.float32)
-
-        # Gradient accumulators
-        self.conv_w_grad = [np.zeros_like(w) for w in self.conv_w]
-        self.conv_b_grad = [np.zeros_like(b) for b in self.conv_b]
-        self.proj_w_grad = np.zeros_like(self.proj_w)
-        self.proj_b_grad = np.zeros_like(self.proj_b)
-
-        # Forward cache for backward
+        # Forward cache
         self._cache = {}
 
     def forward(self, image: np.ndarray) -> np.ndarray:
@@ -238,103 +228,158 @@ class CNNEncoder:
         else:
             x = _ensure_f32(image)
 
-        # Conv backbone: fused Conv+GELU -> MaxPool per layer
-        intermediates = [x]
-        for i in range(len(self.channels)):
-            x = _conv2d_gelu(x, self.conv_w[i], self.conv_b[i])
-            intermediates.append(x)
-            x = _maxpool2d(x, kernel=2, stride=2)
-            intermediates.append(x)
+        if self._use_grilly:
+            return self._forward_grilly(x)
+        return self._forward_numpy(x)
 
-        # Spatial grid extraction
-        x = _adaptive_avg_pool2d(x, self.grid_size)  # (1, C, gh, gw)
-        self._cache['pool_out'] = x
+    def _forward_grilly(self, x: np.ndarray) -> np.ndarray:
+        """GPU forward using grilly.nn Conv2d (GEMM path)."""
+        self._cache['conv_inputs'] = []
+        self._cache['conv_outputs'] = []
+        self._cache['gelu_inputs'] = []
+        self._cache['gelu_outputs'] = []
 
-        # Per-position projection
+        for i, (conv, pool) in enumerate(zip(self.convs, self.pools)):
+            self._cache['conv_inputs'].append(x)
+            conv_out = conv.forward(x)
+            self._cache['conv_outputs'].append(conv_out)
+            self._cache['gelu_inputs'].append(conv_out)
+            gelu_out = _gelu(conv_out)
+            self._cache['gelu_outputs'].append(gelu_out)
+            x = pool.forward(gelu_out)
+
+        # Adaptive avg pool
+        self._cache['pre_pool_shape'] = x.shape
+        x = _adaptive_avg_pool2d(x, self.grid_size)
+
+        # Per-position linear projection
         n, c, gh, gw = x.shape
         n_pos = gh * gw
         features = x.reshape(c, n_pos).T  # (n_pos, C)
         self._cache['features'] = features
 
-        # Linear projection per position
-        logits = _linear(features, self.proj_w, self.proj_b)  # (n_pos, d_vsa)
-        self._cache['logits'] = logits
+        logits = np.array([
+            self.proj.forward(features[i:i + 1]).ravel()
+            for i in range(n_pos)
+        ])
 
-        # Block-wise softmax with temperature
         codes = _block_softmax(logits, self.k, self.l, self.temperature)
-
         if self.n_positions == 1:
             return codes.reshape(self.k, self.l)
-        return codes  # (n_pos, k, l)
+        return codes
+
+    def _forward_numpy(self, x: np.ndarray) -> np.ndarray:
+        """CPU fallback forward."""
+        for i in range(len(self.channels)):
+            x = _gelu(_conv2d_numpy(x, self.conv_w[i], self.conv_b[i]))
+            x = _maxpool2d_numpy(x)
+
+        x = _adaptive_avg_pool2d(x, self.grid_size)
+        n, c, gh, gw = x.shape
+        n_pos = gh * gw
+        features = x.reshape(c, n_pos).T
+        self._cache['features'] = features
+
+        logits = (features @ self.proj_w.T + self.proj_b)
+        codes = _block_softmax(logits, self.k, self.l, self.temperature)
+        if self.n_positions == 1:
+            return codes.reshape(self.k, self.l)
+        return codes
+
+    # ── Backward ────────────────────────────────────────────────────────
 
     def backward(self, grad_output: np.ndarray) -> None:
-        """Backward through projection head.
-
-        Full conv backprop via _bridge.conv2d_backward_* when available.
+        """Full backward through conv stack using grilly.nn.Conv2d.backward().
 
         Args:
-            grad_output: (k, l) or (n_pos, k, l).
+            grad_output: (k, l) or (n_pos, k, l) gradient w.r.t. block-codes.
         """
         if grad_output.ndim == 2:
-            g = grad_output.ravel().reshape(1, -1)  # (1, d_vsa)
+            g = grad_output.ravel().reshape(1, -1)
         else:
-            g = grad_output.reshape(grad_output.shape[0], -1)  # (n_pos, d_vsa)
+            g = grad_output.reshape(grad_output.shape[0], -1)
 
-        features = self._cache.get('features')  # (n_pos, C)
+        features = self._cache.get('features')
         if features is None:
             return
 
-        # Projection gradients
-        # dL/d(proj_w) = g^T @ features, dL/d(proj_b) = g.sum(0)
-        self.proj_w_grad += (g.T @ features)
-        self.proj_b_grad += g.sum(axis=0)
+        # ── Backward through linear projection ──
+        n_pos, c = features.shape
+        g_features = np.zeros_like(features)
 
-        # dL/d(features) = g @ proj_w
-        g_feat = g @ self.proj_w  # (n_pos, C)
+        if self._use_grilly:
+            for i in range(n_pos):
+                g_features[i] = self.proj.backward(
+                    g[i:i + 1], x=features[i:i + 1]
+                ).ravel()
+        else:
+            # Numpy: manual proj gradients
+            self._proj_w_grad = g.T @ features
+            self._proj_b_grad = g.sum(axis=0)
+            g_features = g @ self.proj_w
 
-        # Backward through adaptive avg pool -> conv stack
+        if not self._use_grilly:
+            return  # Numpy path: no conv backward
+
+        # ── Backward through adaptive avg pool ──
         gh, gw = self.grid_size
-        pool_out = self._cache.get('pool_out')
-        if pool_out is None:
+        g_spatial = g_features.T.reshape(1, c, gh, gw)
+        pre_pool_shape = self._cache.get('pre_pool_shape')
+        if pre_pool_shape is None:
             return
+        g = _adaptive_avg_pool2d_backward(g_spatial, pre_pool_shape, self.grid_size)
 
-        _, c, _, _ = pool_out.shape
+        # ── Backward through conv stack (reverse order) ──
+        for i in range(len(self.convs) - 1, -1, -1):
+            # Backward through MaxPool2d
+            g = self.pools[i].backward(g)
 
-        # Conv backward via _bridge when available
-        if _bridge is not None:
-            try:
-                # Reshape feature gradient to spatial
-                g_spatial = g_feat.T.reshape(1, c, gh, gw)
+            # Backward through GELU
+            gelu_input = self._cache['gelu_inputs'][i]
+            g = _gelu_backward(gelu_input, g)
 
-                # We skip full conv backward for now — the projection head
-                # gradient is the most important signal. Conv weights will
-                # train more slowly but the projection head learns the
-                # image-to-VSA mapping.
-                #
-                # TODO: wire _bridge.conv2d_backward_weight for each layer
-                pass
-            except Exception:
-                pass
+            # Backward through Conv2d (computes weight/bias grads internally)
+            g = self.convs[i].backward(g)
+
+    # ── Optimizer interface ─────────────────────────────────────────────
 
     def zero_grad(self) -> None:
-        for g in self.conv_w_grad:
-            g.fill(0)
-        for g in self.conv_b_grad:
-            g.fill(0)
-        self.proj_w_grad.fill(0)
-        self.proj_b_grad.fill(0)
+        """Zero all parameter gradients."""
+        if self._use_grilly:
+            for conv in self.convs:
+                conv.zero_grad()
+            self.proj.zero_grad()
 
     def step(self, lr: float = 0.001) -> None:
-        """SGD update using accumulated gradients."""
-        # Update projection head (always)
-        self.proj_w -= lr * self.proj_w_grad
-        self.proj_b -= lr * self.proj_b_grad
+        """SGD update using accumulated gradients (in-place)."""
+        if self._use_grilly:
+            for conv in self.convs:
+                self._sgd_update_param(conv, 'weight', '_grad_w', lr)
+                self._sgd_update_param(conv, 'bias', '_grad_b', lr)
+            self._sgd_update_param(self.proj, 'weight', '_grad_w', lr)
+            self._sgd_update_param(self.proj, 'bias', '_grad_b', lr)
+        else:
+            if hasattr(self, '_proj_w_grad'):
+                self.proj_w -= lr * self._proj_w_grad
+                self.proj_b -= lr * self._proj_b_grad
 
-        # Update conv weights (when gradients available)
-        for i in range(len(self.conv_w)):
-            if np.any(self.conv_w_grad[i] != 0):
-                self.conv_w[i] -= lr * self.conv_w_grad[i]
-                self.conv_b[i] -= lr * self.conv_b_grad[i]
+    @staticmethod
+    def _sgd_update_param(module, param_name: str, grad_name: str, lr: float):
+        """Update a parameter in-place, preserving the original object type."""
+        param = getattr(module, param_name, None)
+        if param is None:
+            return
+        # Try .grad attribute first (Parameter objects)
+        grad = getattr(param, 'grad', None)
+        if grad is None:
+            # Fall back to module-level gradient cache
+            grad = getattr(module, grad_name, None)
+        if grad is None:
+            return
+        # In-place update to preserve the object (and its .grad attribute)
+        param_arr = np.asarray(param)
+        grad_arr = np.asarray(grad)
+        param_arr -= lr * grad_arr
 
     def anneal_temperature(self, factor: float = 0.95) -> None:
         self.temperature = max(self.temperature * factor, 0.01)
@@ -356,11 +401,21 @@ class CNNEncoder:
                 pixels /= 255.0
         return self.forward(pixels)
 
-    def get_parameters(self) -> list[np.ndarray]:
-        return self.conv_w + self.conv_b + [self.proj_w, self.proj_b]
+    def get_parameters(self) -> list:
+        if self._use_grilly:
+            params = []
+            for conv in self.convs:
+                params.append(conv.weight)
+                if conv.bias is not None:
+                    params.append(conv.bias)
+            params.append(self.proj.weight)
+            if self.proj.bias is not None:
+                params.append(self.proj.bias)
+            return params
+        return [self.proj_w, self.proj_b]
 
     def __repr__(self) -> str:
-        backend = "grilly_bridge" if self._use_grilly else "numpy"
+        backend = "grilly" if self._use_grilly else "numpy"
         return (
             f"CNNEncoder(k={self.k}, l={self.l}, d={self.d_vsa}, "
             f"grid={self.grid_size}, ch={self.channels}, "
