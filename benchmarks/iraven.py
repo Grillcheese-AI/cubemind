@@ -1224,6 +1224,14 @@ def main():
         default=42,
         help="Random seed (default: 42)",
     )
+    parser.add_argument(
+        "--k", type=int, default=8,
+        help="Block code k (number of blocks, default: 8)",
+    )
+    parser.add_argument(
+        "--l", type=int, default=64,
+        help="Block code l (block length, default: 64)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1254,6 +1262,8 @@ def main():
         use_synthetic_fallback=not args.no_synthetic_fallback,
         cache_dir=args.cache_dir,
         seed=args.seed,
+        iraven_k=args.k,
+        iraven_l=args.l,
     )
 
     print_results(results)
