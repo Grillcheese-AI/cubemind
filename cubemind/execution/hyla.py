@@ -25,6 +25,12 @@ try:
 except Exception:
     pass
 
+_VulkanTensor = None
+try:
+    from grilly.utils.tensor_conversion import VulkanTensor as _VulkanTensor
+except Exception:
+    pass
+
 
 # -- Activation ----------------------------------------------------------------
 
@@ -116,6 +122,11 @@ class HYLA:
             ).astype(np.float32)
         else:
             raise ValueError(f"Unknown init scheme: {init!r}")
+
+        # Wrap weight matrices in VulkanTensor for linear_t fast path
+        if _VulkanTensor is not None:
+            self.W_h = _VulkanTensor(self.W_h)
+            self.W_H = _VulkanTensor(self.W_H)
 
         # -- MIP affine parameters (per block) ---------------------------------
         self.gamma = np.ones(k, dtype=np.float32)
