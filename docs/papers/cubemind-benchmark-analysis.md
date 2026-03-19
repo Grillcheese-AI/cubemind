@@ -311,21 +311,76 @@ The deterministic detector path produces bit-identical results across runs, hard
 
 1. **Residual grid-configuration errors.** Despite position-aware scoring raising grid accuracy to 82%, approximately 18% of grid problems remain unsolved. These involve panels with heterogeneous entity attributes where mode aggregation is lossy, and position patterns requiring higher-order spatial reasoning (e.g., diagonal or rotational symmetries).
 
-2. **Perception dependency.** CubeMind currently operates on pre-extracted attribute metadata (XML/JSON), not raw pixel images. Extending to visual input requires a perception frontend — either a classical image parser or a differentiable CNN encoder.
+2. **Perception dependency.** CubeMind currently operates on pre-extracted attribute metadata (XML/JSON), not raw pixel images. Section 5.4 details our progress toward a differentiable perception frontend that maps raw pixels to block-codes without metadata.
 
 3. **Rule coverage.** The four implemented detectors (constant, progression, arithmetic, distribute-three) cover the standard RPM rule vocabulary. Novel rule types outside this set would not be detected without extending the detector library.
 
 4. **Block-code capacity.** At extreme out-of-distribution scales (`maxval > 1000`), hash collisions in the block-code encoding degrade discriminability. This can be mitigated by increasing the block length $l$ at the cost of higher memory and compute.
 
-### 5.4 Future Work
+### 5.4 Toward End-to-End Visual Perception
 
-**End-to-end differentiable perception.** The primary extension is a CNN $\to$ block-wise softmax $\to$ bind/unbind pipeline that learns to extract per-entity attributes from raw pixel panels. The CNN produces continuous block-code vectors that are discretized via a temperature-annealed softmax:
+A central goal is replacing the XML metadata dependency with a CNN perception frontend that maps raw $80 \times 80$ grayscale panel images directly into the VSA block-code space. We report extensive experiments across multiple architectures and training paradigms.
 
-$$\hat{\mathbf{x}}[j, i] = \frac{\exp(z_{ji} / \tau)}{\sum_{m=1}^{l} \exp(z_{jm} / \tau)}$$
+#### 5.4.1 The Maximum Entropy Trap
 
-where $z_{ji}$ are the CNN's logits for block $j$, position $i$, and $\tau \to 0$ during training to approach hard one-hot codes. The rule detectors remain deterministic; only the perception module is trained.
+Direct training with block cross-entropy against hash-bound NVSA role-filler targets consistently stalls at $\mathcal{L} = \ln(64) \approx 4.16$, corresponding to a uniform distribution across all $l = 64$ block positions. The VSA binding operation (circular convolution) acts as a cryptographic hash that destroys the topological continuity between visually similar inputs and their target representations, rendering gradient descent ineffective. This fundamental misalignment between VSA algebra and neural optimization dynamics necessitates alternative training paradigms.
 
-**Per-entity positional decomposition.** For grid configurations, learning an entity-to-position assignment via a differentiable permutation matrix (Sinkhorn operator) would enable per-entity rule detection without mode aggregation.
+#### 5.4.2 Additive Cross-Entropy with Bundle-Predictive Learning
+
+Following the NVSA methodology (Hersche et al., 2023), we construct training targets as *bundled superpositions* of atomic attribute vectors from a frozen codebook $W$, rather than hash-bound role-filler vectors. The Additive Cross-Entropy loss evaluates cosine similarity between the CNN output and all codebook entries:
+
+$$\mathcal{L}(X, Y, \theta) = -\log \frac{\exp\left(s_l \cdot \sum_{j} \text{sim}(f_\theta(X), w_{y_j})\right)}{\sum_{i=1}^{m} \exp\left(s_l \cdot \text{sim}(f_\theta(X), w_i)\right)}$$
+
+where $s_l$ is an inverse temperature scalar. This preserves topological continuity: visually similar panels produce geometrically proximate target vectors. With a frozen ResNet-18 backbone (pretrained on ImageNet) and a trainable projection head, this paradigm achieves 74% Type accuracy and 34% overall attribute accuracy — a 3.4$\times$ improvement over random baseline.
+
+#### 5.4.3 VQ-VSA Bridge with Straight-Through Estimation
+
+To enforce strict discrete block-code outputs during training, we introduce a Vector Quantization layer with Straight-Through Estimation (STE). The CNN output is quantized to one-hot block-codes via per-block argmax (forward pass), while gradients bypass the non-differentiable quantization (backward pass). A commitment loss $\beta \cdot \text{MSE}(z_e, z_q)$ pulls the continuous output toward the discrete codebook coordinates.
+
+Combining VQ-VSA loss with a warm-up phase (10 epochs of per-attribute cross-entropy followed by VQ training) prevents codebook collapse. Results with a grilly-native DenseNet backbone trained end-to-end on Vulkan GPU:
+
+| Phase | Loss | Type | Size | Color | Angle | Overall |
+|:---|---:|---:|---:|---:|---:|---:|
+| Warm-up (CE heads) | 1.95 | 27% | 20% | 12% | 17% | 19% |
+| VQ-VSA | 3.58 | 28% | 24% | 26% | 12% | 23% |
+
+The VQ phase doubles Color accuracy (12% $\to$ 26%) by forcing the network's continuous representations into the discrete VSA color codebook.
+
+#### 5.4.4 Architecture Comparison
+
+We evaluate five perception architectures, all implemented in the grilly Vulkan framework:
+
+| Architecture | Features | Params | Inference | Attribute Acc. |
+|:---|---:|---:|---:|---:|
+| PixelVSA (zero-training) | 512 | 0 | 583ms | 16% |
+| FeatureVSA (classical CV) | 4 | 0 | 0.5ms | 18% |
+| DenseNet-Small (random init) | 112 | ~50K | 8.4ms | 23% |
+| ResNet-18 (ImageNet pretrained) | 512 | 11.7M | 168ms | 34% |
+| VSA-Dense (early bundling) | 512 | ~260K | 73ms | — |
+
+The DenseNet-Small architecture (growth rate 16, 2 blocks, 4 layers each) achieves 8.4ms warm inference — 20$\times$ faster than ResNet-18 — with full end-to-end backward through the dense block concat connections, transition layers, and stem convolution on Vulkan GPU.
+
+#### 5.4.5 Oja-Plastic Memory Consolidation
+
+CubeMind incorporates neuroplastic VSA memory via Oja's learning rule:
+
+$$\Delta \mathbf{m} = \eta \cdot y \cdot (\mathbf{x} - y \cdot \mathbf{m})$$
+
+where $y = \mathbf{m} \cdot \mathbf{x}$ is the VSA similarity (activation). This self-normalizing update ($\|\mathbf{m}\| \to 1$) extracts the principal component of the input stream, actively decaying superposition noise while amplifying consistent semantic signals. A GPU compute shader (`oja-learning.spv`) enables batch updates of thousands of memory vectors in parallel.
+
+A biologically-inspired *sleep cycle* consolidation loop replays high-utility episodic memories against semantic codebook prototypes via Oja updates, extracting mathematical archetypes and pruning noisy traces. This enables indefinite-lifespan operation without memory bloat.
+
+#### 5.4.6 VSA Autograd: $\nabla(\text{unbind}) = \text{bind}$
+
+A key insight for end-to-end training through VSA operations: because the FFT is a linear operator, the gradient of circular correlation (unbinding) is circular convolution (binding). This means the existing `blockcode_bind.spv` shader serves as both the forward binding kernel and the backward kernel for unbinding — no additional Vulkan shaders are required for VSA autograd. This is implemented as a differentiable `VSAUnbindNode` in grilly's autograd graph.
+
+#### 5.4.7 GPU Acceleration
+
+All perception and training operations run on commodity GPUs via Vulkan compute shaders through the grilly framework. Custom SPIR-V shaders include fused Conv2d+GELU (eliminating intermediate VRAM writes), subgroup-accelerated 1x1 convolutions (hardware reduction via `subgroupAdd`), zero-copy DenseNet concatenation (channel offset addressing), and adaptive 3x3 spatial pooling. The full perception pipeline achieves sub-10ms inference on an AMD Radeon RX 6750 XT.
+
+### 5.5 Future Directions
+
+**Scaling perception training.** Current experiments use up to 2000 training panels. Scaling to the full RAVEN training set (42,000 panels across 7 configurations) with the VQ-VSA loss and AutoHypergradient optimizer is expected to significantly improve attribute accuracy.
 
 **Compositional rule learning.** Extending beyond fixed detectors to a differentiable rule library that can compose primitive operations (increment, rotate, reflect) into novel rules, parameterized by VSA binding chains.
 
@@ -333,7 +388,9 @@ where $z_{ji}$ are the CNN's logits for block $j$, position $i$, and $\tau \to 0
 
 ## 6. Conclusion
 
-CubeMind demonstrates that abstract visual reasoning on Raven's Progressive Matrices can be effectively solved through algebraic rule detection in a Vector Symbolic Architecture, without any training. The system achieves **90.3% on HuggingFace RAVEN** — surpassing the supervised NVSA baseline (87.7%) — with deterministic, interpretable reasoning at 29.3ms average inference latency. Single-entity configurations are effectively solved (96.0--100%), and position-aware scoring raises grid configurations from 67.5% to 82.0% (+14.5 pp). Out-of-distribution generalization to 100$\times$ the standard attribute range yields perfect accuracy, confirming the algebraic nature of the approach. The remaining gap to top supervised methods (1--3 pp) is attributable to residual grid errors involving heterogeneous entity attributes and higher-order spatial patterns, pointing to Oja-plastic codebook adaptation and differentiable perception as promising next steps. Built on the grilly Vulkan compute framework, CubeMind provides a reproducible, hardware-portable, and real-time-capable system for neuro-symbolic abstract reasoning.
+CubeMind demonstrates that abstract visual reasoning on Raven's Progressive Matrices can be effectively solved through algebraic rule detection in a Vector Symbolic Architecture, without any training. The system achieves **90.3% on HuggingFace RAVEN** — surpassing the supervised NVSA baseline (87.7%) — with deterministic, interpretable reasoning at 29.3ms average inference latency. Single-entity configurations are effectively solved (96.0--100%), and position-aware scoring raises grid configurations from 67.5% to 82.0% (+14.5 pp). Out-of-distribution generalization to 100$\times$ the standard attribute range yields perfect accuracy, confirming the algebraic nature of the approach.
+
+Toward end-to-end visual perception, we identify a fundamental misalignment between VSA binding algebra and gradient descent optimization (the $\ln(64) = 4.16$ maximum entropy trap), and resolve it through additive cross-entropy with bundle-predictive learning (34% attribute accuracy with frozen ResNet-18) and VQ-VSA quantization with straight-through estimation (26% Color accuracy with trainable DenseNet). The discovery that $\nabla(\text{unbind}) = \text{bind}$ enables efficient VSA autograd without additional compute shaders. All perception and training operations run on commodity GPUs via custom Vulkan SPIR-V shaders through the grilly framework, achieving sub-10ms inference and full end-to-end backward through dense convolutional architectures. Built on this hardware-portable, zero-dependency compute stack, CubeMind provides a reproducible and real-time-capable system for neuro-symbolic abstract reasoning.
 
 ---
 
@@ -358,6 +415,12 @@ CubeMind demonstrates that abstract visual reasoning on Raven's Progressive Matr
 - Zhuo, T. & Kankanhalli, M. (2021). Effective abstract reasoning with dual-contrast network. *ICLR*.
 
 - Chang, O., Flokas, L., & Lipson, H. (2020). Principled weight initialization for hypernetworks. *ICLR*.
+
+- Oja, E. (1982). Simplified neuron model as a principal component analyzer. *Journal of Mathematical Biology*, 15(3), 267--273.
+
+- Penzkofer, A., Shi, L., & Bulling, A. (2024). VSA4VQA: Scaling a Vector Symbolic Architecture to Visual Question Answering on Natural Images. *CogSci*.
+
+- Baydin, A. G., Cornish, R., Rubio, D. M., Schmidt, M., & Wood, F. (2018). Online learning rate adaptation with hypergradient descent. *ICLR*.
 
 ---
 
