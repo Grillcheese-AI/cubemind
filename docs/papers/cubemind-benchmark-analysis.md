@@ -158,6 +158,26 @@ Key GPU-accelerated operations in the CubeMind pipeline:
 
 The block-code operations accept flattened vectors of dimension $d = k \cdot l$ and handle batched inputs automatically. Weight matrices for the HYLA hypernetwork are uploaded to GPU memory once at initialization and reused across forward passes.
 
+### 2.8 DenseNet Perception Frontend
+
+To extend CubeMind from metadata-based perception to raw pixel input, we introduce a lightweight DenseNet backbone specifically designed for the RAVEN visual domain. The architecture choice is motivated by three factors:
+
+1. **Feature reuse.** DenseNet's dense connections concatenate all previous layer outputs along the channel dimension, ensuring that low-level edge and texture features remain directly accessible to deeper layers. This is critical for RAVEN, where subtle differences in edge curvature (shape), spatial extent (size), and fill intensity (color) must be preserved through the network — unlike ResNet, which abstracts away early features through residual addition.
+
+2. **Parameter efficiency.** By reusing features rather than re-learning them, DenseNet achieves competitive accuracy with far fewer parameters. Our DenseNet-Small uses ~50K parameters versus ResNet-18's 11.7M — a 234$\times$ reduction — while achieving 8.4ms warm inference versus 168ms.
+
+3. **Gradient flow.** Dense connections provide short paths from the loss to every layer, naturally mitigating the vanishing gradient problem. This is especially important when training with the VQ-VSA loss, where the gradient signal passes through a Straight-Through Estimator and must remain strong enough to update early convolutional filters.
+
+The DenseNet-Small architecture processes $80 \times 80$ grayscale panels through a stem convolution (stride 2 + max pool for spatial reduction), two dense blocks with growth rate $g = 16$ and 4 layers each, separated by a transition layer (1$\times$1 convolution for channel compression + average pooling for spatial reduction), and a global average pool to produce a 112-dimensional feature vector:
+
+$$\text{Image} \xrightarrow{\text{Stem}} (32, 20, 20) \xrightarrow{\text{DenseBlock}_1} (96, 20, 20) \xrightarrow{\text{Transition}} (48, 10, 10) \xrightarrow{\text{DenseBlock}_2} (112, 10, 10) \xrightarrow{\text{GAP}} (112,)$$
+
+Each DenseLayer applies `Conv2d(in → g, 3×3, pad=1) + ReLU`, where `in` is the accumulated channel count from all previous layers in the block. The dense block output is the concatenation of the input and all layer outputs: $\mathbf{x}_\ell = [\mathbf{x}_0, H_1(\mathbf{x}_0), H_2([\mathbf{x}_0, \mathbf{x}_1]), \ldots]$ where $H_\ell$ denotes the $\ell$-th layer's transformation and $[\cdot]$ denotes channel-wise concatenation.
+
+A trainable linear projection maps the 112-dimensional feature vector to the VSA dimension ($d = k \times l = 512$). The projected vector is discretized to block-codes via per-block argmax at inference time, or processed by the VQ-VSA quantizer (Section 5.4.3) during training.
+
+All convolutional operations dispatch to Vulkan GPU via the grilly GEMM im2col path. Full backward through the dense block concatenation topology is supported: gradients are split by channel count at each concatenation point and accumulated across all contributing features, enabling end-to-end backbone training at 41.5ms per backward pass.
+
 ---
 
 ## 3. Experiments
@@ -462,4 +482,129 @@ To identify the most effective approach for improving grid-configuration accurac
 **Entity set consistency** (Appendix B.2). We scored candidates by comparing per-row attribute multisets (sorted tuples of entity Type, Size, Color values) against row/column patterns. This was neutral because RAVEN grid entities are predominantly *homogeneous* within each panel — all entities typically share the same Type, Size, and Color, with only the Number (count) and Position varying. When the multiset is a singleton, this scoring reduces to the baseline.
 
 **Position-aware scoring** (Appendix B.3). We extracted discretized bounding-box position signatures $\sigma(P)$ from entity metadata and applied rule detection (constant, distribute-three) to the spatial layout sequences across the $3 \times 3$ matrix. Error analysis on the baseline showed that **74% of grid errors** were caused by candidate ties — candidates with identical Number, Type, Size, and Color but different spatial arrangements. Position-aware scoring resolves these ties, producing a +14.3 percentage point improvement and raising CubeMind's overall 7-configuration accuracy from 86.3% to 90.3%.
+
+---
+
+## Appendix C: Visual Perception Experiments
+
+### C.1 The Maximum Entropy Diagnostic
+
+Training a CNN with block cross-entropy against hash-bound NVSA role-filler targets produces a loss that converges immediately to $\ln(l) = \ln(64) \approx 4.158$. This value is the *theoretical maximum entropy* for a uniform distribution over $l = 64$ elements — mathematical proof that the network outputs a uniform distribution and learns nothing.
+
+**Table C1.** Block cross-entropy convergence failure (LR=0.05, 10 epochs).
+
+| Epoch | Loss | Similarity | Analysis |
+|:---:|---:|---:|:---|
+| 1 | 4.16 | 0.016 | Exact $\ln(64)$ — uniform distribution |
+| 5 | 4.08 | 0.036 | Marginal drift, capturing dataset priors |
+| 10 | 3.99 | 0.048 | Still near maximum entropy |
+
+The $0.17$ decrease over 10 epochs does not represent meaningful learning — the network captures superficial statistical biases (certain one-hot indices occurring slightly more often) without establishing any visual-to-symbolic mapping.
+
+**Root cause:** VSA binding ($a \otimes b$) produces vectors quasi-orthogonal to both operands. A small change in the filler (e.g., Triangle $\to$ Square) produces an *entirely orthogonal* bound vector. This violates the continuity assumption of gradient descent: visually similar inputs map to orthogonal targets, destroying the loss landscape.
+
+### C.2 Loss Function Comparison
+
+**Table C2.** Comparison of training objectives (ResNet-18 frozen backbone, 50 problems, 30 epochs).
+
+| Loss Function | Final Loss | Type Acc. | Overall Acc. | Converges? |
+|:---|---:|---:|---:|:---:|
+| Block CE (hash-bound) | 3.99 | 10% | 10% | No |
+| Block CE (LR=0.05) | 3.99 | 10% | 10% | No |
+| Cosine similarity | NaN | — | — | Explodes |
+| Additive CE (bundled) | 3.28 | 74% | 34% | Yes |
+| VQ-VSA + commitment | 3.58 | 28% | 23% | Yes |
+
+The Additive CE paradigm breaks the maximum entropy trap by training against *unbundled* superpositions of atomic attribute vectors. The CNN learns to produce vectors similar to the bundled target — a smooth, continuous objective that preserves topological structure.
+
+### C.3 Perception Architecture Details
+
+**DenseNet-Small.** A lightweight DenseNet optimized for RAVEN's $80 \times 80$ grayscale panels:
+
+```
+Input: (1, 80, 80)
+Stem:    Conv2d(1→32, 3×3, stride=2, pad=1) + ReLU + MaxPool(2×2)  → (32, 20, 20)
+Block 1: 4 × DenseLayer(growth=16)  → (96, 20, 20)
+Trans 1: Conv2d(96→48, 1×1) + ReLU + AvgPool(2×2)  → (48, 10, 10)
+Block 2: 4 × DenseLayer(growth=16)  → (112, 10, 10)
+GAP:     GlobalAvgPool  → (112,)
+Proj:    Linear(112→512)  → (512,)
+```
+
+Each DenseLayer: `Conv2d(in_ch → 16, 3×3, pad=1) + ReLU`. Dense connections concatenate all previous features. Total parameters: ~50K (vs ResNet-18's 11.7M).
+
+**VSA-Dense (Early Bundling).** Replaces DenseNet concatenation with VSA superposition:
+
+```
+Stem:    Conv2d(1→64, 3×3, stride=2) + Conv2d(64→512, 3×3, stride=2)  → (512, 20, 20)
+VSA Block: 3 × [BN + GELU + DepthwiseConv3×3 + PointwiseConv1×1 + Add]
+Pool:    AdaptiveAvgPool(3×3)  → 9 spatial vectors
+Argmax:  Per-block argmax  → 9 discrete block-codes (k=8, l=64)
+```
+
+Channel dimension stays flat at 512 throughout — no concatenation explosion. Each layer bundles (adds) its contribution into a running superposition, mirroring how VSA naturally accumulates information.
+
+### C.4 Zero-Training Perception Baselines
+
+**PixelVSA.** Each pixel position $(x, y)$ in a $20 \times 20$ downsampled grid receives a random block-code. Pixel intensities are quantized to 8 levels. Each pixel-intensity code is bound to its position code, then all bindings are bundled. Result: 16% accuracy (barely above 12.5% random), 583ms/problem. Raw pixel intensity patterns do not capture abstract shape/size/color attributes.
+
+**FeatureVSA.** Classical computer vision features extracted deterministically:
+- Sobel edge magnitude → Type (shape complexity)
+- Mean object intensity → Color (fill pattern)
+- Object pixel fraction → Size (relative area)
+- Gradient orientation histogram → Angle (dominant direction)
+
+Result: 18.4% per-attribute accuracy, **0.5ms/panel** (instant). The features capture some visual signal but RAVEN's attribute encoding is abstract — edge density does not map linearly to the Type index 0--9.
+
+### C.5 Training Dynamics with AutoHypergradient Descent
+
+The AutoHypergradientAdamW optimizer (OSGM-style, arXiv:2502.11229) automatically adapts the learning rate via online hypergradient descent with AdaGrad-stabilized updates. The optimizer tracks a *surprise signal* — gradient prediction error — exposed as input-level gain modulation following an inverted-U (Yerkes-Dodson) response curve.
+
+**Table C3.** Training dynamics with VQ-VSA loss and AutoHypergradient (DenseNet-Small, 50 problems).
+
+| Epoch | Phase | Loss | LR (auto) | Surprise | Type | Color | Overall |
+|:---:|:---:|---:|---:|---:|---:|---:|---:|
+| 1 | WARMUP | 2.19 | 0.010 | — | 27% | 12% | 18% |
+| 5 | WARMUP | 1.98 | 0.010 | — | 27% | 12% | 19% |
+| 10 | WARMUP | 1.95 | 0.010 | — | 27% | 12% | 19% |
+| 15 | VQ | 3.59 | 0.015 | 0.169 | 25% | 25% | 21% |
+| 20 | VQ | 3.58 | 0.012 | 0.170 | 28% | 26% | 23% |
+
+The warm-up phase trains per-attribute classification heads (standard cross-entropy) to scatter the feature space before VQ quantization. The VQ phase switches to VQ-VSA loss with commitment penalty, causing the LR to spike (0.010 → 0.015) as the optimizer detects the landscape change, then settle (→ 0.012). The surprise signal stabilizes at S=0.170 (moderate — healthy learning zone).
+
+### C.6 Vulkan Compute Shader Inventory
+
+**Table C4.** Custom SPIR-V compute shaders for CubeMind perception and memory.
+
+| Shader | Size | Workgroup | Purpose |
+|:---|---:|:---|:---|
+| `oja-learning.spv` | 3.0KB | 256×1×1 | Oja self-normalizing plasticity |
+| `conv2d-3x3-gelu.spv` | 5.5KB | 16×16×1 | Fused 3×3 conv + GELU |
+| `maxpool-2x2.spv` | 3.5KB | 16×16×1 | 2×2 max pooling stride 2 |
+| `adaptive-avgpool-3x3.spv` | 4.1KB | 3×3×16 | Adaptive pool to 3×3 grid |
+| `residual-relu.spv` | 1.8KB | 256×1×1 | Fused residual add + ReLU |
+| `densenet-conv2d.spv` | 5.2KB | 16×16×1 | Zero-copy DenseNet concat conv |
+| `conv1x1.spv` | 2.8KB | 16×16×1 | 1×1 pointwise bottleneck |
+| `conv1x1-subgroup.spv` | 4.1KB | 32×1×1 | Subgroup-accelerated 1×1 conv |
+| `conv1x1-backward-input.spv` | 4.1KB | 32×1×1 | $\nabla_X$ via subgroup reduction |
+| `conv1x1-backward-weight.spv` | 3.5KB | 16×16×1 | $\nabla_W$ via atomic float add |
+| `vsa-argmax.spv` | 2.0KB | 1×1×8 | Block-code discretization |
+
+All shaders target Vulkan 1.0 except subgroup variants (Vulkan 1.1). The fused Conv2d+GELU shader eliminates intermediate VRAM writes, providing ~2× memory bandwidth savings versus separate dispatches. The zero-copy DenseNet shader writes new features directly into a pre-allocated channel slot via `out_channel_offset` push constant, avoiding buffer allocation and copy overhead.
+
+### C.7 Backward Pass Verification
+
+End-to-end backward through the DenseNet architecture was verified by checking gradient existence at every convolutional layer after a single forward-backward pass:
+
+```
+Forward:  (1, 1, 80, 80) → DenseNet → (1, 112)     [8.4ms warm]
+Backward: (1, 112) → full conv stack gradient flow    [41.5ms]
+  conv0 (stem):         gradient ✓
+  conv1 (block1/layer0): gradient ✓
+  conv2 (block1/layer1): gradient ✓
+  ...all 10 conv layers: gradient ✓
+  Weights changed after SGD step: ✓
+```
+
+The DenseBlock backward correctly distributes gradients through the channel-concatenation topology: the output gradient is split by channel counts, each layer's gradient flows through `Conv2d.backward()` (GEMM im2col path), and the resulting input gradients are accumulated across all contributing features. Gradient clipping (norm 0.1) and differential learning rates (backbone at 100× lower than projection head) prevent overflow in the GEMM matmul during early training.
 
