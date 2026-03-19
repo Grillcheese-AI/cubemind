@@ -1,213 +1,136 @@
-"""Additive Cross-Entropy Training for VSA-CNN Perception.
+"""Additive Cross-Entropy Training — bundle-predictive learning.
 
-Implements the bundle-predictive learning paradigm:
-1. Frozen codebook W of atomic attribute block-codes
-2. Target = bundled superposition of attributes present in panel
-3. Loss = additive CE (cosine sim against codebook, temperature-scaled)
-4. Post-hoc algorithmic binding in symbolic backend
+CNN outputs a raw 512-dim query vector (no softmax). Additive CE measures
+cosine similarity against a frozen codebook of atomic attribute block-codes.
+Temperature scaling sharpens gradients. Post-hoc algorithmic binding.
 
-The CNN learns to produce a query vector similar to the BUNDLED
-attributes, preserving topological continuity. The binding hash is
-never seen by the gradient — applied algorithmically after inference.
-
-Reference: Hersche et al. (2023), "A Neuro-Vector-Symbolic Architecture
-for Solving Raven's Progressive Matrices", Nature Machine Intelligence.
+The CNN never sees the hash-bound targets. It learns to produce a vector
+similar to the BUNDLED superposition of attributes in the image.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import time
 
 from cubemind.ops.block_codes import BlockCodes
 
-# ── Codebook ────────────────────────────────────────────────────────────────
-
 ATTRS = ["Type", "Size", "Color", "Angle"]
-N_VALUES = 10  # RAVEN uses 0-9 per attribute
+N_VALUES = 10
 
 
 class VSACodebook:
-    """Frozen dictionary of atomic attribute block-codes.
-
-    Each attribute value gets a unique, quasi-orthogonal block-code.
-    Total codebook size = len(ATTRS) * N_VALUES = 40 vectors.
-
-    Args:
-        bc: BlockCodes instance (k, l).
-        seed: Deterministic seed for reproducibility.
-    """
+    """Frozen dictionary of atomic attribute block-codes."""
 
     def __init__(self, bc: BlockCodes, seed: int = 42) -> None:
         self.bc = bc
-        self.k = bc.k
-        self.l = bc.l
         self.d = bc.k * bc.l
+        self.codes = {}
+        self.flat_codes = []
+        self.labels = []
 
-        # Generate unique codes for each (attr, value) pair
-        self.codes = {}  # (attr, val) -> (k, l) block-code
-        self.flat_codes = []  # list of (d,) vectors for similarity search
-        self.labels = []  # list of (attr, val) tuples
-
-        rng_seed = seed
+        s = seed
         for attr in ATTRS:
             for val in range(N_VALUES):
-                code = bc.random_discrete(seed=rng_seed)
+                code = bc.random_discrete(seed=s)
                 self.codes[(attr, val)] = code
                 self.flat_codes.append(code.ravel())
                 self.labels.append((attr, val))
-                rng_seed += 1
+                s += 1
 
-        # Codebook matrix W: (n_codes, d) for batch similarity
-        self.W = np.array(self.flat_codes, dtype=np.float32)  # (40, 512)
+        self.W = np.array(self.flat_codes, dtype=np.float32)
         self.n_codes = len(self.flat_codes)
 
-    def bundle_target(self, entity_attrs: dict) -> np.ndarray:
-        """Create bundled target from entity attributes.
-
-        Target = sum of attribute codes (unbound, similarity-preserving).
-
-        Args:
-            entity_attrs: Dict with Type, Size, Color, Angle (int 0-9).
-
-        Returns:
-            Bundled block-code (k, l), L1-normalized per block.
-        """
-        vectors = []
-        for attr in ATTRS:
-            val = int(entity_attrs.get(attr, 0))
-            val = max(0, min(val, N_VALUES - 1))
-            vectors.append(self.codes[(attr, val)])
-
-        return self.bc.bundle(vectors, normalize=True)
-
-    def bundle_target_flat(self, entity_attrs: dict) -> np.ndarray:
-        """Bundled target as flat vector (d,)."""
-        return self.bundle_target(entity_attrs).ravel()
+        # Pre-compute normalized codebook
+        norms = np.linalg.norm(self.W, axis=1, keepdims=True) + 1e-8
+        self.W_hat = (self.W / norms).astype(np.float32)
 
     def target_indices(self, entity_attrs: dict) -> list[int]:
-        """Get codebook indices for the attributes present in entity.
-
-        Args:
-            entity_attrs: Dict with Type, Size, Color, Angle.
-
-        Returns:
-            List of codebook indices (one per attribute).
-        """
         indices = []
         for attr in ATTRS:
             val = int(entity_attrs.get(attr, 0))
             val = max(0, min(val, N_VALUES - 1))
-            idx = self.labels.index((attr, val))
-            indices.append(idx)
+            indices.append(self.labels.index((attr, val)))
         return indices
 
+    def bundle_target(self, entity_attrs: dict) -> np.ndarray:
+        vecs = []
+        for attr in ATTRS:
+            val = int(entity_attrs.get(attr, 0))
+            val = max(0, min(val, N_VALUES - 1))
+            vecs.append(self.codes[(attr, val)])
+        return self.bc.bundle(vecs, normalize=True)
 
-# ── Additive Cross-Entropy Loss ─────────────────────────────────────────────
 
-
-def additive_cross_entropy(
-    query: np.ndarray,
-    codebook_W: np.ndarray,
-    target_indices: list[int],
-    temperature: float = 10.0,
-) -> tuple[float, np.ndarray]:
-    """Additive Cross-Entropy loss with temperature scaling.
-
-    L = -log( exp(s * sum_j sim(q, w_yj)) / sum_i exp(s * sim(q, w_i)) )
-
-    The numerator sums cosine similarities to ALL target attribute codes,
-    preserving the bundling structure. Temperature s sharpens gradients.
+def additive_ce_loss(query, W_hat, target_indices, temperature=5.0):
+    """Additive CE: cosine sim against codebook, temperature-scaled.
 
     Args:
-        query: CNN output vector (d,) — continuous, not block-coded.
-        codebook_W: Frozen codebook (n_codes, d).
-        target_indices: Indices of target attributes in codebook.
-        temperature: Inverse temperature scalar (higher = sharper).
+        query: Raw CNN output (d,) — NOT softmax'd.
+        W_hat: Normalized codebook (n, d).
+        target_indices: Indices of target attribute codes.
+        temperature: Inverse temperature.
 
     Returns:
-        (loss, grad) where grad is w.r.t. query vector (d,).
+        (loss, grad_query)
     """
-    d = query.shape[0]
-    n = codebook_W.shape[0]
-
-    # Cosine similarities: sim(q, w_i) for all i
     q_norm = np.linalg.norm(query) + 1e-8
-    w_norms = np.linalg.norm(codebook_W, axis=1, keepdims=True) + 1e-8
     q_hat = query / q_norm
-    w_hat = codebook_W / w_norms
 
-    sims = np.clip(w_hat @ q_hat, -1.0, 1.0)  # (n,) cosine similarities
+    # Cosine similarities
+    sims = W_hat @ q_hat  # (n,)
+    sims = np.clip(sims, -0.999, 0.999)
 
-    # Temperature-scaled logits (clamp to prevent overflow)
-    logits = np.clip(temperature * sims, -50.0, 50.0)  # (n,)
+    # Scaled logits
+    logits = temperature * sims
 
-    # Average target logits (not sum — prevents overflow with 4 targets)
-    target_logit_avg = np.mean([logits[idx] for idx in target_indices])
+    # Stable softmax
+    logits_shifted = logits - logits.max()
+    exp_logits = np.exp(logits_shifted)
+    probs = exp_logits / (exp_logits.sum() + 1e-8)
 
-    # Log-sum-exp denominator (numerically stable)
-    max_logit = logits.max()
-    log_denom = max_logit + np.log(np.exp(logits - max_logit).sum() + 1e-8)
-
-    # Loss: negative log probability of target
-    loss = -(target_logit_avg - log_denom)
-    loss = np.clip(loss, 0.0, 50.0)  # prevent extreme values
+    # Loss: average negative log-prob of target indices
+    target_probs = [max(probs[idx], 1e-8) for idx in target_indices]
+    loss = -np.mean([np.log(p) for p in target_probs])
 
     # Gradient w.r.t. query
-    # dL/dq = temperature * (softmax(logits) @ W_hat - sum_j W_hat[yj]) / ||q||
-    probs = np.exp(logits - max_logit)
-    probs /= probs.sum()
+    # dL/dq = (temperature / ||q||) * (E[w] - E_target[w])
+    expected_w = probs @ W_hat  # (d,)
+    target_w = np.mean([W_hat[idx] for idx in target_indices], axis=0)
 
-    # Expected codebook vector under softmax
-    expected = probs @ w_hat  # (d,)
+    grad = temperature * (expected_w - target_w) / q_norm
+    grad = np.clip(grad, -1.0, 1.0).astype(np.float32)
 
-    # Target codebook vectors (averaged, matching loss)
-    target_avg = np.mean([w_hat[idx] for idx in target_indices], axis=0)
-
-    # Gradient (clipped for stability)
-    grad = temperature * (expected - target_avg) / q_norm
-    grad = np.clip(grad, -1.0, 1.0)
-
-    return float(loss), grad.astype(np.float32)
+    return float(loss), grad
 
 
-# ── Training Loop ───────────────────────────────────────────────────────────
-
-
-def train_additive_ce(
-    problems: list[dict],
-    bc: BlockCodes,
-    n_epochs: int = 30,
-    lr: float = 0.01,
-    temperature: float = 10.0,
-    max_problems: int | None = None,
-) -> tuple:
-    """Train CNN with Additive Cross-Entropy on RAVEN panels.
-
-    Args:
-        problems: RAVEN problem dicts with panels + metadata.
-        bc: BlockCodes instance.
-        n_epochs: Training epochs.
-        lr: Learning rate.
-        temperature: Additive CE temperature.
-        max_problems: Max problems.
-
-    Returns:
-        (model, codebook) tuple.
-    """
+def train(problems, bc, n_epochs=30, lr=0.01, temperature=5.0, max_n=None):
+    """Train with Additive CE using grilly Conv2d (GEMM backward)."""
     import xml.etree.ElementTree as ET
     from PIL import Image
-    from cubemind.perception.cnn_encoder import CNNEncoder
+    from grilly.nn.conv import Conv2d
+    from grilly.nn.pooling import MaxPool2d
+    from grilly.nn.linear import Linear
+
+    if max_n:
+        problems = problems[:max_n]
 
     codebook = VSACodebook(bc)
-    model = CNNEncoder(k=bc.k, l=bc.l, grid_size=(1, 1), temperature=1.0)
 
-    if max_problems:
-        problems = problems[:max_problems]
+    # Build model: 3-layer conv + linear projection to d_vsa
+    convs = [
+        Conv2d(1, 32, kernel_size=3, padding=1),
+        Conv2d(32, 64, kernel_size=3, padding=1),
+        Conv2d(64, 128, kernel_size=3, padding=1),
+    ]
+    pools = [MaxPool2d(2, 2), MaxPool2d(2, 2), MaxPool2d(2, 2)]
+    proj = Linear(128, bc.k * bc.l)
 
     for epoch in range(n_epochs):
         total_loss = 0.0
         total_sim = 0.0
         n_panels = 0
+        t0 = time.perf_counter()
 
         for prob in problems:
             panels = prob.get("panels", [])
@@ -225,12 +148,10 @@ def train_additive_ce(
             for pi in range(min(len(panels), 8)):
                 if pi >= len(xml_panels):
                     break
-
                 entities = xml_panels[pi].findall(".//Entity")
                 if not entities:
                     continue
 
-                # Target: first entity's attributes
                 e = entities[0]
                 entity_attrs = {
                     "Type": int(e.get("Type", "0")),
@@ -238,61 +159,107 @@ def train_additive_ce(
                     "Color": int(e.get("Color", "0")),
                     "Angle": int(e.get("Angle", "0")),
                 }
-
                 target_indices = codebook.target_indices(entity_attrs)
-                bundle_target = codebook.bundle_target(entity_attrs)
 
                 # Prepare image
                 img = panels[pi]
                 if isinstance(img, Image.Image):
                     img = np.array(img.convert("L").resize((80, 80)),
                                    dtype=np.float32) / 255.0
-                else:
-                    img = np.asarray(img, dtype=np.float32)
-                    if img.max() > 1.0:
-                        img /= 255.0
+                x = img.reshape(1, 1, 80, 80).astype(np.float32)
 
-                # Forward — use raw logits, not block-softmax output
-                model.zero_grad()
-                pred = model.forward(img)  # (k, l) after softmax
+                # ── Forward ──
+                # Zero grads
+                for c in convs:
+                    c.zero_grad()
+                proj.zero_grad()
 
-                # Get raw logits from cache (pre-softmax)
-                logits_raw = model._cache.get('logits')
-                if logits_raw is not None:
-                    query = logits_raw.ravel().astype(np.float32)
-                else:
-                    query = pred.ravel()  # fallback
+                # Conv stack: conv -> ReLU -> pool
+                activations = [x]
+                h = x
+                for c, p in zip(convs, pools):
+                    h = c.forward(h)
+                    h = np.maximum(h, 0)  # ReLU
+                    activations.append(h)
+                    h = p.forward(h)
 
-                # Additive CE loss
-                loss, grad = additive_cross_entropy(
-                    query, codebook.W, target_indices, temperature,
+                # Global avg pool -> flatten
+                feat = h.mean(axis=(2, 3)).reshape(1, -1)  # (1, 128)
+
+                # Linear projection to d_vsa (raw logits, NO softmax)
+                query = proj.forward(feat).ravel()  # (512,)
+
+                # ── Loss ──
+                loss, grad_query = additive_ce_loss(
+                    query, codebook.W_hat, target_indices, temperature,
                 )
                 total_loss += loss
 
                 # Similarity to bundled target
-                sim = bc.similarity(bc.discretize(pred), bundle_target)
+                bundle_target = codebook.bundle_target(entity_attrs)
+                q_disc = bc.discretize(bc.from_flat(query, bc.k))
+                sim = bc.similarity(q_disc, bundle_target)
                 total_sim += sim
 
-                # Clip gradient
-                grad_norm = np.linalg.norm(grad)
-                if grad_norm > 1.0:
-                    grad = grad / grad_norm
+                # ── Backward ──
+                # Through linear projection
+                g_feat = proj.backward(
+                    grad_query.reshape(1, -1), x=feat
+                )  # (1, 128)
 
-                # Backward + step
-                grad_2d = grad.reshape(bc.k, bc.l)
-                model.backward(grad_2d)
-                model.step(lr=lr)
+                # Through global avg pool
+                _, c_dim, h_dim, w_dim = h.shape
+                g_pool = (g_feat.reshape(1, c_dim, 1, 1)
+                          / (h_dim * w_dim)).astype(np.float32)
+                g_pool = np.broadcast_to(g_pool, h.shape).copy()
+
+                # Through conv stack (reverse)
+                g = g_pool
+                for i in range(len(convs) - 1, -1, -1):
+                    g = pools[i].backward(g)
+                    # ReLU backward
+                    g = g * (activations[i + 1] > 0).astype(np.float32)
+                    g = convs[i].backward(g)
+
+                # ── SGD step (in-place) ──
+                for c in convs:
+                    w = np.asarray(c.weight)
+                    wg = getattr(c, '_grad_w', None)
+                    if wg is None:
+                        wg = getattr(c.weight, 'grad', None)
+                    if wg is not None:
+                        w -= lr * np.asarray(wg)
+                    b = np.asarray(c.bias) if c.bias is not None else None
+                    bg = getattr(c, '_grad_b', None)
+                    if bg is None and c.bias is not None:
+                        bg = getattr(c.bias, 'grad', None)
+                    if b is not None and bg is not None:
+                        b -= lr * np.asarray(bg)
+
+                pw = np.asarray(proj.weight)
+                pwg = getattr(proj, '_grad_w', None)
+                if pwg is None:
+                    pwg = getattr(proj.weight, 'grad', None)
+                if pwg is not None:
+                    pw -= lr * np.asarray(pwg)
+                pb = np.asarray(proj.bias) if proj.bias is not None else None
+                pbg = getattr(proj, '_grad_b', None)
+                if pbg is None and proj.bias is not None:
+                    pbg = getattr(proj.bias, 'grad', None)
+                if pb is not None and pbg is not None:
+                    pb -= lr * np.asarray(pbg)
 
                 n_panels += 1
 
+        elapsed = time.perf_counter() - t0
         avg_loss = total_loss / max(n_panels, 1)
         avg_sim = total_sim / max(n_panels, 1)
 
         if (epoch + 1) % 5 == 0 or epoch == 0:
             print(f"  epoch {epoch+1:2d}/{n_epochs}: loss={avg_loss:.4f} "
-                  f"sim={avg_sim:.4f} (bundled target)")
+                  f"sim={avg_sim:.4f} ({elapsed:.1f}s)")
 
-    return model, codebook
+    return convs, proj, codebook
 
 
 if __name__ == "__main__":
@@ -303,7 +270,7 @@ if __name__ == "__main__":
     import io
 
     config = sys.argv[1] if len(sys.argv) > 1 else "center_single"
-    max_n = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+    max_n = int(sys.argv[2]) if len(sys.argv) > 2 else 20
     epochs = int(sys.argv[3]) if len(sys.argv) > 3 else 30
 
     print(f"Loading {config}/train (max {max_n})...")
@@ -323,13 +290,10 @@ if __name__ == "__main__":
         problems.append({
             "panels": panels,
             "metadata": row.get("metadata", ""),
-            "target": row.get("target"),
         })
     print(f"Loaded {len(problems)} problems")
 
     bc = BlockCodes(8, 64)
-    print(f"\nTraining with Additive CE (temp=5.0, lr=0.01, {epochs} epochs)...")
-    model, codebook = train_additive_ce(
-        problems, bc, n_epochs=epochs, lr=0.01, temperature=5.0,
-        max_problems=max_n,
-    )
+    print(f"\nAdditive CE training (temp=5, lr=0.01, {epochs} epochs)...")
+    convs, proj, codebook = train(problems, bc, n_epochs=epochs, lr=0.01,
+                                   temperature=5.0, max_n=max_n)
