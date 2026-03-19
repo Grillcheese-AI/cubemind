@@ -212,7 +212,7 @@ def score_candidates(
         List of 8 scores (higher = better match).
     """
     if attrs is None:
-        attrs = ["Type", "Size", "Color"]
+        attrs = ["Type", "Size", "Color", "Number"]
 
     n = len(candidates)
     scores = [0.0] * n

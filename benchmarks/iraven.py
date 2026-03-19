@@ -156,16 +156,33 @@ def load_raven_split(
     if cache_dir is not None:
         kwargs["cache_dir"] = str(cache_dir)
 
-    ds = datasets.load_dataset(DATASET_ID, name=config, split=split, **kwargs)
-
-    problems = []
-    for row in ds:
-        problems.append({
-            "panels": row["panels"],
-            "choices": row["choices"],
-            "target": row.get("target", None),
-            "metadata": row.get("metadata", ""),
-        })
+    # Load only metadata + target columns to avoid image shape issues
+    # in multi-component configs (L-R, U-D, in-out have variable panel sizes)
+    try:
+        ds = datasets.load_dataset(DATASET_ID, name=config, split=split, **kwargs)
+        problems = []
+        for row in ds:
+            problems.append({
+                "panels": row.get("panels", []),
+                "choices": row.get("choices", []),
+                "target": row.get("target", None),
+                "metadata": row.get("metadata", ""),
+            })
+    except (ValueError, Exception) as e:
+        # Multi-component configs may fail on image deserialization —
+        # fall back to loading just metadata via select_columns
+        logger.info("Standard load failed (%s), trying metadata-only load", e)
+        ds = datasets.load_dataset(
+            DATASET_ID, name=config, split=split, **kwargs
+        ).select_columns(["metadata", "target"])
+        problems = []
+        for row in ds:
+            problems.append({
+                "panels": [],
+                "choices": [],
+                "target": row.get("target", None),
+                "metadata": row.get("metadata", ""),
+            })
 
     logger.info("Loaded %d problems from %s/%s", len(problems), config, split)
     return problems
@@ -180,6 +197,14 @@ def load_raven_split(
 
 ATTRS = ["Type", "Size", "Color", "Angle"]
 N_ATTR_VALUES = 10  # I-RAVEN uses 0-9 for each attribute
+
+# Multi-component configs: panels have 2+ independent components
+MULTI_COMPONENT = {
+    "left_center_single_right_center_single": [(0, "Left"), (1, "Right")],
+    "up_center_single_down_center_single": [(0, "Up"), (1, "Down")],
+    "in_center_single_out_center_single": [(0, "Out"), (1, "In")],
+    "in_distribute_four_out_center_single": [(0, "Out"), (1, "In")],
+}
 
 
 def _stable_seed(name: str) -> int:
@@ -598,16 +623,10 @@ def evaluate_problem_dataset(
 
     t0 = time.perf_counter()
 
-    # Parse context and candidate attributes from metadata XML
+    # Parse problem into per-component context + candidates
+    config = problem.get("_config", "center_single")
     if problem.get("metadata"):
-        context_attrs = [
-            _aggregate_entities(parse_panel_entities(problem["metadata"], i))
-            for i in range(8)
-        ]
-        candidate_attrs = [
-            _aggregate_entities(parse_panel_entities(problem["metadata"], 8 + i))
-            for i in range(len(problem["choices"]))
-        ]
+        components = parse_problem_components(problem["metadata"], config)
     else:
         # No metadata — fall back to multi-view HMM only
         context_codes = [encode_panel_image(p, bc) for p in problem["panels"]]
@@ -617,16 +636,31 @@ def evaluate_problem_dataset(
         target = problem.get("target")
         return pred_idx == target if target is not None else False, pred_idx, latency
 
-    # Primary: integer detector scoring
-    primary_scores = detector_score(context_attrs, candidate_attrs)
+    if not components:
+        pred_idx = 0
+        latency = (time.perf_counter() - t0) * 1000
+        target = problem.get("target")
+        return pred_idx == target if target is not None else False, pred_idx, latency
 
-    # Check if there's a clear winner or a tie
-    max_score = max(primary_scores)
-    n_tied = sum(1 for s in primary_scores if s == max_score)
+    # Multi-component scoring: accumulate detector scores across all components
+    # n_choices = 8 for all RAVEN configs (even when images aren't loaded)
+    n_choices = len(problem["choices"]) if problem["choices"] else 8
+    combined_scores = [0.0] * n_choices
+    attrs_to_check = ["Type", "Size", "Color", "Number"]
+
+    for comp in components:
+        comp_scores = detector_score(
+            comp["context"], comp["candidates"], attrs=attrs_to_check
+        )
+        for i in range(n_choices):
+            combined_scores[i] += comp_scores[i]
+
+    # Check for clear winner or tie
+    max_score = max(combined_scores)
+    n_tied = sum(1 for s in combined_scores if s == max_score)
 
     if n_tied == 1:
-        # Clear winner from detectors
-        pred_idx = int(np.argmax(primary_scores))
+        pred_idx = int(np.argmax(combined_scores))
     else:
         # Tie — use multi-view HMM as tiebreaker
         if use_metadata and problem.get("metadata"):
@@ -636,7 +670,7 @@ def evaluate_problem_dataset(
             ]
             choice_codes = [
                 encode_panel_from_metadata(problem["metadata"], 8 + i, bc)
-                for i in range(len(problem["choices"]))
+                for i in range(n_choices)
             ]
         else:
             context_codes = [encode_panel_image(p, bc) for p in problem["panels"]]
@@ -644,11 +678,10 @@ def evaluate_problem_dataset(
 
         hmm_idx = predict_multiview(context_codes, choice_codes, hmms, bc)
 
-        # If HMM pick is among the tied candidates, use it
-        if primary_scores[hmm_idx] == max_score:
+        if combined_scores[hmm_idx] == max_score:
             pred_idx = hmm_idx
         else:
-            pred_idx = int(np.argmax(primary_scores))
+            pred_idx = int(np.argmax(combined_scores))
 
     latency = (time.perf_counter() - t0) * 1000
 
@@ -658,19 +691,129 @@ def evaluate_problem_dataset(
     return correct, pred_idx, latency
 
 
-def _aggregate_entities(entities: list[dict]) -> dict:
-    """Aggregate multiple entities into a single attribute dict (mode per attr)."""
+def _aggregate_entities(entities: list[dict], layout_number: int = 0) -> dict:
+    """Aggregate multiple entities into a single attribute dict (mode per attr).
+
+    Includes 'Number' from the Layout element — critical for distribute configs.
+    """
     from collections import Counter
 
     if not entities:
-        return {"Type": 0, "Size": 0, "Color": 0}
+        return {"Type": 0, "Size": 0, "Color": 0, "Number": layout_number}
 
-    result = {}
+    result = {"Number": layout_number}
     for attr in ["Type", "Size", "Color"]:
         vals = [e.get(attr, 0) for e in entities]
         counter = Counter(vals)
         result[attr] = counter.most_common(1)[0][0]
     return result
+
+
+def parse_panel_entities_component(
+    metadata_xml: str, panel_index: int, component_idx: int | None = None
+) -> tuple[list[dict], int]:
+    """Parse entity attributes from a specific component of a panel.
+
+    For multi-component configs (L-R, U-D, in-out), each panel has multiple
+    Component elements. This extracts entities from a specific component.
+
+    Args:
+        metadata_xml: XML metadata string.
+        panel_index: Panel index (0-7 context, 8-15 choices).
+        component_idx: Component index within the panel (None = all entities).
+
+    Returns:
+        Tuple of (entities, layout_number) where entities is a list of dicts
+        and layout_number is the Number attribute from the Layout element.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(metadata_xml)
+    except ET.ParseError:
+        return [{"Type": 0, "Size": 0, "Color": 0}], 0
+
+    panels = root.findall(".//Panel")
+    if panel_index >= len(panels):
+        return [{"Type": 0, "Size": 0, "Color": 0}], 0
+
+    panel = panels[panel_index]
+    layout_number = 0
+
+    if component_idx is not None:
+        components = panel.findall(".//Component")
+        if component_idx < len(components):
+            comp = components[component_idx]
+            layout_el = comp.find(".//Layout")
+            if layout_el is not None:
+                layout_number = int(layout_el.get("Number", "0"))
+            entities = comp.findall(".//Entity")
+        else:
+            entities = []
+    else:
+        layout_el = panel.find(".//Layout")
+        if layout_el is not None:
+            layout_number = int(layout_el.get("Number", "0"))
+        entities = panel.findall(".//Entity")
+
+    if not entities:
+        return [{"Type": 0, "Size": 0, "Color": 0}], layout_number
+
+    return [
+        {
+            "Type": int(e.get("Type", "0")),
+            "Size": int(e.get("Size", "0")),
+            "Color": int(e.get("Color", "0")),
+        }
+        for e in entities
+    ], layout_number
+
+
+def parse_problem_components(
+    metadata_xml: str, config: str
+) -> list[dict] | None:
+    """Parse a RAVEN problem into per-component context + candidates.
+
+    For single-component configs: returns 1 component.
+    For multi-component configs: returns 2 components (e.g., Left + Right).
+
+    Each component dict has:
+        context: list of 8 aggregated attribute dicts
+        candidates: list of 8 aggregated attribute dicts
+
+    Returns None on parse error.
+    """
+    comp_configs = MULTI_COMPONENT.get(config, None)
+
+    if comp_configs is None:
+        # Single component — extract all entities from each panel
+        context = []
+        for i in range(8):
+            ents, num = parse_panel_entities_component(metadata_xml, i)
+            context.append(_aggregate_entities(ents, num))
+        candidates = []
+        for i in range(8):
+            ents, num = parse_panel_entities_component(metadata_xml, 8 + i)
+            candidates.append(_aggregate_entities(ents, num))
+        return [{"context": context, "candidates": candidates}]
+    else:
+        # Multi-component — extract per-component
+        components = []
+        for comp_idx, comp_name in comp_configs:
+            context = []
+            for i in range(8):
+                ents, num = parse_panel_entities_component(
+                    metadata_xml, i, component_idx=comp_idx
+                )
+                context.append(_aggregate_entities(ents, num))
+            candidates = []
+            for i in range(8):
+                ents, num = parse_panel_entities_component(
+                    metadata_xml, 8 + i, component_idx=comp_idx
+                )
+                candidates.append(_aggregate_entities(ents, num))
+            components.append({"context": context, "candidates": candidates})
+        return components
 
 
 # ── Synthetic Fallback (original code, preserved for offline testing) ─────────
@@ -907,6 +1050,7 @@ def run_iraven_benchmark(
         config_results = []
 
         for idx, prob in enumerate(problems):
+            prob["_config"] = config  # pass config name for multi-component handling
             if is_synthetic:
                 correct, pred_idx, latency = evaluate_synthetic_problem(
                     model, prob
