@@ -320,6 +320,88 @@ def _fingerprint_attrs_match(fp1: tuple, fp2: tuple) -> bool:
     return attrs1 == attrs2
 
 
+def score_candidates_per_entity(
+    context_entities: list[list[dict]],
+    candidate_entities: list[list[dict]],
+    attrs: list[str] | None = None,
+) -> list[float]:
+    """Score candidates using per-entity-position attribute tracking.
+
+    Instead of aggregating entities to mode, tracks each entity position
+    independently across the 8 context panels. For each position, builds
+    a 3x3 attribute grid and runs detectors. Candidates score by how many
+    per-position attributes match.
+
+    This is the key fix for distribute configs where different entities
+    at different positions follow independent rules.
+
+    Args:
+        context_entities: List of 8 panel entity lists.
+        candidate_entities: List of 8 candidate entity lists.
+        attrs: Attributes to check per entity.
+
+    Returns:
+        List of 8 candidate scores.
+    """
+    if attrs is None:
+        attrs = ["Type", "Size", "Color"]
+
+    n_candidates = len(candidate_entities)
+    scores = [0.0] * n_candidates
+
+    # Find the max number of entities in any panel
+    max_ents = max(
+        (len(ents) for ents in context_entities if ents),
+        default=0,
+    )
+
+    if max_ents == 0:
+        return scores
+
+    # For each entity position (0 to max_ents-1):
+    for pos_idx in range(max_ents):
+        # Extract this position's attributes across all 8 context panels
+        pos_context = []
+        for panel_ents in context_entities:
+            if pos_idx < len(panel_ents):
+                pos_context.append(panel_ents[pos_idx])
+            else:
+                # Panel has fewer entities — use zeros
+                pos_context.append({a: 0 for a in attrs})
+
+        # For each attribute, build grid and run detectors
+        for attr in attrs:
+            predicted = predict_attribute(pos_context, attr)
+            if predicted is None:
+                continue
+
+            # Score candidates by matching this position's predicted value
+            for i in range(n_candidates):
+                cand_ents = candidate_entities[i]
+                if pos_idx < len(cand_ents):
+                    cand_val = cand_ents[pos_idx].get(attr, -1)
+                else:
+                    cand_val = -1
+
+                if cand_val == predicted:
+                    # Weight by rarity among candidates at this position
+                    n_matching = sum(
+                        1 for ce in candidate_entities
+                        if pos_idx < len(ce) and ce[pos_idx].get(attr) == predicted
+                    )
+                    scores[i] += n_candidates / max(n_matching, 1)
+
+    # Also add Number attribute scoring (aggregated — entity count follows rules)
+    if context_entities:
+        num_context = [{"Number": len(ents)} for ents in context_entities]
+        num_candidates = [{"Number": len(ents)} for ents in candidate_entities]
+        num_scores = score_candidates(num_context, num_candidates, attrs=["Number"])
+        for i in range(n_candidates):
+            scores[i] += num_scores[i] * 2.0  # Number gets 2x weight
+
+    return scores
+
+
 def _collect_entity_attr(panel_entity_lists: list[list[dict]], attr: str) -> list:
     """Collect all entity attribute values across multiple panels."""
     vals = []

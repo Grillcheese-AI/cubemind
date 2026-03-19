@@ -686,7 +686,7 @@ def evaluate_problem_dataset(
                     for i in range(n_choices)
                 ]
                 dist_scores = _score_distribution_rule(ctx_codes, cand_codes, bc)
-                # Add as small tiebreaker (0.5x weight)
+                # VSA distribution signal as tiebreaker
                 for i in range(n_choices):
                     comp_scores[i] += dist_scores[i] * 0.5
             except Exception:
@@ -694,9 +694,10 @@ def evaluate_problem_dataset(
         for i in range(n_choices):
             combined_scores[i] += comp_scores[i]
 
-    # Check for clear winner or tie
+    # Check for clear winner or tie (epsilon for float precision)
     max_score = max(combined_scores)
-    n_tied = sum(1 for s in combined_scores if s == max_score)
+    eps = 1e-5
+    n_tied = sum(1 for s in combined_scores if abs(s - max_score) < eps)
 
     if n_tied == 1:
         pred_idx = int(np.argmax(combined_scores))
@@ -825,7 +826,7 @@ def parse_problem_components(
     comp_configs = MULTI_COMPONENT.get(config, None)
 
     if comp_configs is None:
-        # Single component — extract all entities from each panel
+        # Single component — aggregate entities (mode per attribute)
         context = []
         context_entities = []
         for i in range(8):
