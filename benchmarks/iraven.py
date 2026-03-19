@@ -171,7 +171,158 @@ def load_raven_split(
     return problems
 
 
-# ── Panel Encoding ────────────────────────────────────────────────────────────
+# ── NVSA Panel Encoding (role-filler binding) ─────────────────────────────────
+#
+# Ported from the proven eval_iraven_learned.py. Encodes panels via symbolic
+# attributes (Type, Size, Color, Angle) using role-filler binding, matching
+# the NVSA approach (Hersche et al. 2023). Uses deterministic seeds so the
+# same attribute value always maps to the same block-code.
+
+ATTRS = ["Type", "Size", "Color", "Angle"]
+N_ATTR_VALUES = 10  # I-RAVEN uses 0-9 for each attribute
+
+
+def _stable_seed(name: str) -> int:
+    """Deterministic seed from a string name."""
+    h = 0
+    for ch in name:
+        h = (h * 31 + ord(ch)) & 0x7FFFFFFF
+    return h
+
+
+def _build_role_vectors(bc: BlockCodes) -> dict[str, np.ndarray]:
+    """Build deterministic role vectors for each attribute slot."""
+    return {
+        attr: bc.random_discrete(seed=_stable_seed(f"role_{attr}"))
+        for attr in ATTRS
+    }
+
+
+def _build_attr_codebooks(bc: BlockCodes) -> dict[str, np.ndarray]:
+    """Build deterministic codebooks for each attribute (10 values each)."""
+    return {
+        attr: bc.codebook_discrete(N_ATTR_VALUES, seed=_stable_seed(f"cb_{attr}"))
+        for attr in ATTRS
+    }
+
+
+# Module-level caches (rebuilt per bc instance via _get_encoding_tables)
+_encoding_cache: dict[int, tuple[dict, dict]] = {}
+
+
+def _get_encoding_tables(bc: BlockCodes):
+    """Get or build role vectors and attribute codebooks for a BlockCodes instance."""
+    key = id(bc)
+    if key not in _encoding_cache:
+        _encoding_cache[key] = (_build_role_vectors(bc), _build_attr_codebooks(bc))
+    return _encoding_cache[key]
+
+
+def encode_entity_nvsa(entity_attrs: dict, bc: BlockCodes) -> np.ndarray:
+    """Encode a single entity via role-filler binding.
+
+    entity_vec = bind(role_type, cb_type[val]) ⊛ bind(role_size, cb_size[val]) ⊛ ...
+
+    Args:
+        entity_attrs: Dict with Type, Size, Color, Angle (int values 0-9).
+        bc: BlockCodes instance.
+
+    Returns:
+        Block-code vector (k, l).
+    """
+    roles, codebooks = _get_encoding_tables(bc)
+
+    parts = []
+    for attr in ATTRS:
+        val = int(entity_attrs.get(attr, 0))
+        val = max(0, min(val, N_ATTR_VALUES - 1))
+        role = roles[attr]
+        filler = codebooks[attr][val]
+        parts.append(bc.bind(role, filler))
+
+    # Bind all attribute bindings together
+    result = parts[0]
+    for p in parts[1:]:
+        result = bc.bind(result, p)
+    return result
+
+
+def encode_panel_nvsa(entities: list[dict], bc: BlockCodes) -> np.ndarray:
+    """Encode a full panel: role-filler encode each entity, then bundle.
+
+    Args:
+        entities: List of entity dicts, each with Type/Size/Color/Angle.
+        bc: BlockCodes instance.
+
+    Returns:
+        Discrete block-code vector (k, l).
+    """
+    if not entities:
+        return bc.random_discrete(seed=0)
+
+    entity_vecs = [encode_entity_nvsa(e, bc) for e in entities]
+    if len(entity_vecs) == 1:
+        return bc.discretize(entity_vecs[0])
+    return bc.discretize(bc.bundle(entity_vecs))
+
+
+def parse_panel_entities(metadata_xml: str, panel_index: int) -> list[dict]:
+    """Parse entity attributes from RAVEN metadata XML for any panel index.
+
+    Works for both context panels (0-7) and choice panels (8-15).
+
+    Args:
+        metadata_xml: XML metadata string from RAVEN dataset.
+        panel_index: Panel index (0-7 context, 8-15 choices).
+
+    Returns:
+        List of entity dicts with Type/Size/Color/Angle keys.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(metadata_xml)
+    except ET.ParseError:
+        return [{"Type": 0, "Size": 0, "Color": 0, "Angle": 0}]
+
+    panels = root.findall(".//Panel")
+    if panel_index >= len(panels):
+        return [{"Type": 0, "Size": 0, "Color": 0, "Angle": 0}]
+
+    panel = panels[panel_index]
+    entities = panel.findall(".//Entity")
+
+    if not entities:
+        return [{"Type": 0, "Size": 0, "Color": 0, "Angle": 0}]
+
+    return [
+        {
+            "Type": int(e.get("Type", "0")),
+            "Size": int(e.get("Size", "0")),
+            "Color": int(e.get("Color", "0")),
+            "Angle": int(e.get("Angle", "0")),
+        }
+        for e in entities
+    ]
+
+
+def encode_panel_from_metadata(
+    metadata_xml: str, panel_index: int, bc: BlockCodes
+) -> np.ndarray:
+    """Encode a panel from metadata XML using NVSA role-filler binding.
+
+    Works for both context panels (indices 0-7) and choice panels (indices 8-15).
+
+    Args:
+        metadata_xml: XML metadata string.
+        panel_index: Panel index in the XML (0-7 context, 8-15 choices).
+        bc: BlockCodes instance.
+
+    Returns:
+        Discrete block-code vector (k, l).
+    """
+    entities = parse_panel_entities(metadata_xml, panel_index)
+    return encode_panel_nvsa(entities, bc)
 
 
 def encode_panel_image(
@@ -179,141 +330,29 @@ def encode_panel_image(
     bc: BlockCodes,
     target_size: tuple[int, int] = (80, 80),
 ) -> np.ndarray:
-    """Encode a single panel image to a block-code vector.
+    """Encode a panel image to a block-code (fallback when no metadata).
 
-    Converts the image to grayscale, resizes, flattens to a feature vector,
-    and projects to a discrete block-code via block-wise argmax.
-
-    For a real production system this would use a learned CNN or ViT encoder.
-    This version uses a deterministic projection that captures enough spatial
-    structure for the HMM to detect relational rules.
-
-    Args:
-        image: PIL Image of a RAVEN panel.
-        bc: BlockCodes instance.
-        target_size: Resize target (height, width).
-
-    Returns:
-        Discrete block-code vector of shape (k, l).
+    Simple grayscale projection — much weaker than NVSA metadata encoding.
+    Use encode_panel_from_metadata when XML metadata is available.
     """
     from PIL import Image
 
     if not isinstance(image, Image.Image):
         image = Image.open(image)
 
-    # Convert to grayscale and resize
     img = image.convert("L").resize(target_size, Image.Resampling.BILINEAR)
-    pixels = np.array(img, dtype=np.float32) / 255.0  # [0, 1]
-
-    # Flatten and project to d_vsa dimensions
+    pixels = np.array(img, dtype=np.float32) / 255.0
     flat = pixels.ravel()
     d_vsa = bc.k * bc.l
 
     if flat.size >= d_vsa:
-        # Subsample or truncate to d_vsa
         indices = np.linspace(0, flat.size - 1, d_vsa, dtype=int)
         projected = flat[indices]
     else:
-        # Tile to fill d_vsa dimensions
         repeats = (d_vsa // flat.size) + 1
         projected = np.tile(flat, repeats)[:d_vsa]
 
-    # Reshape to (k, l) blocks and discretize (argmax per block)
-    block_vec = projected.reshape(bc.k, bc.l)
-    return bc.discretize(block_vec)
-
-
-def encode_panel_metadata(
-    metadata_xml: str,
-    panel_index: int,
-    bc: BlockCodes,
-) -> np.ndarray:
-    """Encode a panel's attributes from XML metadata to a block-code.
-
-    Extracts shape type, size, color, and angle from the metadata XML
-    and encodes each attribute as a block-code, then bundles them.
-
-    This approach is closer to how NVSA (Hersche et al. 2023) works --
-    encoding symbolic attributes rather than raw pixels.
-
-    Args:
-        metadata_xml: XML metadata string from the RAVEN dataset.
-        panel_index: Index of the panel (0-7 for context, 0-7 for choices).
-        bc: BlockCodes instance.
-
-    Returns:
-        Discrete block-code vector of shape (k, l).
-    """
-    import xml.etree.ElementTree as ET
-
-    try:
-        root = ET.fromstring(metadata_xml)
-    except ET.ParseError:
-        # Fallback to random if metadata is malformed
-        return bc.random_discrete(seed=panel_index)
-
-    # Extract attributes from the panel's entities.
-    # RAVEN metadata structure:
-    #   <Data><Panels>
-    #     <Panel><Struct name="Singleton"><Component><Layout>
-    #       <Entity Angle="7" Color="5" Size="3" Type="triangle"/>
-    #     </Layout></Component></Struct></Panel>
-    #     ...
-    #   </Panels></Data>
-    # We use .//Panel to find all Panel elements, then .//Entity to find
-    # all Entity elements at any depth within that panel.
-    panels = root.findall(".//Panel")
-    if panel_index >= len(panels):
-        return bc.random_discrete(seed=panel_index)
-
-    panel = panels[panel_index]
-    entities = panel.findall(".//Entity")
-
-    if not entities:
-        return bc.random_discrete(seed=panel_index)
-
-    # Encode each entity's attributes as block-codes and bundle them
-    entity_codes = []
-    for ent_idx, entity in enumerate(entities):
-        attr_codes = []
-
-        # Type attribute -> block-code
-        etype = entity.get("Type", "0")
-        type_seed = hash(f"type_{etype}") % (2**31)
-        type_bc = bc.random_discrete(seed=type_seed)
-        role_type = bc.random_discrete(seed=hash("role_type") % (2**31))
-        attr_codes.append(bc.bind(type_bc, role_type))
-
-        # Size attribute -> block-code
-        esize = entity.get("Size", "0")
-        size_seed = hash(f"size_{esize}") % (2**31)
-        size_bc = bc.random_discrete(seed=size_seed)
-        role_size = bc.random_discrete(seed=hash("role_size") % (2**31))
-        attr_codes.append(bc.bind(size_bc, role_size))
-
-        # Color attribute -> block-code
-        ecolor = entity.get("Color", "0")
-        color_seed = hash(f"color_{ecolor}") % (2**31)
-        color_bc = bc.random_discrete(seed=color_seed)
-        role_color = bc.random_discrete(seed=hash("role_color") % (2**31))
-        attr_codes.append(bc.bind(color_bc, role_color))
-
-        # Angle attribute -> block-code
-        eangle = entity.get("Angle", "0")
-        angle_seed = hash(f"angle_{eangle}") % (2**31)
-        angle_bc = bc.random_discrete(seed=angle_seed)
-        role_angle = bc.random_discrete(seed=hash("role_angle") % (2**31))
-        attr_codes.append(bc.bind(angle_bc, role_angle))
-
-        # Bundle attributes for this entity
-        entity_code = bc.bundle(attr_codes)
-
-        # Bind with entity position role
-        ent_role = bc.random_discrete(seed=hash(f"entity_{ent_idx}") % (2**31))
-        entity_codes.append(bc.bind(entity_code, ent_role))
-
-    # Bundle all entities into a single panel representation
-    return bc.discretize(bc.bundle(entity_codes))
+    return bc.discretize(projected.reshape(bc.k, bc.l))
 
 
 # ── Multi-View Observation Sequences ──────────────────────────────────────────
@@ -401,19 +440,24 @@ def train_multiview_hmms(
     }
 
     for prob in train_problems:
-        # Encode context panels
+        # Encode context panels (NVSA metadata for consistent encoding)
         if use_metadata and prob.get("metadata"):
             ctx_vecs = [
-                encode_panel_metadata(prob["metadata"], i, bc)
+                encode_panel_from_metadata(prob["metadata"], i, bc)
                 for i in range(len(prob["panels"]))
             ]
         else:
             ctx_vecs = [encode_panel_image(p, bc) for p in prob["panels"]]
 
-        # Append correct answer to make a 9-panel training sequence
+        # Append correct answer (same encoding space as context!)
         target_idx = prob.get("target")
         if target_idx is not None:
-            answer_vec = encode_panel_image(prob["choices"][target_idx], bc)
+            if use_metadata and prob.get("metadata"):
+                answer_vec = encode_panel_from_metadata(
+                    prob["metadata"], 8 + target_idx, bc
+                )
+            else:
+                answer_vec = encode_panel_image(prob["choices"][target_idx], bc)
             full_seq = ctx_vecs + [answer_vec]
         else:
             full_seq = ctx_vecs
@@ -547,10 +591,10 @@ def evaluate_problem_dataset(
     """
     t0 = time.perf_counter()
 
-    # Encode context panels (8 panels)
+    # Encode context panels (8 panels — NVSA metadata encoding)
     if use_metadata and problem.get("metadata"):
         context_codes = [
-            encode_panel_metadata(problem["metadata"], i, bc)
+            encode_panel_from_metadata(problem["metadata"], i, bc)
             for i in range(len(problem["panels"]))
         ]
     else:
@@ -559,8 +603,14 @@ def evaluate_problem_dataset(
             for panel in problem["panels"]
         ]
 
-    # Encode answer choices
-    choice_codes = [encode_panel_image(choice, bc) for choice in problem["choices"]]
+    # Encode answer choices (NVSA metadata for indices 8-15, image fallback)
+    if use_metadata and problem.get("metadata"):
+        choice_codes = [
+            encode_panel_from_metadata(problem["metadata"], 8 + i, bc)
+            for i in range(len(problem["choices"]))
+        ]
+    else:
+        choice_codes = [encode_panel_image(choice, bc) for choice in problem["choices"]]
 
     # Multi-view prediction
     pred_idx = predict_multiview(context_codes, choice_codes, hmms, bc)
