@@ -578,7 +578,11 @@ def evaluate_problem_dataset(
     bc: BlockCodes,
     use_metadata: bool = True,
 ) -> tuple[bool, int, float]:
-    """Evaluate on a single RAVEN problem using multi-view HMM routing.
+    """Evaluate on a single RAVEN problem using integer detectors + HMM tiebreaker.
+
+    Primary signal: deterministic integer-domain rule detectors on per-attribute
+    3x3 grids (constant, progression, arithmetic, distribute-three).
+    Secondary signal: multi-view HMM prediction for tiebreaking.
 
     Args:
         problem: Dict with panels, choices, target, metadata.
@@ -589,31 +593,62 @@ def evaluate_problem_dataset(
     Returns:
         (correct, predicted_idx, latency_ms)
     """
+    from cubemind.reasoning.rule_detectors import score_candidates as detector_score
+    from collections import Counter
+
     t0 = time.perf_counter()
 
-    # Encode context panels (8 panels — NVSA metadata encoding)
-    if use_metadata and problem.get("metadata"):
-        context_codes = [
-            encode_panel_from_metadata(problem["metadata"], i, bc)
-            for i in range(len(problem["panels"]))
+    # Parse context and candidate attributes from metadata XML
+    if problem.get("metadata"):
+        context_attrs = [
+            _aggregate_entities(parse_panel_entities(problem["metadata"], i))
+            for i in range(8)
         ]
-    else:
-        context_codes = [
-            encode_panel_image(panel, bc)
-            for panel in problem["panels"]
-        ]
-
-    # Encode answer choices (NVSA metadata for indices 8-15, image fallback)
-    if use_metadata and problem.get("metadata"):
-        choice_codes = [
-            encode_panel_from_metadata(problem["metadata"], 8 + i, bc)
+        candidate_attrs = [
+            _aggregate_entities(parse_panel_entities(problem["metadata"], 8 + i))
             for i in range(len(problem["choices"]))
         ]
     else:
-        choice_codes = [encode_panel_image(choice, bc) for choice in problem["choices"]]
+        # No metadata — fall back to multi-view HMM only
+        context_codes = [encode_panel_image(p, bc) for p in problem["panels"]]
+        choice_codes = [encode_panel_image(c, bc) for c in problem["choices"]]
+        pred_idx = predict_multiview(context_codes, choice_codes, hmms, bc)
+        latency = (time.perf_counter() - t0) * 1000
+        target = problem.get("target")
+        return pred_idx == target if target is not None else False, pred_idx, latency
 
-    # Multi-view prediction
-    pred_idx = predict_multiview(context_codes, choice_codes, hmms, bc)
+    # Primary: integer detector scoring
+    primary_scores = detector_score(context_attrs, candidate_attrs)
+
+    # Check if there's a clear winner or a tie
+    max_score = max(primary_scores)
+    n_tied = sum(1 for s in primary_scores if s == max_score)
+
+    if n_tied == 1:
+        # Clear winner from detectors
+        pred_idx = int(np.argmax(primary_scores))
+    else:
+        # Tie — use multi-view HMM as tiebreaker
+        if use_metadata and problem.get("metadata"):
+            context_codes = [
+                encode_panel_from_metadata(problem["metadata"], i, bc)
+                for i in range(8)
+            ]
+            choice_codes = [
+                encode_panel_from_metadata(problem["metadata"], 8 + i, bc)
+                for i in range(len(problem["choices"]))
+            ]
+        else:
+            context_codes = [encode_panel_image(p, bc) for p in problem["panels"]]
+            choice_codes = [encode_panel_image(c, bc) for c in problem["choices"]]
+
+        hmm_idx = predict_multiview(context_codes, choice_codes, hmms, bc)
+
+        # If HMM pick is among the tied candidates, use it
+        if primary_scores[hmm_idx] == max_score:
+            pred_idx = hmm_idx
+        else:
+            pred_idx = int(np.argmax(primary_scores))
 
     latency = (time.perf_counter() - t0) * 1000
 
@@ -621,6 +656,21 @@ def evaluate_problem_dataset(
     correct = pred_idx == target if target is not None else False
 
     return correct, pred_idx, latency
+
+
+def _aggregate_entities(entities: list[dict]) -> dict:
+    """Aggregate multiple entities into a single attribute dict (mode per attr)."""
+    from collections import Counter
+
+    if not entities:
+        return {"Type": 0, "Size": 0, "Color": 0}
+
+    result = {}
+    for attr in ["Type", "Size", "Color"]:
+        vals = [e.get(attr, 0) for e in entities]
+        counter = Counter(vals)
+        result[attr] = counter.most_common(1)[0][0]
+    return result
 
 
 # ── Synthetic Fallback (original code, preserved for offline testing) ─────────
@@ -727,6 +777,7 @@ def run_iraven_benchmark(
     use_synthetic_fallback: bool = True,
     cache_dir: str | Path | None = None,
     seed: int = 42,
+    **kwargs,
 ) -> dict:
     """Run the full I-RAVEN benchmark on the real dataset.
 
@@ -763,7 +814,12 @@ def run_iraven_benchmark(
     if configs is None:
         configs = list(ALL_CONFIGS)
 
-    bc = BlockCodes(K_BLOCKS, L_BLOCK)
+    # Use smaller block-code dimensions for I-RAVEN (proven in eval_iraven_learned.py)
+    # K=8, L=64 (d_vsa=512) gives better EM convergence than K=16, L=128 (d_vsa=2048)
+    iraven_k = kwargs.get("iraven_k", 8)
+    iraven_l = kwargs.get("iraven_l", 64)
+    bc = BlockCodes(iraven_k, iraven_l)
+    logger.info("Using block-code dims: k=%d, l=%d (d_vsa=%d)", iraven_k, iraven_l, iraven_k * iraven_l)
     dataset_available = _check_datasets_available() and _check_pillow_available()
 
     benchmark_start = time.perf_counter()
