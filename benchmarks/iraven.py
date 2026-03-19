@@ -788,31 +788,43 @@ def parse_problem_components(
     if comp_configs is None:
         # Single component — extract all entities from each panel
         context = []
+        context_entities = []
         for i in range(8):
             ents, num = parse_panel_entities_component(metadata_xml, i)
             context.append(_aggregate_entities(ents, num))
+            context_entities.append(ents)
         candidates = []
+        candidate_entities = []
         for i in range(8):
             ents, num = parse_panel_entities_component(metadata_xml, 8 + i)
             candidates.append(_aggregate_entities(ents, num))
-        return [{"context": context, "candidates": candidates}]
+            candidate_entities.append(ents)
+        return [{"context": context, "candidates": candidates,
+                 "context_entities": context_entities,
+                 "candidate_entities": candidate_entities}]
     else:
         # Multi-component — extract per-component
         components = []
         for comp_idx, comp_name in comp_configs:
             context = []
+            context_entities = []
             for i in range(8):
                 ents, num = parse_panel_entities_component(
                     metadata_xml, i, component_idx=comp_idx
                 )
                 context.append(_aggregate_entities(ents, num))
+                context_entities.append(ents)
             candidates = []
+            candidate_entities = []
             for i in range(8):
                 ents, num = parse_panel_entities_component(
                     metadata_xml, 8 + i, component_idx=comp_idx
                 )
                 candidates.append(_aggregate_entities(ents, num))
-            components.append({"context": context, "candidates": candidates})
+                candidate_entities.append(ents)
+            components.append({"context": context, "candidates": candidates,
+                              "context_entities": context_entities,
+                              "candidate_entities": candidate_entities})
         return components
 
 

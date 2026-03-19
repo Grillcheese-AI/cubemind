@@ -236,3 +236,96 @@ def score_candidates(
                 scores[i] += weight
 
     return scores
+
+
+def score_candidates_with_entities(
+    context: list[dict],
+    candidates: list[dict],
+    context_entities: list[list[dict]] | None = None,
+    candidate_entities: list[list[dict]] | None = None,
+    attrs: list[str] | None = None,
+) -> list[float]:
+    """Score candidates using both aggregated and per-entity matching.
+
+    When multiple candidates tie on aggregated attribute scores, uses
+    per-entity set composition as a tiebreaker. For distribute configs,
+    the set of entity attribute values in each row should be consistent.
+
+    Args:
+        context: List of 8 aggregated panel dicts.
+        candidates: List of 8 aggregated candidate dicts.
+        context_entities: Optional per-panel entity lists for set matching.
+        candidate_entities: Optional per-candidate entity lists.
+        attrs: Attributes to check.
+
+    Returns:
+        List of 8 scores (higher = better match).
+    """
+    # Start with standard detector scores
+    base_scores = score_candidates(context, candidates, attrs)
+
+    if context_entities is None or candidate_entities is None:
+        return base_scores
+
+    # Entity-level tiebreaker: use positional fingerprinting.
+    # For distribute configs, entities have positions (PosX, PosY).
+    # Compare the full entity fingerprint (sorted by position) between
+    # context row patterns and each candidate to break ties.
+    n = len(candidates)
+    entity_bonus = [0.0] * n
+
+    # Build positional fingerprint for row 0 panel 2 (context[2])
+    # and row 1 panel 2 (context[5]) — these are the "column 2" pattern.
+    col2_fingerprints = []
+    for panel_idx in [2, 5]:
+        if panel_idx < len(context_entities):
+            ents = context_entities[panel_idx]
+            fp = _entity_fingerprint(ents)
+            col2_fingerprints.append(fp)
+
+    if len(col2_fingerprints) == 2:
+        # Check if column 2 has a consistent pattern
+        # that candidates should match
+        for i in range(n):
+            if candidate_entities[i]:
+                cand_fp = _entity_fingerprint(candidate_entities[i])
+                # Score by similarity to column 2 pattern
+                for ref_fp in col2_fingerprints:
+                    if cand_fp == ref_fp:
+                        entity_bonus[i] += 1.5
+                    elif _fingerprint_attrs_match(cand_fp, ref_fp):
+                        entity_bonus[i] += 0.5
+
+    # Combine: base + entity bonus
+    combined = [base_scores[i] + entity_bonus[i] for i in range(n)]
+    return combined
+
+
+def _entity_fingerprint(entities: list[dict]) -> tuple:
+    """Create a hashable fingerprint from entities sorted by position."""
+    positioned = []
+    for e in entities:
+        pos = (e.get("PosX", 0), e.get("PosY", 0))
+        attrs = (e.get("Type", -1), e.get("Size", -1), e.get("Color", -1))
+        positioned.append((pos, attrs))
+    return tuple(sorted(positioned))
+
+
+def _fingerprint_attrs_match(fp1: tuple, fp2: tuple) -> bool:
+    """Check if two fingerprints have matching attribute patterns (ignoring position)."""
+    if len(fp1) != len(fp2):
+        return False
+    attrs1 = sorted(a for _, a in fp1)
+    attrs2 = sorted(a for _, a in fp2)
+    return attrs1 == attrs2
+
+
+def _collect_entity_attr(panel_entity_lists: list[list[dict]], attr: str) -> list:
+    """Collect all entity attribute values across multiple panels."""
+    vals = []
+    for ents in panel_entity_lists:
+        for e in ents:
+            v = e.get(attr, -1)
+            if v >= 0:
+                vals.append(v)
+    return vals
