@@ -3,10 +3,10 @@
 import numpy as np
 import pytest
 
-from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops.block_codes import BlockCodes
 
-K, L = K_BLOCKS, L_BLOCK
+# Small dims for tests — full K_BLOCKS/L_BLOCK uses 1GB+ per HYLA instance
+K, L = 4, 32
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -131,7 +131,7 @@ class TestTrainer:
     def setup(self):
         from cubemind.model import CubeMind
         from cubemind.training.trainer import Trainer
-        self.model = CubeMind(k=K, l=L, n_codebook=8, d_hidden=64, cache_size=50)
+        self.model = CubeMind(k=K, l=L, n_codebook=8, d_hidden=16, cache_size=50)
         self.trainer = Trainer(self.model)
         self.bc = BlockCodes(K, L)
 
