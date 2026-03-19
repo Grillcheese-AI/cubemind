@@ -153,12 +153,13 @@ def train(
 
                     total_loss += loss_total / len(ATTRS)
 
-                    # Backward through DenseNet conv stack
-                    # g_feat flows from attr heads back through global avg pool → convs
-                    g_feat_4d = g_feat.reshape(1, feat_dim, 1, 1) / len(ATTRS)
-                    # Broadcast to spatial dims of last conv output
-                    # (DenseNet forward ends with global avg pool over spatial dims)
-                    # Skip full conv backward for warmup — heads learn feature mapping
+                    # Backward through DenseNet conv stack (gradient clipped)
+                    g_back = g_feat / len(ATTRS)
+                    g_norm = np.linalg.norm(g_back)
+                    if g_norm > 0.1:
+                        g_back = g_back * (0.1 / g_norm)
+                    dnet.backward(g_back)
+                    dnet.step(lr=lr * 0.01)  # 100x lower for backbone
 
                 else:
                     # ── Phase 2: VQ-VSA loss ──
@@ -183,8 +184,16 @@ def train(
                         proj.bias.grad = np.asarray(pb_grad)
                         grads[id(proj.bias)] = np.asarray(pb_grad)
 
-                    # AutoHypergradient step — self-tuning LR
+                    # AutoHypergradient step — self-tuning LR for proj head
                     optimizer.step(gradients=grads)
+
+                    # Backward through DenseNet backbone (gradient clipped)
+                    g_feat_from_proj = (grad_query.reshape(1, -1) @ np.asarray(proj.weight)).ravel()
+                    g_norm = np.linalg.norm(g_feat_from_proj)
+                    if g_norm > 0.1:
+                        g_feat_from_proj = g_feat_from_proj * (0.1 / g_norm)
+                    dnet.backward(g_feat_from_proj)
+                    dnet.step(lr=optimizer.current_lr * 0.01)  # 100x lower for backbone
 
                     # Accuracy via codebook similarity
                     for a in ATTRS:
