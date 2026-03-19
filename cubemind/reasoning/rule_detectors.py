@@ -223,11 +223,16 @@ def score_candidates(
             continue
 
         # Class-balanced scoring: rare matches get higher weight
-        n_matching = sum(1 for c in candidates if c[attr] == predicted)
+        n_matching = sum(1 for c in candidates if c.get(attr) == predicted)
         weight = n / max(n_matching, 1)
 
+        # Number attribute gets 2x weight — strongest signal for distribute configs
+        # where per-entity attribute aggregation via mode is lossy
+        if attr == "Number":
+            weight *= 2.0
+
         for i, cand in enumerate(candidates):
-            if cand[attr] == predicted:
+            if cand.get(attr) == predicted:
                 scores[i] += weight
 
     return scores
