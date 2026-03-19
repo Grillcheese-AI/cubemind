@@ -164,7 +164,7 @@ To extend CubeMind from metadata-based perception to raw pixel input, we introdu
 
 1. **Feature reuse.** DenseNet's dense connections concatenate all previous layer outputs along the channel dimension, ensuring that low-level edge and texture features remain directly accessible to deeper layers. This is critical for RAVEN, where subtle differences in edge curvature (shape), spatial extent (size), and fill intensity (color) must be preserved through the network — unlike ResNet, which abstracts away early features through residual addition.
 
-2. **Parameter efficiency.** By reusing features rather than re-learning them, DenseNet achieves competitive accuracy with far fewer parameters. Our DenseNet-Small uses ~50K parameters versus ResNet-18's 11.7M — a 234$\times$ reduction — while achieving 8.4ms warm inference versus 168ms.
+2. **Parameter efficiency.** By reusing features rather than re-learning them, DenseNet achieves competitive accuracy with far fewer parameters. Our DenseNet-Small uses ~50K parameters versus ResNet-18's 11.7M — a 234$\times$ reduction — while achieving 8.4ms warm inference versus 168ms for ResNet-18 on the same hardware (AMD Radeon RX 6750 XT via Vulkan compute, single-image batch, including CPU$\leftrightarrow$GPU transfer overhead).
 
 3. **Gradient flow.** Dense connections provide short paths from the loss to every layer, naturally mitigating the vanishing gradient problem. This is especially important when training with the VQ-VSA loss, where the gradient signal passes through a Straight-Through Estimator and must remain strong enough to update early convolutional filters.
 
