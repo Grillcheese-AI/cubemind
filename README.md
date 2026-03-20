@@ -41,6 +41,8 @@ For GPU acceleration:
 pip install grilly
 ```
 
+See **[INSTALL.md](INSTALL.md)** for detailed setup instructions, GPU configuration, pre-built extensions, and troubleshooting.
+
 ## Quick Start
 
 ```python
