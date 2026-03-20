@@ -5,8 +5,14 @@ description = "Neuro-vector-symbolic architecture for compositional reasoning on
 license = {text = "BSL-1.1"}
 requires-python = ">=3.12"
 dependencies = [
-    "grilly>=0.5.0",
+    "datasets>=4.8.2",
+    "grilly>=0.5.3",
+    "huggingface-hub>=1.7.1",
     "numpy>=1.24",
+    "pillow>=12.1.1",
+    "pyarrow>=23.0.1",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +33,9 @@ testpaths = ["tests"]
 # onnx <= 1.20.1 has CVE-2026-28500 (supply-chain attack via onnx.hub.load silent=True)
 # and no patched version exists yet. Safe to exclude since cubemind never imports onnx.
 exclude-dependencies = ["onnx"]
+
+[tool.uv.sources]
+grilly = { path = "../grilly", editable = true }
 
 [tool.ruff]
 line-length = 100
