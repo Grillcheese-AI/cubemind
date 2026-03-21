@@ -10,6 +10,7 @@ Pipeline position: Layer 1 of 4 — raw JSON → UnifiedEvent.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 
 
@@ -208,3 +209,20 @@ def select_test_events(
     ]
     eligible.sort(key=lambda r: r.get("confidence", 0.0), reverse=True)
     return eligible[:n]
+
+
+if __name__ == "__main__":
+    import sys
+
+    src = sys.argv[1] if len(sys.argv) > 1 else (
+        r"C:\Users\grill\Desktop\GrillCheese\data_learning"
+        r"\temporal\historical\epub_pdf_consolidated.json"
+    )
+    with open(src, "r", encoding="utf-8") as f:
+        raw = json.load(f)
+    selected = select_test_events(raw, n=1000)
+    out = "data/test_events_1000.json"
+    os.makedirs("data", exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(selected, f, indent=2, ensure_ascii=False)
+    print(f"Saved {len(selected)} events to {out}")
