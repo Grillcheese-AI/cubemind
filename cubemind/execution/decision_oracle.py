@@ -63,14 +63,22 @@ class DecisionOracle:
 
         self.bc = BlockCodes(k=k, l=l)
 
-        # ONE shared HYLA hypernetwork
+        # ONE shared HYLA hypernetwork — bottleneck d_out to d_hidden
+        # to avoid O(d_vsa^2) weight matrix at production dims.
+        self._d_out = d_hidden  # bottleneck dimension
         self.hyla = HYLA(
             d_vsa=self.d_vsa,
             d_hidden=d_hidden,
-            d_out=self.d_vsa,
+            d_out=d_hidden,  # bottleneck: d_hidden, not d_vsa
             k=k,
             l=l,
             seed=seed,
+        )
+        # Projection from bottleneck back to VSA space
+        rng = np.random.default_rng(seed + n_worlds * 2)
+        scale = np.sqrt(2.0 / d_hidden)
+        self._proj = (rng.standard_normal((self.d_vsa, d_hidden)) * scale).astype(
+            np.float32
         )
 
         # Deterministic personality vectors — one per world
@@ -123,8 +131,9 @@ class DecisionOracle:
             action_i = self.bc.bind(action, self.world_personalities[i])
             action_i_flat = self.bc.to_flat(action_i)
 
-            # Step 2: HYLA predicts state-delta
-            delta_flat = self.hyla.forward(state_flat, action_i_flat)
+            # Step 2: HYLA predicts bottleneck delta, project to VSA space
+            bottleneck = self.hyla.forward(state_flat, action_i_flat)
+            delta_flat = (self._proj @ bottleneck).astype(np.float32)
 
             # Step 3: compose future state via binding
             delta_block = self.bc.from_flat(delta_flat)
@@ -184,3 +193,74 @@ class DecisionOracle:
         # Clamp k to available worlds
         k = min(k, len(futures))
         return futures[:k]
+
+    # ── Training ──────────────────────────────────────────────────────────
+
+    def train(
+        self,
+        scenarios: list[dict],
+        n_epochs: int = 10,
+        beta: float = 0.95,
+    ) -> dict:
+        """Train CVL Q-values via self-play on scenario data.
+
+        For each scenario, runs all 128 worlds, uses plausibility as the
+        reward signal, and updates the CVL xi running average. After
+        training, Q-values will be nonzero and reflect learned preferences.
+
+        Args:
+            scenarios: List of dicts with 'state' and 'action' keys,
+                each being (k, l) block-code arrays.
+            n_epochs: Number of passes over the scenarios.
+            beta: EMA decay for xi updates (lower = faster learning).
+
+        Returns:
+            Dict with training stats.
+        """
+        total_updates = 0
+        mean_q_before = self._mean_q_sample(scenarios[:3])
+
+        for epoch in range(n_epochs):
+            for scenario in scenarios:
+                state = scenario["state"]
+                action = scenario["action"]
+                world_prior = scenario.get("prior", state)
+
+                futures = self.evaluate_futures(state, action)
+
+                # Compute plausibility rewards
+                future_states_flat = np.array([
+                    self.bc.to_flat(f["future_state"]) for f in futures
+                ], dtype=np.float32)
+                rewards = np.array([
+                    max(self.bc.similarity(f["future_state"], world_prior), 0.0)
+                    for f in futures
+                ], dtype=np.float32)
+
+                # Normalize rewards to [0, 1]
+                rmax = rewards.max()
+                if rmax > 0:
+                    rewards = rewards / rmax
+
+                self.cvl.update_xi(future_states_flat, rewards, beta=beta)
+                total_updates += 1
+
+        mean_q_after = self._mean_q_sample(scenarios[:3])
+        return {
+            "epochs": n_epochs,
+            "scenarios": len(scenarios),
+            "total_updates": total_updates,
+            "mean_q_before": mean_q_before,
+            "mean_q_after": mean_q_after,
+        }
+
+    def _mean_q_sample(self, scenarios: list[dict]) -> float:
+        """Sample mean Q-value across a few scenarios for monitoring."""
+        if not scenarios:
+            return 0.0
+        qs = []
+        for s in scenarios:
+            state_flat = self.bc.to_flat(s["state"])
+            action_flat = self.bc.to_flat(s["action"])
+            qs.append(self.cvl.q_value(state_flat, action_flat))
+        return float(np.mean(qs))

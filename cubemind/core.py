@@ -16,10 +16,11 @@ class Strategy(Enum):
 BLAKE3 = Strategy.BLAKE3
 BLOCK_CODE = Strategy.BLOCK_CODE
 
-# Default dimensions (paper: k=16, l=128, d=2048)
-K_BLOCKS: int = 16
+# Default dimensions (paper: k=80, l=128, d=10240)
+K_BLOCKS: int = 80
 L_BLOCK: int = 128
-D_VSA: int = K_BLOCKS * L_BLOCK  # 2048
+D_VSA: int = K_BLOCKS * L_BLOCK  # 10240
+N_WORLDS: int = 128  # Decision Oracle parallel futures
 
 EPS: float = 1e-20
 
