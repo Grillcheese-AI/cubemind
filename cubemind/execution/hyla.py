@@ -184,9 +184,11 @@ class HYLA:
             except Exception:
                 pass
 
-        # CPU fallback
-        h = gelu(e_norm @ self.W_h.T + self.b_h)
-        W_flat = h @ self.W_H.T
+        # CPU fallback — np.asarray handles both ndarray and VulkanTensor
+        W_h = np.asarray(self.W_h, dtype=np.float32)
+        W_H = np.asarray(self.W_H, dtype=np.float32)
+        h = gelu(e_norm @ W_h.T + self.b_h)
+        W_flat = h @ W_H.T
         return W_flat.reshape(self.d_out, self.d_vsa).astype(np.float32)
 
     # -- Forward pass ----------------------------------------------------------
