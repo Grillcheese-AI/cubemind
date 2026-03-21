@@ -179,7 +179,15 @@ class OracleTrainer:
             return {"n_walks": len(walks), "epochs": n_epochs, "updates": 0}
 
         for _ in range(n_epochs):
-            self.oracle.cvl.update_critic(trajectories, lr=1e-4)
+            # Use update_xi (fast EMA) instead of update_critic (slow numerical gradients)
+            # update_critic does finite-difference gradient descent over every weight —
+            # too slow on CPU. Switch to update_critic when grilly GPU is available.
+            future_states = np.array([t[2] for t in trajectories], dtype=np.float32)
+            rewards = np.array([t[3] for t in trajectories], dtype=np.float32)
+            rmax = rewards.max()
+            if rmax > 0:
+                rewards = rewards / rmax
+            self.oracle.cvl.update_xi(future_states, rewards, beta=beta)
             total_updates += 1
 
         return {

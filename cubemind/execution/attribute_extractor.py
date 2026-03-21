@@ -208,7 +208,7 @@ _ATTRIBUTE_DESCRIPTIONS: dict[str, str] = {
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "alibaba/tongyi-deepresearch-30b-a3b"
+_DEFAULT_MODEL = "google/gemini-3.1-flash-lite-preview"
 
 
 def build_extraction_prompt(text: str, category: str) -> str:
@@ -271,10 +271,30 @@ def parse_attributes(raw: str) -> dict[str, float]:
     text = re.sub(r"\n?```\s*$", "", text, flags=re.IGNORECASE)
     text = text.strip()
 
+    # Try direct parse first
+    data: Any = None
     try:
-        data: Any = json.loads(text)
+        data = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        logger.warning("parse_attributes: invalid JSON, returning empty dict")
+        # Model may wrap JSON in reasoning text — extract first { ... } block
+        match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, flags=re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+            except (json.JSONDecodeError, ValueError):
+                pass
+    # Handle truncated JSON — salvage key-value pairs via regex
+    if data is None:
+        pairs = re.findall(r'"(\w+)"\s*:\s*([\d.]+)', text)
+        if pairs:
+            data = {}
+            for k, v in pairs:
+                try:
+                    data[k] = float(v)
+                except ValueError:
+                    pass
+    if data is None:
+        logger.warning("parse_attributes: no valid JSON found, returning empty dict")
         return {}
 
     if not isinstance(data, dict):
@@ -346,7 +366,7 @@ async def extract_batch(
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 1024,
+                    "max_tokens": 2048,
                 }
 
                 try:

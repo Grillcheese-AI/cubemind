@@ -35,6 +35,13 @@ rss_feeds:
 - https://www.cbc.ca/webfeed/rss/rss-topstories
 - https://www.cbc.ca/webfeed/rss/rss-technology
 - https://www.cbc.ca/webfeed/rss/rss-world
+- https://rss.arxiv.org/rss/cs.NE
+- https://rss.arxiv.org/rss/cs.LG
+- https://rss.arxiv.org/rss/cs.CL
+- https://feeds.feedburner.com/venturebeat/SZYF
+- https://www.technologyreview.com/feed/
+- https://www.reuters.com/rssFeed/worldNews
+- https://feeds.bbci.co.uk/news/world/rss.xml
 rss_fetch_full_articles: true
 rss_max_articles_per_feed: 10
 scope_guard: true
