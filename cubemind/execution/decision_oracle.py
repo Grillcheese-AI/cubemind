@@ -105,12 +105,9 @@ class DecisionOracle:
     ) -> list[dict]:
         """Evaluate parallel futures for all worlds.
 
-        For each world i:
-          1. Bind the action with personality_i for diversity.
-          2. Run shared HYLA to predict a state-delta.
-          3. Bind state with the delta to get the future state.
-          4. Compute Q-value via shared CVL.
-          5. Default plausibility = 0.0 (no world_prior here).
+        Batched implementation: all personality binds, HYLA forwards,
+        projections, and CVL Q-values are computed in bulk numpy ops
+        to maximize GPU utilization via grilly bridge.
 
         Args:
             state: Current state block-code vector (k, l).
@@ -124,28 +121,61 @@ class DecisionOracle:
               - plausibility: float (defaults to 0.0 without prior)
         """
         state_flat = self.bc.to_flat(state)
-        results: list[dict] = []
 
+        # Step 1: batch all personality-flavored actions
+        actions_i = [
+            self.bc.bind(action, self.world_personalities[i])
+            for i in range(self.n_worlds)
+        ]
+        actions_i_flat = np.array(
+            [self.bc.to_flat(a) for a in actions_i], dtype=np.float32,
+        )  # (n_worlds, d_vsa)
+
+        # Step 2: batch HYLA forward + projection
+        # HYLA generates weights from the action embedding, applies to state
+        bottlenecks = np.array([
+            self.hyla.forward(state_flat, actions_i_flat[i])
+            for i in range(self.n_worlds)
+        ], dtype=np.float32)  # (n_worlds, d_hidden)
+
+        # Batch projection: (n_worlds, d_hidden) @ (d_hidden, d_vsa) -> (n_worlds, d_vsa)
+        deltas_flat = (bottlenecks @ self._proj.T).astype(np.float32)
+
+        # Step 3: batch compose future states via binding
+        future_states = []
         for i in range(self.n_worlds):
-            # Step 1: personality-flavored action
-            action_i = self.bc.bind(action, self.world_personalities[i])
-            action_i_flat = self.bc.to_flat(action_i)
+            delta_block = self.bc.from_flat(deltas_flat[i])
+            future_states.append(self.bc.bind(state, delta_block))
 
-            # Step 2: HYLA predicts bottleneck delta, project to VSA space
-            bottleneck = self.hyla.forward(state_flat, action_i_flat)
-            delta_flat = (self._proj @ bottleneck).astype(np.float32)
+        # Step 4: batch Q-values via CVL
+        # Batch encode_state_action: concat state+action for all worlds
+        sa_batch = np.array([
+            np.concatenate([state_flat, actions_i_flat[i]])
+            for i in range(self.n_worlds)
+        ], dtype=np.float32)  # (n_worlds, d_state + d_action)
 
-            # Step 3: compose future state via binding
-            delta_block = self.bc.from_flat(delta_flat)
-            future_state = self.bc.bind(state, delta_block)
+        # Batch phi encoding
+        W_phi = np.asarray(self.cvl.W_phi, dtype=np.float32)
+        phi_batch = sa_batch @ W_phi.T + self.cvl.b_phi  # (n_worlds, d_latent)
+        phi_norms = np.linalg.norm(phi_batch, axis=1, keepdims=True)
+        phi_norms = np.maximum(phi_norms, 1e-8)
+        phi_batch = phi_batch / phi_norms
 
-            # Step 4: Q-value from shared CVL
-            q_val = self.cvl.q_value(state_flat, action_i_flat)
+        # Batch RFF features
+        rff_batch = np.sqrt(2.0 * np.e / self.cvl.d_rff) * np.cos(
+            phi_batch @ self.cvl.W_rff.T + self.cvl.b_rff,
+        )  # (n_worlds, d_rff)
 
+        # Batch Q-values
+        q_scale = 1.0 / (1.0 - self.cvl.gamma)
+        q_values = q_scale * (rff_batch @ self.cvl.xi)  # (n_worlds,)
+
+        results: list[dict] = []
+        for i in range(self.n_worlds):
             results.append({
                 "world_id": i,
-                "future_state": future_state,
-                "q_value": q_val,
+                "future_state": future_states[i],
+                "q_value": float(q_values[i]),
                 "plausibility": 0.0,
             })
 

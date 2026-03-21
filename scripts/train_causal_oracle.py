@@ -21,10 +21,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Use smaller dims for CPU validation — scale up when grilly GPU is connected
-# from cubemind.core import K_BLOCKS, L_BLOCK
-K_BLOCKS = 16
-L_BLOCK = 64
+# GPU bridge now available — use production dims
+from cubemind.core import K_BLOCKS, L_BLOCK  # 80, 128 -> D_VSA=10240
 from cubemind.execution.causal_codebook import CausalCodebook
 from cubemind.execution.causal_graph import CausalGraph
 from cubemind.execution.data_normalizer import normalize_historical
@@ -202,7 +200,7 @@ def main():
 
     trainer = OracleTrainer(
         k=K_BLOCKS, l=L_BLOCK,
-        n_worlds=16, d_hidden=32,
+        n_worlds=128, d_hidden=64,
         seed=42,
     )
 
