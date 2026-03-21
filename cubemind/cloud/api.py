@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from cubemind.core import K_BLOCKS, L_BLOCK, N_WORLDS
 from cubemind.execution.decision_oracle import DecisionOracle
+from cubemind.execution.decision_tree import DecisionTree, Future
 from cubemind.execution.world_encoder import WorldEncoder
 
 app = FastAPI(title="CubeMind Decision Oracle", version="0.2.0")
@@ -167,6 +169,10 @@ def _narrate_ending(world_id: int, plausibility: float) -> str:
     return f"({confidence} confidence) The story resolves with {ending}."
 
 
+# ── Session store ────────────────────────────────────────────────────────────
+
+_sessions: dict[str, DecisionTree] = {}
+
 # ── Lazy globals ─────────────────────────────────────────────────────────────
 
 _oracle: DecisionOracle | None = None
@@ -211,6 +217,24 @@ class PredictResponse(BaseModel):
     question: str
     n_worlds: int
     elapsed_ms: float
+    futures: list[FutureItem]
+    session_id: str | None = None
+
+
+class ChooseRequest(BaseModel):
+    session_id: str
+    choice: int = Field(ge=0)
+    top_k: int = Field(default=5, gt=0, le=128)
+
+
+class BacktrackRequest(BaseModel):
+    session_id: str
+
+
+class TreeResponse(BaseModel):
+    session_id: str
+    depth: int
+    prompt: str
     futures: list[FutureItem]
 
 
@@ -287,11 +311,27 @@ def predict(req: PredictRequest) -> PredictResponse:
         for f in top
     ]
 
+    # Create and store a DecisionTree session for interactive exploration.
+    session_id = str(uuid.uuid4())
+    tree = DecisionTree(state=state, prompt=req.question, k=_K, l=_L)
+    tree_futures = [
+        Future(
+            state=state,  # use the same state as a stand-in for child states
+            description=fi.narrative,
+            plausibility=fi.plausibility,
+            q_value=fi.q_value,
+        )
+        for fi in futures
+    ]
+    tree.set_futures(tree_futures)
+    _sessions[session_id] = tree
+
     return PredictResponse(
         question=req.question,
         n_worlds=oracle.n_worlds,
         elapsed_ms=round(elapsed_ms, 2),
         futures=futures,
+        session_id=session_id,
     )
 
 
@@ -330,6 +370,87 @@ def book(req: BookRequest) -> BookResponse:
         elapsed_ms=round(elapsed_ms, 2),
         endings=endings,
     )
+
+
+def _session_or_404(session_id: str) -> DecisionTree:
+    """Return the session or raise 404."""
+    tree = _sessions.get(session_id)
+    if tree is None:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+    return tree
+
+
+def _tree_response(session_id: str, tree: DecisionTree) -> TreeResponse:
+    """Build a TreeResponse from the current node of a tree."""
+    node = tree.current
+    futures = [
+        FutureItem(
+            world_id=i,
+            archetype=_get_archetype(i)["name"],
+            narrative=f.description,
+            score=round(float(f.score), 4),
+            plausibility=round(float(f.plausibility), 4),
+            q_value=round(float(f.q_value), 4),
+        )
+        for i, f in enumerate(node.futures)
+    ]
+    return TreeResponse(
+        session_id=session_id,
+        depth=node.depth,
+        prompt=node.prompt_text,
+        futures=futures,
+    )
+
+
+@app.post("/choose", response_model=TreeResponse)
+def choose(req: ChooseRequest) -> TreeResponse:
+    """Advance the decision tree by selecting a future at the current node."""
+    tree = _session_or_404(req.session_id)
+    oracle = _get_oracle()
+    encoder = _get_encoder()
+
+    try:
+        child = tree.select(req.choice)
+    except (IndexError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    # Generate new futures for the child node via the oracle.
+    action = encoder.encode_action(child.prompt_text)
+    top = oracle.top_k(child.state, action, world_prior=child.state, k=req.top_k)
+    child_futures = [
+        Future(
+            state=child.state,
+            description=_narrate_future(
+                f["world_id"], f["q_value"], f["plausibility"], child.prompt_text,
+            ),
+            plausibility=float(f["plausibility"]),
+            q_value=float(f["q_value"]),
+        )
+        for f in top
+    ]
+    tree.set_futures(child_futures)
+
+    return _tree_response(req.session_id, tree)
+
+
+@app.post("/backtrack", response_model=TreeResponse)
+def backtrack(req: BacktrackRequest) -> TreeResponse:
+    """Move the session cursor back to its parent node."""
+    tree = _session_or_404(req.session_id)
+
+    try:
+        tree.backtrack()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return _tree_response(req.session_id, tree)
+
+
+@app.get("/tree/{session_id}")
+def get_tree(session_id: str) -> dict:
+    """Return a full JSON export of the decision tree."""
+    tree = _session_or_404(session_id)
+    return tree.export()
 
 
 @app.post("/train", response_model=TrainResponse)

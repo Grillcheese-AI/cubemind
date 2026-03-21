@@ -18,6 +18,15 @@ from cubemind.cloud.api import app  # noqa: E402
 client = TestClient(app)
 
 
+@pytest.fixture()
+def predict_payload() -> dict:
+    return {
+        "question": "Should I move to a new city?",
+        "context": {"job": "designer", "years": "3"},
+        "top_k": 3,
+    }
+
+
 # ── /health ───────────────────────────────────────────────────────────────────
 
 
@@ -156,3 +165,56 @@ class TestSchemas:
             "top_k": -1,
         })
         assert resp.status_code == 422
+
+
+# ── /choose, /backtrack, /tree ────────────────────────────────────────────────
+
+
+class TestTreeEndpoints:
+    """Tests for the interactive decision tree endpoints."""
+
+    def test_predict_returns_session(self, predict_payload):
+        """POST /predict should return a session_id string."""
+        body = client.post("/predict", json=predict_payload).json()
+        assert "session_id" in body
+        assert isinstance(body["session_id"], str)
+        assert len(body["session_id"]) > 0
+
+    def test_choose_branches(self, predict_payload):
+        """POST /choose should advance the tree to depth 1."""
+        session_id = client.post("/predict", json=predict_payload).json()["session_id"]
+        resp = client.post("/choose", json={"session_id": session_id, "choice": 0, "top_k": 3})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["depth"] == 1
+        assert body["session_id"] == session_id
+        assert isinstance(body["futures"], list)
+
+    def test_backtrack(self, predict_payload):
+        """predict → choose → backtrack should return depth 0."""
+        session_id = client.post("/predict", json=predict_payload).json()["session_id"]
+        client.post("/choose", json={"session_id": session_id, "choice": 0, "top_k": 3})
+        resp = client.post("/backtrack", json={"session_id": session_id})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["depth"] == 0
+        assert body["session_id"] == session_id
+
+    def test_tree_export(self, predict_payload):
+        """GET /tree/{session_id} should return a dict with prompt, futures, children."""
+        session_id = client.post("/predict", json=predict_payload).json()["session_id"]
+        resp = client.get(f"/tree/{session_id}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "prompt" in body
+        assert "futures" in body
+        assert "children" in body
+        assert body["depth"] == 0
+
+    def test_choose_invalid_session(self):
+        """POST /choose with an unknown session_id should return 404."""
+        resp = client.post("/choose", json={
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "choice": 0,
+        })
+        assert resp.status_code == 404
