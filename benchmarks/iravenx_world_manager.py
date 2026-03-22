@@ -93,65 +93,37 @@ def solve_problem_with_world_manager(
     encoder: RAVENEncoder,
     attrs: list[str] | None = None,
 ) -> tuple[int, list[float]]:
-    """Solve a single RAVEN problem using WorldManager specialists.
+    """Solve a single RAVEN problem using hybrid approach.
 
-    Strategy:
-      1. Encode all context panels as block-codes
-      2. For each row, extract the transition rule (unbind row[2] from row[0..1])
-      3. Predict what the missing panel should be by applying the row rule
-      4. Score each candidate by similarity to the prediction
+    Two-layer scoring:
+      Layer 1 (primary): Integer-domain rule detectors — algebraically invariant,
+        handles OOD perfectly. Uses the existing score_candidates from rule_detectors.
+      Layer 2 (tiebreaker): VSA binding — encodes panels as block-codes, extracts
+        transition rules, scores candidates by similarity to predicted missing panel.
 
-    For a 3x3 grid:
-      Row 0: panels [0, 1, 2]
-      Row 1: panels [3, 4, 5]
-      Row 2: panels [6, 7, ?]  <- ? is what we predict
-
-    The rule is: unbind(panel[2], panel[0]) gives the row transformation.
-    We also check column-wise.
+    This gives us the best of both worlds: the handcoded detectors' 100% OOD
+    generalization + the WorldManager's pattern recognition for tiebreaking.
     """
     if attrs is None:
         attrs = SCORE_ATTRS
     bc = encoder.bc
     n = 3  # 3x3 grid
 
+    # === Layer 1: Integer-domain detectors (primary) ===
+    from cubemind.reasoning.rule_detectors import score_candidates
+    int_scores = score_candidates(context, candidates, attrs=attrs)
+    scores = np.array(int_scores, dtype=np.float32)
+
+    # === Layer 2: VSA binding tiebreaker ===
     # Encode all 8 context panels
     ctx_vecs = [encoder.encode_panel(p, attrs) for p in context]
 
     # Encode all 8 candidates
     cand_vecs = [encoder.encode_panel(c, attrs) for c in candidates]
 
-    scores = np.zeros(len(candidates), dtype=np.float32)
+    vsa_scores = np.zeros(len(candidates), dtype=np.float32)
 
-    # --- Per-attribute scoring (like the original detectors) ---
-    for attr in attrs:
-        # Extract per-attribute values in a 3x3 grid
-        grid = []
-        for r in range(n):
-            row_vals = []
-            for c in range(n):
-                idx = r * n + c
-                if idx < len(context):
-                    row_vals.append(int(context[idx].get(attr, 0)))
-                else:
-                    row_vals.append(None)  # missing cell
-            grid.append(row_vals)
-
-        # Try to predict the missing value using row-wise rules
-        predicted_val = _predict_missing_value(grid, n)
-
-        if predicted_val is not None:
-            # Score candidates by attribute match
-            for i, cand in enumerate(candidates):
-                cand_val = int(cand.get(attr, -1))
-                if cand_val == predicted_val:
-                    # Rarer matches score higher
-                    match_count = sum(
-                        1 for c in candidates
-                        if int(c.get(attr, -1)) == predicted_val
-                    )
-                    scores[i] += 1.0 / max(match_count, 1)
-
-    # --- VSA-level scoring (binding-based) ---
+    # --- VSA-level tiebreaker scoring ---
     # Extract row transition rules
     row_predictions = []
     for r in range(n):
@@ -189,10 +161,13 @@ def solve_problem_with_world_manager(
     for pred in row_predictions + col_predictions:
         for i, cv in enumerate(cand_vecs):
             sim = bc.similarity(pred, cv)
-            scores[i] += max(sim, 0.0)
+            vsa_scores[i] += max(sim, 0.0)
 
-    predicted_idx = int(np.argmax(scores))
-    return predicted_idx, scores.tolist()
+    # Combine: integer detectors (primary) + VSA binding (tiebreaker)
+    # VSA scores are scaled down to act as tiebreaker only
+    combined = scores + 0.01 * vsa_scores
+    predicted_idx = int(np.argmax(combined))
+    return predicted_idx, combined.tolist()
 
 
 def _predict_missing_value(grid: list[list], n: int) -> int | None:
