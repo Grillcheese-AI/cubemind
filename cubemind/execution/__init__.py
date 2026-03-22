@@ -11,6 +11,8 @@ from cubemind.execution.decision_oracle import DecisionOracle
 from cubemind.execution.decision_tree import DecisionTree, Future, TreeNode
 from cubemind.execution.future_decoder import FutureDecoder
 from cubemind.execution.oracle_trainer import OracleTrainer
+from cubemind.execution.event_encoder import EventEncoder
+from cubemind.execution.vsa_translator import VSATranslator
 from cubemind.execution.world_encoder import WorldEncoder
 from cubemind.execution.world_manager import WorldManager
 
@@ -20,11 +22,13 @@ __all__ = [
     "CausalGraph",
     "DecisionOracle",
     "DecisionTree",
+    "EventEncoder",
     "Future",
     "FutureDecoder",
     "OracleTrainer",
     "TreeNode",
     "UnifiedEvent",
+    "VSATranslator",
     "WorldEncoder",
     "WorldManager",
     "normalize_historical",
