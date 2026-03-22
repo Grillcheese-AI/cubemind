@@ -12,3 +12,5 @@ cubemind_pipeline.html
 .claude/settings.local.json
 /docs/project_knowledge
 data/
+.env
+.claude/scheduled_tasks.lock
