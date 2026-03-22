@@ -12,6 +12,7 @@ from cubemind.execution.decision_tree import DecisionTree, Future, TreeNode
 from cubemind.execution.future_decoder import FutureDecoder
 from cubemind.execution.oracle_trainer import OracleTrainer
 from cubemind.execution.world_encoder import WorldEncoder
+from cubemind.execution.world_manager import WorldManager
 
 __all__ = [
     "ATTRIBUTE_NAMES",
@@ -25,6 +26,7 @@ __all__ = [
     "TreeNode",
     "UnifiedEvent",
     "WorldEncoder",
+    "WorldManager",
     "normalize_historical",
     "normalize_nyt",
     "select_test_events",
