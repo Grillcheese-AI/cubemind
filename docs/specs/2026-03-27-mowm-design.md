@@ -35,7 +35,7 @@ DSelect-k Router (over dynamic expert pool)
 |  [Physics] [Logic] [Economics] [Social]         |
 |  [Linguistics] [Causal] [Atomic] [Bio]          |
 |  [Music] [Identity] [Colors] [Language]          |
-|  [Historical] [+ Discovered]                     |
+|  [Historical] [Ensemble] [+ Discovered]           |
 |                                                 |
 |  Experts pick & compose axioms via VSA binding  |
 |                                                 |
@@ -83,6 +83,7 @@ mowm/
         colors.py            # Wavelength-frequency, color spaces, complementary harmonics
         language.py          # Morphology, syntax, semantics, pragmatics, distributional
         historical.py        # Temporal logic, event ordering, periodicity, epoch binding
+        ensemble.py          # Macroscopic VSA, mean-field games, population vectors, fractal causality
     tests/
         test_axiom_library.py
         test_world.py
@@ -285,8 +286,9 @@ registers its axioms. The axiom count per domain:
 | Colors | `colors.py` | ~15 | Wavelength-frequency, RGB/HSV/CIE spaces, complementary harmonics, Planck-to-perception |
 | Language | `language.py` | ~15 | Morphology, syntax trees, semantic roles, pragmatics, word embeddings, distributional axioms |
 | Historical | `historical.py` | ~15 | Temporal logic (before/after/during), event ordering, periodicity, causal chains over time, epoch binding |
+| Ensemble | `ensemble.py` | ~15 | Population superposition (sgn(sum w_i V_i)), mean-field Nash, Boltzmann societal distributions, fractal causal graphs, phase transitions |
 
-Total: ~335 pre-seeded axioms + open-ended discovered axioms.
+Total: ~350 pre-seeded axioms + open-ended discovered axioms.
 
 Each domain module also defines its **operator grammar** for the discovery
 loop (e.g., physics uses `sin, cos, sqrt`; logic uses `AND, OR, IMPLIES`).
