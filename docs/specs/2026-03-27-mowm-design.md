@@ -63,6 +63,7 @@ HYLA Decoder --> Next State + Value
 ```
 mowm/
     __init__.py              # Public API: MoWM, GlobalWorld, Pipeline
+    base.py                  # ABCs: BaseWorld, BaseRouter, BaseDomain, MergeStrategy, etc.
     axiom_library.py         # Global World axiom storage & selection
     world.py                 # World class (recursive, contains HYLAs)
     router.py                # DSelect-k over dynamic expert pool
@@ -357,6 +358,29 @@ convention.
 | `test_discovery.py` | Residual trigger, SR finds known formula, axiom distillation |
 | `test_domains.py` | Each domain seeds correctly, axiom vectors are valid block-codes |
 
+## Code Constraints
+
+- **Max 1000 lines per file.** If a module grows past this, split by
+  responsibility into sub-modules.
+- **GoF design patterns for swappability.** Every major component has an
+  abstract base class so implementations can be swapped:
+  - **Strategy** — `MergeStrategy` (bind-compose vs weighted-avg),
+    `SearchStrategy` (genetic programming vs MCTS for SR),
+    `CleanupStrategy` (argmax vs softmax cleanup)
+  - **Abstract Factory** — `WorldFactory` creates World instances with
+    configurable HYLA count, axiom selection, and merge strategy
+  - **Composite** — `World` is a composite node: each world can contain
+    child sub-worlds (z+1), forming a recursive tree
+  - **Template Method** — `BaseDomain.seed(library)` defines the seeding
+    skeleton; concrete domains override `_register_axioms()`
+  - **Observer** — `DiscoveryObserver` notified when new axioms are found,
+    allowing router/pipeline to react without tight coupling
+  - **Registry** — domain modules self-register via `@register_domain`
+    decorator in `domains/__init__.py`
+
+Base classes live in `mowm/base.py` (~200 lines) so all ABCs are in one
+place. Concrete implementations import from base.
+
 ## Key Design Decisions
 
 1. **Formula-as-Vector (Approach A):** Axioms are block-code vectors, not
@@ -376,6 +400,9 @@ convention.
 5. **All GPU ops via grilly:** Following cubemind convention, the 3-level
    fallback (grilly C++/Vulkan -> BlockCodeOps Python GPU -> numpy) is used
    throughout. No raw numpy for VSA operations.
+
+6. **Modular base classes (GoF):** All major components have ABCs so any
+   concrete implementation can be swapped without touching the pipeline.
 
 ## Open Questions (for implementation)
 
