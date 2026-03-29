@@ -196,6 +196,126 @@ class SemanticEncoder:
         text = ", ".join(f"{k}: {v}" for k, v in attributes.items())
         return self.encode_action(text)
 
+    # ── SDLS Purification ──────────────────────────────────────────────
+
+    def encode_corpus(
+        self, texts: list[str],
+    ) -> tuple[list[np.ndarray], np.ndarray]:
+        """Encode a document corpus with SDLS noise purification.
+
+        1. Embed all chunks to float space (1024D)
+        2. Compute document mean (the noise axis)
+        3. Orthogonal projection: remove noise component from each chunk
+        4. Project purified embeddings to (k, l) block-code
+
+        This is the SDLS (Semantically Decoupled Latent Steering) approach:
+        instead of `X - 0.99*mean` (crude, loses magnitude), we project
+        onto the null-space of the mean: `X - (X·m̂)m̂`
+
+        Args:
+            texts: List of document chunks.
+
+        Returns:
+            (vectors, noise_axis):
+                vectors: List of purified (k, l) block-code vectors.
+                noise_axis: The unit mean vector that was removed (1024D).
+        """
+        if not texts:
+            return [], np.zeros(self._embed_dim, dtype=np.float32)
+
+        # 1. Get raw float embeddings
+        raw_embeddings = []
+        for t in texts:
+            emb = self._embed_text(t)
+            if emb is None:
+                emb = np.zeros(self._embed_dim, dtype=np.float32)
+            raw_embeddings.append(emb)
+
+        raw_matrix = np.stack(raw_embeddings)  # (N, embed_dim)
+
+        # 2. Compute and remove noise axis (SDLS purification)
+        purified, noise_axis = self._sdls_purify(raw_matrix)
+
+        # 3. Project to block-code space
+        vectors = []
+        for i in range(len(texts)):
+            projected = self._P @ purified[i]
+            vectors.append(
+                projected.reshape(self.k, self.l).astype(np.float32),
+            )
+
+        return vectors, noise_axis
+
+    def encode_query_purified(
+        self, text: str, noise_axis: np.ndarray,
+    ) -> np.ndarray:
+        """Encode a query with the same SDLS purification as the corpus.
+
+        Must use the same noise_axis returned by encode_corpus().
+
+        Args:
+            text: Query text.
+            noise_axis: Unit noise vector from encode_corpus().
+
+        Returns:
+            Purified (k, l) block-code vector.
+        """
+        emb = self._embed_text(text)
+        if emb is None:
+            return self.bc.random_discrete(seed=hash(text) % (2**31))
+
+        # Remove noise component
+        projection = float(np.dot(emb, noise_axis))
+        purified = emb - projection * noise_axis
+
+        # Re-normalize
+        norm = np.linalg.norm(purified)
+        if norm > 1e-8:
+            purified = purified / norm
+
+        # Project to block-code
+        projected = self._P @ purified.astype(np.float32)
+        return projected.reshape(self.k, self.l).astype(np.float32)
+
+    @staticmethod
+    def _sdls_purify(
+        embeddings: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """SDLS: project embeddings onto the null-space of their mean.
+
+        Removes the document-level noise floor (common vocabulary)
+        while preserving all discriminative signal at full magnitude.
+
+        Math: X_purified = X - (X · m̂) m̂
+        where m̂ = mean(X) / ||mean(X)||
+
+        Args:
+            embeddings: (N, D) float32 matrix.
+
+        Returns:
+            (purified, noise_axis):
+                purified: (N, D) denoised embeddings, L2-normalized.
+                noise_axis: (D,) unit mean vector.
+        """
+        # Compute noise axis (unit document mean)
+        mean = np.mean(embeddings, axis=0)
+        norm = np.linalg.norm(mean)
+        if norm < 1e-8:
+            return embeddings, mean
+
+        noise_axis = (mean / norm).astype(np.float32)
+
+        # Orthogonal projection: remove noise component
+        projections = embeddings @ noise_axis  # (N,)
+        purified = embeddings - np.outer(projections, noise_axis)
+
+        # Re-normalize each vector
+        norms = np.linalg.norm(purified, axis=1, keepdims=True)
+        norms = np.where(norms < 1e-8, 1.0, norms)
+        purified = (purified / norms).astype(np.float32)
+
+        return purified, noise_axis
+
     @property
     def available(self) -> bool:
         """Whether the sentence encoder is loaded."""
