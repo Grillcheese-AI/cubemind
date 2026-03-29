@@ -217,7 +217,6 @@ def load_pretrained_resnet18(in_channels: int = 1) -> ResNet18:
     Returns:
         Grilly ResNet18 with pretrained weights.
     """
-    import torch
     from torchvision.models import resnet18, ResNet18_Weights
 
     # Download PyTorch weights

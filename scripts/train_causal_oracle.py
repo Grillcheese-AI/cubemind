@@ -273,7 +273,7 @@ def main():
         ))
     tree.set_futures(futures)
 
-    print(f"\n  Top 5 futures:")
+    print("\n  Top 5 futures:")
     for i, f in enumerate(tree.current.futures):
         print(f"    {i + 1}. [plaus={f.plausibility:.4f} q={f.q_value:.4f}] {f.description[:80]}")
 

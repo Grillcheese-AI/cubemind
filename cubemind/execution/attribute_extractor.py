@@ -208,7 +208,7 @@ _ATTRIBUTE_DESCRIPTIONS: dict[str, str] = {
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
 _OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-_DEFAULT_MODEL = "google/gemini-3.1-flash-lite-preview"
+_DEFAULT_MODEL = "minimax/minimax-m2.7"
 
 
 def build_extraction_prompt(text: str, category: str) -> str:
@@ -363,9 +363,9 @@ async def extract_batch(
                 prompt = build_extraction_prompt(text, category)
 
                 payload = {
-                    "model": model,
+                    "model": "x-ai/grok-4.20-multi-agent-beta",
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1,
+                    
                     "max_tokens": 2048,
                 }
 
@@ -377,13 +377,17 @@ async def extract_batch(
                     )
                     response.raise_for_status()
                     body = response.json()
+                    
                     raw_content: str = body["choices"][0]["message"]["content"]
+                    
                     attrs = parse_attributes(raw_content)
                 except Exception as exc:
                     logger.warning(
                         "extract_batch: API error for event %r: %s", text[:60], exc
                     )
                     attrs = {}
+
+                print(attrs)
 
                 results.append(attrs)
 

@@ -100,7 +100,7 @@ def test_ensemble_predict_returns_weights(codebook: np.ndarray, observations: li
 
 def test_train_step_reduces_loss(codebook: np.ndarray):
     """Training for multiple steps should reduce the loss."""
-    bc = BlockCodes(k=K, l=L)
+    BlockCodes(k=K, l=L)
     rng = np.random.default_rng(99)
 
     # Generate a short sequence and target

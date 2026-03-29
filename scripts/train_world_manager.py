@@ -119,7 +119,7 @@ def main() -> None:
     years = [e.get("earliest_date_year") for e in events if e.get("earliest_date_year")]
     if years:
         print(f"  Year range: {min(years)} – {max(years)}")
-    print(f"  Events in order:")
+    print("  Events in order:")
     for ev in events:
         year = ev.get("earliest_date_year", "?")
         title = ev.get("title", ev.get("event_id", "<unknown>"))

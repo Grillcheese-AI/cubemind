@@ -1,7 +1,6 @@
 """Tests for cubemind.core — constants, Strategy enum, and Hyperfan init."""
 
 import numpy as np
-import pytest
 
 from cubemind.core import (
     BLAKE3,

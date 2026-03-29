@@ -574,7 +574,6 @@ def predict_multiview(
     Returns:
         Predicted answer index (0-7).
     """
-    from cubemind.reasoning.hmm_rule import _logsumexp
 
     best_view_score = -np.inf
     best_candidate_idx = 0
@@ -1379,7 +1378,6 @@ def run_iraven_benchmark(
 
         # Fall back to model's HMM ensemble if multi-view training failed
         if hmms is None:
-            from cubemind.reasoning.hmm_rule import HMMRule
             hmms = {"absolute": model.hmm.rules[0]}
 
         # ── Evaluate ──────────────────────────────────────────────────────
@@ -1491,9 +1489,9 @@ def print_results(results: dict) -> None:
     print()
 
     # Context
-    print(f"  Random baseline: 12.5% (1/8 choices)")
-    print(f"  NVSA (Hersche 2023) target: ~87.7% overall")
-    print(f"  CubeMind target: 97.5% on Center Single")
+    print("  Random baseline: 12.5% (1/8 choices)")
+    print("  NVSA (Hersche 2023) target: ~87.7% overall")
+    print("  CubeMind target: 97.5% on Center Single")
     print()
 
 

@@ -2,10 +2,9 @@
 
 import time
 
-import numpy as np
 import pytest
 
-from cubemind.telemetry.collector import MetricsCollector, MetricPoint
+from cubemind.telemetry.collector import MetricsCollector
 
 
 class TestMetricsCollector:
@@ -119,7 +118,8 @@ class TestMetricsCollector:
 
     def test_remove_listener(self):
         received = []
-        cb = lambda name, point: received.append(name)
+        def cb(name, point):
+            return received.append(name)
         self.m.add_listener(cb)
         self.m.record("a", 1.0)
         self.m.remove_listener(cb)

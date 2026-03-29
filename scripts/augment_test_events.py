@@ -41,8 +41,8 @@ async def main():
         events = json.load(f)
 
     print(f"Augmenting {len(events)} events via OpenRouter...")
-    print(f"Model: alibaba/tongyi-deepresearch-30b-a3b")
-    print(f"Estimated cost: ~$0.05")
+    print("Model: alibaba/tongyi-deepresearch-30b-a3b")
+    print("Estimated cost: ~$0.05")
     print()
 
     batch = [

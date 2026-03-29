@@ -9,7 +9,6 @@ Usage:
 import argparse
 import time
 
-import numpy as np
 
 from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.model import CubeMind

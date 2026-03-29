@@ -160,7 +160,7 @@ class NetworkVisualizer:
 
         # Per-block max activation
         max_vals = block_code.max(axis=1)
-        hot_pos = block_code.argmax(axis=1)
+        block_code.argmax(axis=1)
         ax2.barh(range(len(max_vals)), max_vals, color="#009E73", alpha=0.8)
         ax2.set_xlabel("Max activation")
         ax2.set_ylabel("Block")

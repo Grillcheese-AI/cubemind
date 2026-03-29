@@ -14,3 +14,4 @@ cubemind_pipeline.html
 data/
 .env
 .claude/scheduled_tasks.lock
+*.npy

@@ -13,7 +13,6 @@ Markov chain Monte Carlo when running many short chains", 2024.
 
 from __future__ import annotations
 
-from collections import deque
 
 import numpy as np
 

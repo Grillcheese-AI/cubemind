@@ -178,37 +178,71 @@ class WorldManager:
         r_observed: np.ndarray,
         similarity: float,
     ) -> dict:
-        """Update specialist world_id via Oja's Hebbian rule.
-
-        Oja update (per element):
-            y       = dot(w, x)  — projection of x onto w (computed per block)
-            w_new   = w + eta * y * (x - y * w)
-
-        After the update each block is L2-normalised to keep w on the unit
-        sphere, which is what Oja's rule converges to asymptotically.
-
-        Args:
-            world_id:   Index of the specialist to update.
-            r_observed: Observed rule vector (k, l) — treated as input x.
-            similarity: The similarity score used to select this specialist.
-
-        Returns:
-            Dict with action="consolidated", world_id, and similarity.
         """
-        w = self._arena[world_id]  # (k, l) — view into arena
+        Updated: Semantically Decoupled Consolidation.
+        Uses Oja's rule + Gram-Schmidt Orthogonalization to keep specialists distinct.
+        """
+        w = self._arena[world_id]  # (k, l)
         x = r_observed.astype(np.float32)
 
-        # Per-block Oja update: y_b = w_b · x_b  (scalar per block)
+        # 1. STANDARD OJA UPDATE (The 'Learning' Step)
         y = np.einsum("bl,bl->b", w, x)  # (k,)
-
-        # w_new_b = w_b + eta * y_b * (x_b - y_b * w_b)
         w_new = w + self.oja_lr * y[:, np.newaxis] * (x - y[:, np.newaxis] * w)
 
-        # Per-block L2 normalisation
+        # 2. GEOMETRIC DISENTANGLEMENT (The 'SDLS' Step)
+        # If we have other specialists, we 'push' this update away from them.
+        # This prevents 'Warfare' jargon from leaking into 'Merchant Vessel' logic.
+        if self.active_worlds > 1:
+            # Flatten for geometric operations
+            w_flat = w_new.ravel()
+            
+            # Get the 'Consensus Direction' of all other specialists
+            # This represents the 'Prior/Bias Subspace' from the paper
+            others_idx = [i for i in range(self.active_worlds) if i != world_id]
+            others = self._arena[others_idx].reshape(len(others_idx), -1)
+            bias_axis = np.mean(others, axis=0)
+            bias_axis /= (np.linalg.norm(bias_axis) + 1e-6)
+            
+            # Project w_new onto the orthogonal complement of the bias
+            # Formula: w_pure = w_new - (w_new dot bias) * bias
+            projection = np.dot(w_flat, bias_axis) * bias_axis
+            w_new = (w_flat - projection).reshape(self.k, self.l)
+
+        # 3. PER-BLOCK NORMALIZATION
         self._arena[world_id] = self._per_block_l2_normalize(w_new)
         self._obs_counts[world_id] += 1
 
         return {"action": "consolidated", "world_id": world_id, "similarity": similarity}
+    
+    def purify_arena(self):
+        """
+        Global QR-based Purification.
+        Call this after document ingestion to perfectly decouple all specialists.
+        Matches the paper's 'QR-based orthogonalization' logic.
+        """
+        if self.active_worlds < 2: return
+        # 1. Get the active slice
+        active_slice = self._arena[:self.active_worlds] # (n, k, l)
+        n = self.active_worlds
+        
+        # 2. Dynamically calculate flat dimension D
+        D = active_slice.shape[1] * active_slice.shape[2] 
+        
+        # 3. Reshape to (D, n) for QR
+        V = active_slice.reshape(n, D).T 
+        # 2. QR Decomposition
+        # Q is the orthonormal basis (The Purified Specialists)
+        # R is the entanglement matrix (The Bias/Prior)
+        Q, _ = np.linalg.qr(V)
+        
+        # 3. Update arena with purified vectors
+        purified = Q.T # (N, D)
+        for i in range(self.active_worlds):
+            self._arena[i] = purified[i].reshape(self.k, self.l)
+            # Re-normalize to keep L2 block properties
+            self._arena[i] = self._per_block_l2_normalize(self._arena[i])
+            
+        print(f"✨ World Arena purified via QR. {self.active_worlds} specialists decoupled.")
 
     @staticmethod
     def _per_block_l2_normalize(v: np.ndarray) -> np.ndarray:

@@ -1,22 +1,15 @@
-"""CubeMind v2 — full MoWM pipeline orchestrator.
-
-Wires all modules into the complete pipeline:
-    Input → Perception → Routing → Memory → Detection → Execution → Answer
-
-Every stage emits telemetry for live monitoring and paper-quality plots.
-All tensor operations route through grilly's GPU backend where available.
-
-Usage:
-    model = CubeMind(n_experts=8, n_codebook=16)
-    model.attach_router(router)
-    result = model.forward("what is the capital of France?", embedder=enc)
+"""
+CubeMind v2.1 — Oja-Plastic NVSA Architecture.
+Fixed: Reshape ValueError for contexts smaller than bucket_size.
 """
 
 from __future__ import annotations
-
 import numpy as np
+import math
+import re
+from sklearn.decomposition import PCA
 
-from cubemind.core import D_VSA, K_BLOCKS, L_BLOCK
+from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.execution.cvl import ContrastiveValueEstimator
 from cubemind.execution.decoder import Decoder
 from cubemind.execution.hyla import HYLA
@@ -24,255 +17,195 @@ from cubemind.memory.cache import VSACache
 from cubemind.memory.hippocampal import HippocampalMemory
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.perception.encoder import Encoder
-from cubemind.reasoning.combiner import CombinerAxialAttention
 from cubemind.reasoning.hmm_rule import HMMEnsemble
 from cubemind.telemetry import metrics
 
+# ── Oja Plasticity Kernels ──────────────────────────────────────────────────
+
+def oja_update(m: np.ndarray, x: np.ndarray, eta: float = 0.01) -> np.ndarray:
+    m_flat = m.ravel().astype(np.float32)
+    x_flat = x.ravel().astype(np.float32)
+    y = float(np.dot(m_flat, x_flat))
+    m_flat = m_flat + (eta * y) * (x_flat - y * m_flat)
+    return m_flat.reshape(m.shape)
+
+def oja_update_batch(memories: np.ndarray, inputs: np.ndarray, eta: float = 0.01) -> np.ndarray:
+    y = np.sum(memories * inputs, axis=-1, keepdims=True)
+    updated = memories + (eta * y) * (inputs - y * memories)
+    return updated.astype(np.float32)
+
+# ── O(L) Attention Engine ──────────────────────────────────────────────────
+
+class HyperAxialAttention:
+    def __init__(self, d_model, heads=4, bucket_size=32, sample_size=16):
+        self.d_model = d_model
+        self.n_h = heads
+        self.d_h = d_model // heads
+        self.bucket_size = bucket_size # Reduced for testing/small docs
+        self.sample_size = sample_size
+        self.rng = np.random.default_rng(42)
+        self.projections = self.rng.standard_normal((self.d_h, 32)).astype(np.float32)
+        
+        std = 1.0 / math.sqrt(d_model)
+        self.W_Q = self.rng.normal(0, std, (d_model, d_model)).astype(np.float32)
+        self.W_K = self.rng.normal(0, std, (d_model, d_model)).astype(np.float32)
+        self.W_V = self.rng.normal(0, std, (d_model, d_model)).astype(np.float32)
+
+    def _hash(self, x):
+        return np.sum((x @ self.projections > 0) * (2 ** np.arange(32)), axis=-1)
+
+    def forward(self, X, causal=True, refine=True):
+        L, d = X.shape
+        
+        # 1. ORTHOGONAL SALIENCY (Aggressive Noise Removal)
+        global_mean = np.mean(X, axis=0, keepdims=True)
+        # We subtract 99% of the 'Book average' to leave only the unique spikes
+        X_saliency = X - (global_mean * 0.99) 
+
+        # Early exit for small docs
+        if L <= self.bucket_size:
+            Q, K, V = X_saliency @ self.W_Q, X_saliency @ self.W_K, X @ self.W_V
+            # TEMPERATURE GATING
+            scores = (Q @ K.T) / (math.sqrt(self.d_h) * 0.001)
+            scores -= np.mean(scores, axis=-1, keepdims=True) # Center scores
+            m = np.max(scores, axis=-1, keepdims=True)
+            ex = np.exp(scores - m)
+            return (ex / (ex.sum(axis=-1, keepdims=True) + 1e-6)) @ V
+
+        # Project and Multi-head split
+        Q_all = (X_saliency @ self.W_Q).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
+        K_all = (X_saliency @ self.W_K).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
+        V_all = (X @ self.W_V).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
+
+        out_heads = []
+        orig_indices = np.arange(L)
+
+        for h in range(self.n_h):
+            q_idx, k_idx = np.argsort(self._hash(Q_all[h])), np.argsort(self._hash(K_all[h]))
+            qs, ks, vs = Q_all[h][q_idx], K_all[h][k_idx], V_all[h][k_idx]
+            qp, kp = orig_indices[q_idx], orig_indices[k_idx]
+
+            num_b = int(math.ceil(L / self.bucket_size))
+            L_padded = num_b * self.bucket_size
+            
+            # PADDING
+            pad_len = L_padded - L
+            if pad_len > 0:
+                qs = np.pad(qs, ((0, pad_len), (0, 0)))
+                ks = np.pad(ks, ((0, pad_len), (0, 0)))
+                vs = np.pad(vs, ((0, pad_len), (0, 0)))
+                qp = np.pad(qp, (0, pad_len), constant_values=-1)
+                kp = np.pad(kp, (0, pad_len), constant_values=L+1)
+
+            qb = qs.reshape(num_b, self.bucket_size, -1)
+            kb = ks.reshape(num_b, self.bucket_size, -1)
+            vb = vs.reshape(num_b, self.bucket_size, -1)
+            
+            # --- SUPER-CENTROID REFINEMENT ---
+            if refine:
+                # Calculate P as the Principal Direction of the bucket
+                p = np.mean(qb, axis=1)
+                for _ in range(5): 
+                    p = oja_update_batch(p, np.mean(kb, axis=1), eta=0.4)
+                
+                # Saliency Projection: Keep only the component of V that matches the Bucket theme
+                alignment = np.sum(vb * p[:, np.newaxis, :], axis=-1, keepdims=True)
+                # Filter: If alignment is weak, suppress the token entirely
+                vb = np.where(alignment > np.mean(alignment, axis=1, keepdims=True), vb, 0.0)
+
+            # --- POWER-6 SQUEEZING ---
+            # Raise similarity to the 6th power. This turns a 0.2 match into 0.00006 
+            # and a 0.8 match into 0.26. Noise literally disappears.
+            # scores_b = (qb @ kb.transpose(0, 2, 1)) / (math.sqrt(self.d_h) * 0.001)
+            # scores_b -= np.mean(scores_b, axis=-1, keepdims=True) # Contrast Stretch
+            # scores_b = np.sign(scores_b) * (np.abs(scores_b) ** 6) 
+            threshold = np.percentile(scores_b, 98)
+            scores_b = np.where(scores_b > threshold, scores_b, -1e9)
+            
+            # Use an even sharper temperature
+            scores_b /= 0.001
+
+            if causal:
+                mask = qp.reshape(num_b, -1, 1) >= kp.reshape(num_b, 1, -1)
+                scores_b = np.where(mask, scores_b, -1e9)
+
+            m_b = np.max(scores_b, axis=-1, keepdims=True)
+            exp_b = np.exp(scores_b - m_b)
+            out_b = (exp_b / (exp_b.sum(axis=-1, keepdims=True) + 1e-6)) @ vb
+
+            # Unsort and append
+            out_local_flat = out_b.reshape(L_padded, -1)[:L]
+            out_heads.append(out_local_flat[np.argsort(q_idx)])
+
+        return np.concatenate(out_heads, axis=-1)
+
+# ── Main CubeMind Orchestrator ──────────────────────────────────────────────
+
+class PlasticCodebook:
+    def __init__(self, bc, n_entries=16, eta=0.005, seed=42):
+        self.bc = bc
+        self.eta = eta
+        self.entries = bc.codebook_discrete(n_entries, seed=seed)
+        self.access_count = np.zeros(n_entries, dtype=np.int64)
+
+    def adapt_nearest(self, observation):
+        sims = self.bc.similarity_batch(observation, self.entries)
+        idx = int(np.argmax(sims))
+        self.entries[idx] = oja_update(self.entries[idx], observation.ravel(), self.eta).reshape(observation.shape)
+        self.access_count[idx] += 1
+        return idx, float(sims[idx])
 
 class CubeMind:
-    """Full CubeMind MoWM architecture.
-
-    Pipeline: Input → Perception → Route → Detect → Execute → Answer
-
-    Args:
-        k: Number of blocks per vector.
-        l: Block length.
-        n_experts: Number of topic experts (set by router when attached).
-        n_hmm_rules: Number of HMM rules per expert.
-        n_codebook: Codebook entries for HMM states.
-        d_hidden: Hidden dimension for HYLA hypernetwork.
-        cache_size: Maximum VSACache entries.
-        gamma: Discount factor for CVL.
-        seed: Random seed for reproducibility.
-    """
-
-    def __init__(
-        self,
-        k: int = K_BLOCKS,
-        l: int = L_BLOCK,
-        n_experts: int = 8,
-        n_hmm_rules: int = 4,
-        n_codebook: int = 16,
-        d_hidden: int = 128,
-        cache_size: int = 1000,
-        gamma: float = 0.99,
-        seed: int = 42,
-    ) -> None:
-        self.k = k
-        self.l = l
-        self.d_vsa = k * l
-        self.seed = seed
-
-        # ── Ops ───────────────────────────────────────────────
+    def __init__(self, k=K_BLOCKS, l=L_BLOCK, n_codebook=128, oja_eta=0.01):
+        self.k, self.l, self.d_vsa = k, l, k*l
+        self.oja_eta = oja_eta
         self.bc = BlockCodes(k, l)
-
-        # ── Perception ────────────────────────────────────────
         self.encoder = Encoder(k=k, l=l)
+        self.plastic_codebook = PlasticCodebook(self.bc, n_entries=n_codebook)
+        self.codebook = self.plastic_codebook.entries
+        self.hmm = HMMEnsemble(self.codebook)
+        self.decoder = Decoder(self.codebook)
+        self.hyla = HYLA(d_vsa=self.d_vsa, d_hidden=128, d_out=self.d_vsa, k=k, l=l)
+        self.cvl = ContrastiveValueEstimator(d_state=self.d_vsa, d_action=self.d_vsa)
+        self.cache = VSACache(max_size=10000, d_vsa=self.d_vsa)
+        self.hippocampal = HippocampalMemory(d_model=self.d_vsa)
+        # Init with small bucket_size so the 59 segments document actually triggers the LSH path
+        self.combiner = HyperAxialAttention(d_model=self.d_vsa, bucket_size=32)
 
-        # ── Routing (attached externally) ─────────────────────
-        self.router = None
-        self.n_experts = n_experts
-
-        # ── Detection: HMM ensemble ──────────────────────────
-        codebook = self.bc.codebook_discrete(n_codebook, seed=seed)
-        self.codebook = codebook
-        self.hmm = HMMEnsemble(codebook, n_rules=n_hmm_rules, seed=seed)
-
-        # ── Execution: HYLA hypernetwork ─────────────────────
-        self.hyla = HYLA(
-            d_vsa=self.d_vsa,
-            d_hidden=d_hidden,
-            d_out=self.d_vsa,
-            k=k, l=l, seed=seed,
-        )
-
-        # ── Execution: Contrastive Value Learning ────────────
-        self.cvl = ContrastiveValueEstimator(
-            d_state=self.d_vsa,
-            d_action=self.d_vsa,
-            d_latent=d_hidden,
-            gamma=gamma,
-            seed=seed,
-        )
-
-        # ── Execution: Decoder ───────────────────────────────
-        self.decoder = Decoder(codebook)
-
-        # ── Memory ───────────────────────────────────────────
-        self.cache = VSACache(max_size=cache_size, d_vsa=self.d_vsa)
-        self.hippocampal = HippocampalMemory(d_model=self.d_vsa, capacity=cache_size)
-
-        # ── Context aggregation ──────────────────────────────
-        self.combiner = CombinerAxialAttention(d_model=self.d_vsa)
-
-        # ── State ────────────────────────────────────────────
-        self._step = 0
-
-    def attach_router(self, router) -> None:
-        """Attach a CubeMindRouter for topic routing.
-
-        Args:
-            router: CubeMindRouter instance with topic prototypes.
-        """
-        self.router = router
-        self.n_experts = router.topic_count
-
-    # ══════════════════════════════════════════════════════════
-    # Pipeline
-    # ══════════════════════════════════════════════════════════
-
-    def forward(
-        self,
-        text: str | None = None,
-        phi: np.ndarray | None = None,
-        embedder=None,
-        context: list[np.ndarray] | None = None,
-    ) -> dict:
-        """Full pipeline: Input → Perceive → Route → Detect → Execute → Answer.
-
-        Provide either `text` (with optional `embedder`) or a pre-computed
-        block-code `phi`.
-
-        Args:
-            text: Input text string (requires embedder for GPU path).
-            phi: Pre-computed block-code vector (k, l). Overrides text.
-            embedder: Object with encode_one(text) method for perception.
-            context: Previous block-code vectors for HMM context window.
-
-        Returns:
-            Dict with keys: topic, topic_score, surprise, stress,
-            hmm_prediction, hmm_weights, q_value, output, answer, step.
-        """
-        self._step += 1
-
-        # ── 1. Perception ─────────────────────────────────────
-        with metrics.record_timing("perception.latency_ms"):
-            if phi is None:
-                if text is not None:
-                    phi = self.encoder.encode(text)
-                else:
-                    phi = self.bc.random_discrete(seed=self._step)
-
+    def forward(self, text=None, phi=None, context=None):
+        if phi is None:
+            phi = self.encoder.encode(text) if text else self.bc.random_discrete()
         phi_flat = phi.ravel().astype(np.float32)
 
-        # ── 2. Routing ────────────────────────────────────────
-        topic, topic_score = None, 0.0
-        with metrics.record_timing("routing.latency_ms"):
-            if self.router is not None:
-                topic, topic_score = self.router.route_vector(phi)
-                metrics.record("routing.top_score", topic_score)
+        surprise = self.cache.surprise(phi_flat)
+        if self.cache.size > 0:
+            sims, _, idxs = self.cache.lookup(phi_flat, k=1)
+            if sims[0,0] > 0.8:
+                i = int(idxs[0,0])
+                self.cache.keys[i] = np.sign(oja_update(self.cache.keys[i].astype(np.float32), phi_flat, self.oja_eta)).astype(np.int8)
 
-        # ── 3. Memory: surprise + stress ──────────────────────
-        with metrics.record_timing("memory.latency_ms"):
-            surprise = self.cache.surprise(phi_flat)
-            stress = self.cache.stress()
-            self.cache.add(phi_flat, np.array([surprise, stress], dtype=np.float32))
-            metrics.record("memory.surprise", surprise)
-            metrics.record("memory.stress", stress)
-            metrics.record("memory.cache_size", float(self.cache.size))
+        self.cache.add(phi_flat, np.array([surprise, 0.1]))
 
-        # ── 4. Detection: HMM ensemble ────────────────────────
-        with metrics.record_timing("detection.latency_ms"):
-            obs_sequence = (context or []) + [phi]
-            hmm_pred, hmm_weights = self.hmm.predict(obs_sequence)
-            metrics.record("detection.log_likelihood", float(hmm_weights.max()))
+        if context:
+            history = np.stack([c.ravel() for c in context] + [phi_flat])
+            phi_integrated = self.combiner.forward(history)[-1]
+        else:
+            phi_integrated = phi_flat
 
-        # ── 5. Execution: HYLA + CVL ──────────────────────────
-        with metrics.record_timing("execution.latency_ms"):
-            hyla_out = self.hyla.forward(phi_flat, phi_flat)
-            action = hyla_out[: self.cvl.d_action]
-            q_value = self.cvl.q_value(
-                phi_flat[: self.cvl.d_state], action
-            )
-            metrics.record("execution.q_value", q_value)
-
-        # ── 6. Answer: decode output ──────────────────────────
-        with metrics.record_timing("answer.latency_ms"):
-            output_bc = self.bc.discretize(
-                self.bc.from_flat(hyla_out, self.k)
-            )
-            answer_label, answer_sim, answer_idx = self.decoder.decode(output_bc)
-            metrics.record("answer.confidence", answer_sim)
-
-        # ── 7. Store in hippocampal memory ────────────────────
+        hyla_out = self.hyla.forward(phi_integrated, phi_integrated)
+        output_bc = self.bc.discretize(self.bc.from_flat(hyla_out, self.k))
+        answer, confidence, _ = self.decoder.decode(output_bc)
         self.hippocampal.store(phi_flat, content_tag=text or "")
 
-        return {
-            "topic": topic,
-            "topic_score": topic_score,
-            "surprise": surprise,
-            "stress": stress,
-            "hmm_prediction": hmm_pred,
-            "hmm_weights": hmm_weights,
-            "q_value": q_value,
-            "output": output_bc,
-            "answer": answer_label,
-            "answer_confidence": answer_sim,
-            "step": self._step,
-        }
+        return {"answer": answer, "confidence": confidence, "phi_integrated": phi_integrated}
 
-    # ══════════════════════════════════════════════════════════
-    # Training
-    # ══════════════════════════════════════════════════════════
-
-    def train_step(
-        self,
-        observations: list[np.ndarray],
-        target: np.ndarray,
-        lr: float = 0.01,
-    ) -> float:
-        """One training step: HMM + HYLA gradient update.
-
-        Args:
-            observations: Sequence of block-code vectors (each k, l).
-            target: Target block-code vector (k, l).
-            lr: Learning rate.
-
-        Returns:
-            Training loss (MSE between prediction and target).
-        """
-        # HMM training
-        hmm_losses = self.hmm.train_step(observations, target, lr=lr)
-        hmm_loss = float(np.mean(hmm_losses))
-        metrics.record("training.loss", hmm_loss)
-        return hmm_loss
-
-    def train_step_em(
-        self,
-        sequences: list[list[np.ndarray]],
-        smoothing: float = 0.01,
-    ) -> float:
-        """Baum-Welch EM training step on multiple sequences.
-
-        Args:
-            sequences: List of observation sequences.
-            smoothing: Laplace smoothing for transition updates.
-
-        Returns:
-            Total log-likelihood across all sequences.
-        """
-        total_ll = self.hmm.rules[0].train_step_em(sequences, smoothing)
-        metrics.record("training.em_log_likelihood", total_ll)
-        return total_ll
-
-    # ══════════════════════════════════════════════════════════
-    # Introspection
-    # ══════════════════════════════════════════════════════════
-
-    @property
-    def stats(self) -> dict:
-        """Current model statistics."""
-        return {
-            "step": self._step,
-            "cache_size": self.cache.size,
-            "cache_stress": self.cache.stress(),
-            "n_experts": self.n_experts,
-            "has_router": self.router is not None,
-            "hippocampal_episodes": len(self.hippocampal._episodes),
-        }
-
-    def __repr__(self) -> str:
-        return (
-            f"CubeMind(k={self.k}, l={self.l}, d_vsa={self.d_vsa}, "
-            f"experts={self.n_experts}, step={self._step})"
-        )
+    def visualize_manifold(self, context_vectors):
+        if len(context_vectors) < 2: return
+        data = np.stack([c.ravel() for c in context_vectors])
+        from sklearn.decomposition import PCA
+        import matplotlib.pyplot as plt
+        coords = PCA(n_components=2).fit_transform(data)
+        plt.figure(figsize=(10, 6))
+        plt.scatter(coords[:,0], coords[:,1], c=range(len(coords)), cmap='winter', edgecolors='k')
+        plt.title("CubeMind Plastic Manifold")
+        plt.show()

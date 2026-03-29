@@ -1,7 +1,6 @@
 """Tests for Sinkhorn entity alignment."""
 
 import numpy as np
-import pytest
 
 from cubemind.reasoning.sinkhorn import (
     align_entities_across_panels,

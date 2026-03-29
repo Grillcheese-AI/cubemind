@@ -1,0 +1,195 @@
+<h2>MoWM v0.2.0 — Executable Axiom Engine</h2>
+<p class="subtitle">From symbolic pointers to computational world engine</p>
+
+<!-- v0.1.0 vs v0.2.0 comparison -->
+<div style="display: flex; gap: 16px; margin: 24px 0;">
+  <div style="flex: 1; padding: 16px; background: rgba(74,158,255,0.08); border-radius: 12px; border: 1px solid rgba(74,158,255,0.2);">
+    <div style="font-weight: bold; color: #4a9eff; margin-bottom: 8px;">v0.1.0 (Done)</div>
+    <div style="font-size: 12px; line-height: 1.6; color: #aaa;">
+      Axioms = vectors only<br>
+      Route + HYLA predict<br>
+      Symbolic regression finds formulas<br>
+      14 domains, 350+ axioms<br>
+      121 tests passing
+    </div>
+  </div>
+  <div style="display: flex; align-items: center; color: #ffd93d; font-size: 24px;">&rarr;</div>
+  <div style="flex: 1; padding: 16px; background: rgba(255,107,107,0.08); border-radius: 12px; border: 1px solid rgba(255,107,107,0.2);">
+    <div style="font-weight: bold; color: #ff6b6b; margin-bottom: 8px;">v0.2.0 (Next)</div>
+    <div style="font-size: 12px; line-height: 1.6; color: #aaa;">
+      Axioms = vectors + <strong style="color: #6bff6b;">callable functions</strong><br>
+      Route + HYLA + <strong style="color: #6bff6b;">formula execution</strong><br>
+      SR discovers + <strong style="color: #6bff6b;">causal graphs</strong><br>
+      + DNA/phasor/identity/grid world<br>
+      + training on real data
+    </div>
+  </div>
+</div>
+
+<!-- Architecture diagram -->
+<div style="background: #1a1a2e; border-radius: 16px; padding: 28px; margin: 24px 0; font-family: monospace; font-size: 12px; color: #e0e0e0;">
+
+<div style="text-align: center; margin-bottom: 12px;">
+  <span style="background: #4a9eff; color: #fff; padding: 6px 20px; border-radius: 8px; font-weight: bold;">Input (state, action)</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 10px;">&darr;</div>
+
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #2d2d4e; border: 1px solid #4a9eff; padding: 6px 16px; border-radius: 8px;">HYLA Encoder &rarr; block-code vectors</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 10px;">&darr;</div>
+
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #ff6b6b; color: #fff; padding: 6px 16px; border-radius: 8px; font-weight: bold;">DSelect-k Router</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 8px;">&darr;</div>
+
+<!-- Expert World expanded -->
+<div style="border: 2px solid #ffd93d; border-radius: 14px; padding: 20px; background: #1e1e3a; margin-bottom: 14px;">
+  <div style="text-align: center; color: #ffd93d; font-weight: bold; margin-bottom: 14px;">Expert World (Selected by Router)</div>
+
+  <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+
+    <!-- HYLA path (v0.1.0) -->
+    <div style="flex: 1; min-width: 150px; max-width: 200px; border: 1px solid #4a9eff; border-radius: 8px; padding: 10px; background: #1a1a3e;">
+      <div style="color: #4a9eff; font-size: 10px; text-align: center; margin-bottom: 6px;">v0.1.0</div>
+      <div style="color: #aaa; font-size: 11px; text-align: center; font-weight: bold;">HYLA Predict</div>
+      <div style="color: #666; font-size: 9px; text-align: center; margin-top: 4px;">transition delta<br>via hypernetwork</div>
+    </div>
+
+    <!-- Executor path (NEW) -->
+    <div style="flex: 1; min-width: 150px; max-width: 200px; border: 1px solid #6bff6b; border-radius: 8px; padding: 10px; background: #1a2e1a;">
+      <div style="color: #6bff6b; font-size: 10px; text-align: center; margin-bottom: 6px;">v0.2.0 NEW</div>
+      <div style="color: #ccc; font-size: 11px; text-align: center; font-weight: bold;">AxiomExecutor</div>
+      <div style="color: #888; font-size: 9px; text-align: center; margin-top: 4px;">F=m*a &rarr; 98.0<br>AST-parsed, no eval()</div>
+    </div>
+
+    <!-- Logic path (NEW) -->
+    <div style="flex: 1; min-width: 150px; max-width: 200px; border: 1px solid #6bff6b; border-radius: 8px; padding: 10px; background: #1a2e1a;">
+      <div style="color: #6bff6b; font-size: 10px; text-align: center; margin-bottom: 6px;">v0.2.0 NEW</div>
+      <div style="color: #ccc; font-size: 11px; text-align: center; font-weight: bold;">LogicEngine</div>
+      <div style="color: #888; font-size: 9px; text-align: center; margin-top: 4px;">deductive: True/False<br>probabilistic: sigmoid</div>
+    </div>
+
+    <!-- Causal path (NEW) -->
+    <div style="flex: 1; min-width: 150px; max-width: 200px; border: 1px solid #6bff6b; border-radius: 8px; padding: 10px; background: #1a2e1a;">
+      <div style="color: #6bff6b; font-size: 10px; text-align: center; margin-bottom: 6px;">v0.2.0 NEW</div>
+      <div style="color: #ccc; font-size: 11px; text-align: center; font-weight: bold;">CausalGraph</div>
+      <div style="color: #888; font-size: 9px; text-align: center; margin-top: 4px;">signed links +/-<br>propagate &amp; counterfactual</div>
+    </div>
+
+  </div>
+
+  <div style="text-align: center; color: #777; margin-top: 12px; font-size: 10px;">&darr; all four signals merge into prediction &darr;</div>
+</div>
+
+<!-- Merge -->
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #2d2d4e; border: 1px solid #6bff6b; padding: 6px 16px; border-radius: 8px;">Merge (HYLA + Executor + Logic + Causal) &rarr; Cleanup</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 10px;">&darr;</div>
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #2d2d4e; border: 1px solid #ff6b6b; padding: 6px 16px; border-radius: 8px;">CVL &rarr; Q-value</span>
+  <span style="color: #666; font-size: 9px; margin-left: 8px;">(ref: Google cvl_public/)</span>
+</div>
+<div style="text-align: center;">
+  <span style="background: #2d2d4e; border: 1px solid #4a9eff; padding: 6px 16px; border-radius: 8px;">Output: Next State + Value + Causal Effects</span>
+</div>
+
+</div>
+
+<!-- 9 New Modules grid -->
+<h3>9 New Modules</h3>
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 16px 0;">
+
+  <div style="padding: 12px; background: rgba(107,255,107,0.06); border-radius: 8px; border: 1px solid rgba(107,255,107,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #6bff6b;">1. AxiomExecutor</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">Formula string &rarr; callable<br>AST-parsed, safe, cached</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(107,255,107,0.06); border-radius: 8px; border: 1px solid rgba(107,255,107,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #6bff6b;">2. CausalGraph</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">Signed digraph<br>propagation + counterfactual</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(107,255,107,0.06); border-radius: 8px; border: 1px solid rgba(107,255,107,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #6bff6b;">3. LogicEngine</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">Deductive (bool) +<br>Probabilistic (sigmoid)</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(107,255,107,0.06); border-radius: 8px; border: 1px solid rgba(107,255,107,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #6bff6b;">4. SequenceEncoder</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">DNA k-mer, temporal events,<br>text tokens &rarr; VSA space</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(107,255,107,0.06); border-radius: 8px; border: 1px solid rgba(107,255,107,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #6bff6b;">5. PhasorEngine</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">Harmonic phasor bank<br>chords, spectrum, FFT</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(107,255,107,0.06); border-radius: 8px; border: 1px solid rgba(107,255,107,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #6bff6b;">6. IdentityState</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">Persona extraction<br>Plutchik emotions + V_Me</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(255,217,61,0.06); border-radius: 8px; border: 1px solid rgba(255,217,61,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #ffd93d;">7. DataLoader</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">E:\RAW_TEXTS\realms<br>5,998 files, 35 realms</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(255,217,61,0.06); border-radius: 8px; border: 1px solid rgba(255,217,61,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #ffd93d;">8. SimEnvironment</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">5x5 grid world<br>walls, terrain, transitions</div>
+  </div>
+
+  <div style="padding: 12px; background: rgba(255,217,61,0.06); border-radius: 8px; border: 1px solid rgba(255,217,61,0.15);">
+    <div style="font-weight: bold; font-size: 12px; color: #ffd93d;">9. Training</div>
+    <div style="font-size: 10px; color: #888; margin-top: 4px;">Full loss + DisARM<br>grid world evaluation</div>
+  </div>
+
+</div>
+
+<!-- Reference sources -->
+<h3>Reference Codebases</h3>
+<div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 12px 0; font-size: 11px;">
+  <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+    <span style="color: #4a9eff;">AURA_GENESIS</span><br>
+    <span style="color: #888;">PhasorBank, Plutchik, causal trainer</span>
+  </div>
+  <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+    <span style="color: #4a9eff;">GrillCheese (GitHub)</span><br>
+    <span style="color: #888;">LiquidMoE, VSA engine, Oja plasticity</span>
+  </div>
+  <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+    <span style="color: #4a9eff;">GrillCheese (Desktop)</span><br>
+    <span style="color: #888;">Hilbert routing, temporal knowledge</span>
+  </div>
+  <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+    <span style="color: #4a9eff;">Google Research</span><br>
+    <span style="color: #888;">MuZero, CVL, sparse_mixers, symbolic SR</span>
+  </div>
+  <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+    <span style="color: #4a9eff;">aura-snn-rag</span><br>
+    <span style="color: #888;">Hippocampal memory, GIF neurons, STDP</span>
+  </div>
+  <div style="padding: 8px; background: rgba(255,255,255,0.03); border-radius: 6px;">
+    <span style="color: #4a9eff;">RAW_TEXTS/realms</span><br>
+    <span style="color: #888;">5,998 files, 35 domains, 26.8 GB</span>
+  </div>
+</div>
+
+<!-- Stats -->
+<div style="display: flex; gap: 10px; margin-top: 20px;">
+  <div style="flex: 1; padding: 12px; background: rgba(74,158,255,0.08); border-radius: 8px; text-align: center; border: 1px solid rgba(74,158,255,0.2);">
+    <div style="font-size: 22px; font-weight: bold; color: #4a9eff;">v0.1.0</div>
+    <div style="font-size: 10px; color: #888;">121 tests, 21 files<br>350+ axioms (symbolic)</div>
+  </div>
+  <div style="flex: 1; padding: 12px; background: rgba(107,255,107,0.08); border-radius: 8px; text-align: center; border: 1px solid rgba(107,255,107,0.2);">
+    <div style="font-size: 22px; font-weight: bold; color: #6bff6b;">v0.2.0</div>
+    <div style="font-size: 10px; color: #888;">+9 modules, +9 test files<br>axioms become <strong>executable</strong></div>
+  </div>
+  <div style="flex: 1; padding: 12px; background: rgba(255,107,107,0.08); border-radius: 8px; text-align: center; border: 1px solid rgba(255,107,107,0.2);">
+    <div style="font-size: 22px; font-weight: bold; color: #ff6b6b;">v0.3.0</div>
+    <div style="font-size: 10px; color: #888;">visualization, dashboards<br>real-time monitoring</div>
+  </div>
+</div>

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from cubemind.core import D_VSA, K_BLOCKS, L_BLOCK
+from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.execution.cvl import ContrastiveValueEstimator
 from cubemind.execution.decoder import Decoder
 from cubemind.execution.hyla import HYLA
@@ -45,6 +45,9 @@ from cubemind.reasoning.combiner import CombinerAxialAttention
 from cubemind.reasoning.hmm_rule import HMMEnsemble
 from cubemind.telemetry import metrics
 
+
+
+
 # ── GPU bridge for Oja updates ──────────────────────────────────────────────
 
 _bridge = None
@@ -54,6 +57,7 @@ try:
         _bridge = _grilly_bridge
 except Exception:
     pass
+
 
 
 # ── Oja's Rule ──────────────────────────────────────────────────────────────
@@ -335,6 +339,7 @@ class CubeMindPlastic:
 
         # ── Context aggregation ──────────────────────────────
         self.combiner = CombinerAxialAttention(d_model=self.d_vsa)
+        
 
         # ── State ────────────────────────────────────────────
         self._step = 0

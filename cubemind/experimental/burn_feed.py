@@ -195,7 +195,7 @@ class BurnFeed:
         print(f"  CO2 emitted:     {s['co2_tons']:>20,.0f} tons")
         print(f"  Energy consumed: {s['joules']:>20.2e} J")
         print(f"  Excess deaths:   {s['excess_deaths']:>20,.0f}")
-        print(f"  ---")
+        print("  ---")
         print(f"  CubeMind equiv:  ${s['cubemind_usd']:>20,.2f}")
         print(f"  Efficiency:      {s['efficiency_ratio']:>20,}x")
         print(f"  Penalty score:   {self.penalty_score():.4f}")

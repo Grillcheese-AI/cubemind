@@ -20,16 +20,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
 from cubemind.ops.block_codes import BlockCodes
-from cubemind.execution.world_manager import WorldManager
 
 logger = logging.getLogger(__name__)
 
