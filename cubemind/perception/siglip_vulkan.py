@@ -188,6 +188,30 @@ class SigLIPVulkan:
         while f"encoder.layers.{self.num_layers}.self_attn.q_proj.weight" in self.w:
             self.num_layers += 1
 
+        # Pre-fuse QKV weights: 3 separate matrices → 1 concatenated matrix per layer
+        # Reduces 3 GPU dispatches to 1 per attention layer
+        self._qkv_w = {}
+        self._qkv_b = {}
+        for i in range(self.num_layers):
+            prefix = f"encoder.layers.{i}.self_attn"
+            wq = self._np(f"{prefix}.q_proj.weight")
+            wk = self._np(f"{prefix}.k_proj.weight")
+            wv = self._np(f"{prefix}.v_proj.weight")
+            self._qkv_w[i] = np.concatenate([wq, wk, wv], axis=0).astype(np.float32)  # (3*768, 768)
+
+            bq = self._np(f"{prefix}.q_proj.bias")
+            bk = self._np(f"{prefix}.k_proj.bias")
+            bv = self._np(f"{prefix}.v_proj.bias")
+            self._qkv_b[i] = np.concatenate([bq, bk, bv]).astype(np.float32)  # (3*768,)
+
+            # Store on GPU if available
+            if self.use_gpu and _VulkanTensor is not None:
+                try:
+                    self._qkv_w[i] = _VulkanTensor(self._qkv_w[i])
+                    self._qkv_b[i] = _VulkanTensor(self._qkv_b[i])
+                except Exception:
+                    pass
+
         # JIT-traced encode: fuses ops after first call
         self._jit_encode = None
         if _jit is not None:
@@ -333,16 +357,20 @@ class SigLIPVulkan:
         return x
 
     def _self_attention(self, x: np.ndarray, prefix: str) -> np.ndarray:
-        """Multi-head self attention — Flash Attention 2 when available."""
+        """Multi-head self attention — fused QKV + Flash Attention 2."""
         seq_len = x.shape[0]
+        layer_idx = int(prefix.split(".")[-2])  # "encoder.layers.N" → N
 
-        # Q, K, V projections (GPU linear)
-        Q = _gpu_linear(x, self._np(f"{prefix}.self_attn.q_proj.weight"),
-                         self._np(f"{prefix}.self_attn.q_proj.bias"))
-        K = _gpu_linear(x, self._np(f"{prefix}.self_attn.k_proj.weight"),
-                         self._np(f"{prefix}.self_attn.k_proj.bias"))
-        V = _gpu_linear(x, self._np(f"{prefix}.self_attn.v_proj.weight"),
-                         self._np(f"{prefix}.self_attn.v_proj.bias"))
+        # Fused QKV projection: ONE linear dispatch instead of THREE
+        qkv_w = self._qkv_w[layer_idx]
+        qkv_b = self._qkv_b[layer_idx]
+        if not isinstance(qkv_w, np.ndarray):
+            qkv_w = np.asarray(qkv_w, dtype=np.float32)
+        if not isinstance(qkv_b, np.ndarray):
+            qkv_b = np.asarray(qkv_b, dtype=np.float32)
+
+        QKV = _gpu_linear(x, qkv_w, qkv_b)  # (seq, 3*hidden) — single GPU dispatch
+        Q, K, V = np.split(QKV, 3, axis=-1)  # split is free (memory view)
 
         # Reshape: (seq, hidden) → (batch=1, heads, seq, head_dim)
         Q = Q.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
