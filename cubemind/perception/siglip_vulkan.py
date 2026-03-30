@@ -63,7 +63,7 @@ except ImportError:
 
 
 def _gpu_linear(x, w, b=None):
-    """GPU linear projection."""
+    """GPU linear projection: x @ w.T + b."""
     if _bridge is not None:
         try:
             r = _bridge.linear(
@@ -79,6 +79,23 @@ def _gpu_linear(x, w, b=None):
     if b is not None:
         out = out + b
     return out.astype(np.float32)
+
+
+def _gpu_matmul(a, b):
+    """GPU matrix multiply: a @ b (no transpose)."""
+    if _bridge is not None:
+        try:
+            # Use linear with b transposed: linear computes a @ w.T, so pass b.T
+            r = _bridge.linear(
+                np.ascontiguousarray(a, dtype=np.float32),
+                np.ascontiguousarray(b.T, dtype=np.float32),
+                None,
+            )
+            if r is not None:
+                return np.asarray(r, dtype=np.float32)
+        except Exception:
+            pass
+    return (a @ b).astype(np.float32)
 
 
 def _gelu(x):
@@ -341,7 +358,7 @@ class SigLIPVulkan:
             s = np.clip(s, -50, 50)
             a = _softmax(s, axis=-1)
             # attn @ V[h] → output for this head
-            out[h] = _gpu_linear(a, V[h], None)  # (seq, head_dim)
+            out[h] = _gpu_matmul(a, V[h])  # (seq, head_dim)
 
         # Concat heads
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
@@ -384,7 +401,7 @@ class SigLIPVulkan:
             s = _gpu_linear(q_h[h], k_h[h], None) / scale  # (1, seq)
             s = np.clip(s, -50, 50)
             a = _softmax(s, axis=-1)                         # (1, seq)
-            pooled_heads[h] = _gpu_linear(a, v_h[h], None)  # (1, hd)
+            pooled_heads[h] = _gpu_matmul(a, v_h[h])  # (1, hd)
 
         pooled = pooled_heads.transpose(1, 0, 2).reshape(1, self.hidden_size)
 
