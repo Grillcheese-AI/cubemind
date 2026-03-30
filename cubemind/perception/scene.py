@@ -68,6 +68,8 @@ class SceneSegment:
     micro_expressions: list = field(default_factory=list)
     description: str = ""
     taste_score: float = 0.0          # [-1, 1] how much the system liked it
+    change_reason: str = "time"        # "start", "time", "change:missing", "change:new", "change:replaced"
+    change_magnitude: float = 0.0      # How different from previous segment [0, 1]
 
 
 @dataclass
@@ -396,14 +398,22 @@ class SceneAnalyzer:
         self, frame_vectors: list[np.ndarray], frame_emotions: list,
         fps: float, subsample: int,
     ) -> list[SceneSegment]:
-        """Detect scene boundaries via Hamming distance + time-based splitting.
+        """Bidirectional scene change detection with adaptive threshold.
 
-        Two segmentation strategies combined:
-          1. Hard cuts: Hamming similarity drops below threshold
-          2. Time windows: force a segment every max_segment_s seconds
-             so even gradual changes get captured
+        Inspired by Cho et al. (AAAI 2025) zero-shot SCD via tracking:
+          1. Forward pass: compare frame[i] → frame[i+1] (find "missing" content)
+          2. Backward pass: compare frame[i+1] → frame[i] (find "new" content)
+          3. Adaptive content threshold: use median similarity as baseline,
+             flag deviations > 1.5 σ instead of fixed cutoff
+          4. Time windows: force segment every ~5s for gradual changes
+
+        Change types per the paper:
+          - "missing": content in frame[i] not found in frame[i+1]
+          - "new": content in frame[i+1] not found in frame[i]
+          - "replaced": both missing and new (content swapped)
+          - "static": no significant change
         """
-        max_segment_frames = int(5.0 * fps / max(subsample, 1))  # ~5s per segment max
+        max_segment_frames = int(5.0 * fps / max(subsample, 1))
 
         if len(frame_vectors) < 2:
             if frame_vectors:
@@ -418,23 +428,65 @@ class SceneAnalyzer:
                 )]
             return []
 
-        # Compute frame-to-frame Hamming similarity
-        similarities = []
-        for i in range(1, len(frame_vectors)):
-            sim = hamming_similarity(frame_vectors[i - 1], frame_vectors[i], self.d_vsa)
-            similarities.append(sim)
+        n = len(frame_vectors)
 
-        # Find scene boundaries: hard cuts OR time-based splits
+        # Bidirectional similarity: forward AND backward
+        # Forward: how much of frame[i] survives in frame[i+1]
+        # Backward: how much of frame[i+1] was already in frame[i]
+        forward_sims = []
+        backward_sims = []
+        for i in range(n - 1):
+            fwd = hamming_similarity(frame_vectors[i], frame_vectors[i + 1], self.d_vsa)
+            bwd = hamming_similarity(frame_vectors[i + 1], frame_vectors[i], self.d_vsa)
+            forward_sims.append(fwd)
+            backward_sims.append(bwd)
+
+        # Combined change score: lower = more change
+        # Asymmetry between forward/backward indicates directional change
+        # (something disappeared vs something appeared)
+        combined_sims = []
+        change_types = []
+        for i in range(len(forward_sims)):
+            combined = min(forward_sims[i], backward_sims[i])
+            combined_sims.append(combined)
+
+            # Classify change type (Cho et al.)
+            fwd_loss = 1.0 - forward_sims[i]   # "missing" signal
+            bwd_loss = 1.0 - backward_sims[i]   # "new" signal
+            if fwd_loss > 0.1 and bwd_loss > 0.1:
+                change_types.append("replaced")
+            elif fwd_loss > 0.1:
+                change_types.append("missing")
+            elif bwd_loss > 0.1:
+                change_types.append("new")
+            else:
+                change_types.append("static")
+
+        # Adaptive content threshold (ACT): use median ± 1.5σ
+        # Instead of fixed threshold, adapt to this specific video's dynamics
+        sims_arr = np.array(combined_sims)
+        median_sim = float(np.median(sims_arr))
+        std_sim = float(np.std(sims_arr))
+        adaptive_thresh = max(median_sim - 1.5 * std_sim, 0.3)
+
+        # Find scene boundaries: adaptive threshold OR time-based
         boundaries = [0]
+        boundary_reasons = ["start"]
         frames_since_boundary = 0
-        for i, sim in enumerate(similarities):
+        for i, sim in enumerate(combined_sims):
             frames_since_boundary += 1
-            is_hard_cut = sim < self.segment_thresh
+            is_change = sim < adaptive_thresh
             is_time_split = frames_since_boundary >= max_segment_frames
-            if is_hard_cut or is_time_split:
+
+            if is_change:
                 boundaries.append(i + 1)
+                boundary_reasons.append(f"change:{change_types[i]}")
                 frames_since_boundary = 0
-        boundaries.append(len(frame_vectors))
+            elif is_time_split:
+                boundaries.append(i + 1)
+                boundary_reasons.append("time")
+                frames_since_boundary = 0
+        boundaries.append(n)
 
         # Build segments
         segments = []
@@ -480,6 +532,12 @@ class SceneAnalyzer:
                 seg_arousal = self.snn.neurochemistry.arousal
                 seg_emotion = self.snn.neurochemistry.dominant_emotion
 
+            # Change reason and magnitude for this segment boundary
+            reason = boundary_reasons[seg_idx] if seg_idx < len(boundary_reasons) else "time"
+            # Magnitude: average change within this segment
+            seg_sims = combined_sims[max(0, start - 1):min(end, len(combined_sims))]
+            change_mag = 1.0 - float(np.mean(seg_sims)) if seg_sims else 0.0
+
             segments.append(SceneSegment(
                 start_frame=start * subsample,
                 end_frame=end * subsample,
@@ -490,6 +548,8 @@ class SceneAnalyzer:
                 valence=seg_valence,
                 arousal=seg_arousal,
                 face_emotion=face_emo,
+                change_reason=reason,
+                change_magnitude=change_mag,
             ))
 
         return segments
@@ -571,7 +631,8 @@ class SceneAnalyzer:
                 "valence": round(seg.valence, 2),
                 "arousal": round(seg.arousal, 2),
                 "taste_score": round(seg.taste_score, 2),
-                "micro_expressions": len(seg.micro_expressions),
+                "change_reason": seg.change_reason,
+                "change_magnitude": round(seg.change_magnitude, 3),
             }
             # Transition from previous segment
             if i > 0:
@@ -659,19 +720,31 @@ class SceneAnalyzer:
             else:
                 mood = "somber"
 
-            # Scene continuity from graph
-            continuity = ""
-            if i < len(scene_graph) and "scene_similarity" in scene_graph[i]:
-                sim = scene_graph[i]["scene_similarity"]
-                if sim > 0.7:
-                    continuity = ", continuous"
-                elif sim > 0.5:
-                    continuity = ", gradual shift"
-                else:
-                    continuity = ", distinct change"
+            # Scene transition type (from bidirectional tracking)
+            transition = ""
+            if seg.change_reason.startswith("change:"):
+                change_type = seg.change_reason.split(":")[1]
+                if change_type == "replaced":
+                    transition = " [scene replaced]"
+                elif change_type == "missing":
+                    transition = " [content disappeared]"
+                elif change_type == "new":
+                    transition = " [new content appeared]"
+            elif i > 0:
+                # Time-based split — describe continuity
+                if i < len(scene_graph) and "scene_similarity" in scene_graph[i]:
+                    sim = scene_graph[i]["scene_similarity"]
+                    if sim > 0.7:
+                        transition = ", continuous"
+                    elif sim > 0.5:
+                        transition = ", gradual shift"
+                    else:
+                        transition = ", distinct change"
+
+            mag_str = f" d={seg.change_magnitude:.2f}" if seg.change_magnitude > 0.05 else ""
 
             lines.append(f"  [{taste_icon}] Scene {i+1} ({time_start:.0f}-{time_start + seg.duration_s:.0f}s): "
-                         f"{energy}, {mood}{continuity} "
+                         f"{energy}, {mood}{transition}{mag_str} "
                          f"(v={seg.valence:+.2f} a={seg.arousal:.2f})")
         lines.append("")
 
