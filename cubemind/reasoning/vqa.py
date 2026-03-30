@@ -22,6 +22,8 @@ Attribute verification: VisionEncoder (CLIP/SigLIP) for color, material, etc.
 
 from __future__ import annotations
 
+import re
+
 import math
 from dataclasses import dataclass, field
 
@@ -443,7 +445,7 @@ class QuestionParser:
 
         # Try longest match first
         for obj in sorted(known_objects, key=len, reverse=True):
-            if obj.lower() in search_text:
+            if re.search(r"" + re.escape(obj.lower()) + r"", search_text):
                 return obj
         return known_objects[0] if known_objects else None
 

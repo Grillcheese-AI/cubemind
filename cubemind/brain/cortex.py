@@ -208,14 +208,14 @@ class Thalamus:
         ], dtype=np.float32).reshape(1, -1)
 
         # Salience gate (GPU linear + sigmoid)
-        gate_raw = _gpu_linear(features, self._gate_w, self._gate_b)
+        gate_raw = (features @ self._gate_w.T + self._gate_b).astype(np.float32)
         salience = float(_gpu_sigmoid(gate_raw).ravel()[0])
         self.current_salience = salience
         gated = salience < self.gate_threshold
 
         # Route logits → softmax (GPU)
-        route_logits = _gpu_linear(features, self._route_w, None).ravel()
-        route_weights = _gpu_softmax(route_logits)
+        route_logits = (features @ self._route_w.T).ravel().astype(np.float32)
+        e = np.exp(route_logits - route_logits.max()); route_weights = (e / (e.sum() + 1e-8)).astype(np.float32)
 
         return {
             "salience": float(salience),
@@ -276,8 +276,8 @@ class BasalGanglia:
         ], dtype=np.float32).reshape(1, -1)
 
         # GPU linear projection + temperature-scaled softmax
-        logits = _gpu_linear(features, self._strategy_w, None).ravel() / self.temperature
-        probs = _gpu_softmax(logits)
+        logits = ((features @ self._strategy_w.T).ravel() / self.temperature).astype(np.float32)
+        e = np.exp(logits - logits.max()); probs = (e / (e.sum() + 1e-8)).astype(np.float32)
 
         best = int(np.argmax(probs))
         self.current_strategy = self.STRATEGIES[best]
@@ -428,11 +428,12 @@ class PersonalityLayer:
 
         # Weighted style transformation (GPU matmul per active style)
         styled = np.zeros(self.d_model, dtype=np.float32)
+        # Blend weight matrices first, then single matmul (distributive property)
+        W_eff = np.zeros((self.d_model, self.d_model), dtype=np.float32)
         for i in range(self.num_styles):
-            if weights[i] < 1e-6:
-                continue
-            transformed = _gpu_matmul(h, self.hebbian_weights[i])
-            styled += weights[i] * transformed
+            if weights[i] > 1e-6:
+                W_eff += weights[i] * self.hebbian_weights[i]
+        styled = (h @ W_eff.T).astype(np.float32)
 
         top = int(np.argmax(weights))
         self.style_usage[top] += 1.0
@@ -447,6 +448,6 @@ class PersonalityLayer:
         W = self.hebbian_weights[style_idx]
         y = _gpu_matmul(h, W)  # GPU: W @ h
         # Oja: ΔW = η * y * (x - y·W)
-        residual = h - _gpu_matmul(y, W)
+        residual = h - (W @ y).astype(np.float32)
         delta = self.lr * np.outer(y, residual)
         self.hebbian_weights[style_idx] = (W + delta).astype(np.float32)
