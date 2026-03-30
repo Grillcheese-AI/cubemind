@@ -77,11 +77,35 @@ def _quantize_weights_int8(weights: np.ndarray, block_size: int = 32) -> tuple[n
     return quantized.ravel()[:n].reshape(weights.shape), scales.astype(np.float32)
 
 
-class MoQERouter:
-    """Learned routing gate: decides 4-bit (expert 0) vs 8-bit (expert 1).
+def _gumbel_softmax_2way(logits_2: np.ndarray, temperature: float,
+                          rng: np.random.Generator | None = None) -> np.ndarray:
+    """Gumbel-Softmax for 2-expert routing. Fully differentiable.
 
-    Simple linear → sigmoid → hard threshold at inference.
-    During training, uses soft probabilities for gradient flow.
+    Args:
+        logits_2: (batch, 2) raw router logits for expert 0 and 1.
+        temperature: Annealing param. High=soft blend, low=hard argmax.
+        rng: Random generator for Gumbel noise.
+
+    Returns:
+        (batch, 2) soft weights summing to 1.0 per token.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    u = rng.uniform(1e-7, 1.0 - 1e-7, size=logits_2.shape).astype(np.float32)
+    gumbel = -np.log(-np.log(u))
+    noisy = (logits_2 + gumbel) / max(temperature, 1e-6)
+    # Stable softmax
+    noisy -= np.max(noisy, axis=-1, keepdims=True)
+    ex = np.exp(noisy)
+    return (ex / (ex.sum(axis=-1, keepdims=True) + 1e-8)).astype(np.float32)
+
+
+class MoQERouter:
+    """Learned 2-expert routing gate with Gumbel-Softmax training support.
+
+    Inference: hard argmax routing (expert 0 or 1).
+    Training: Gumbel-Softmax soft blending with temperature annealing.
+    Both experts receive gradient proportional to their selection weight.
 
     Args:
         d_model: Input dimension.
@@ -90,40 +114,40 @@ class MoQERouter:
 
     def __init__(self, d_model: int, seed: int = 42) -> None:
         self.d_model = d_model
-        rng = np.random.default_rng(seed)
-        # Small init so router starts near 0.5 (uncertain)
-        self.w = (rng.standard_normal(d_model) * 0.01).astype(np.float32)
+        self.rng = np.random.default_rng(seed)
+        self.w = (self.rng.standard_normal(d_model) * 0.01).astype(np.float32)
         self.b = np.float32(0.0)
 
     def forward(self, x: np.ndarray, hard: bool = True) -> tuple[int, float]:
-        """Route a single token.
-
-        Args:
-            x:    (d_model,) float32 input.
-            hard: If True, return hard 0/1 choice. If False, return soft prob.
-
-        Returns:
-            (choice, probability): choice=0 (4-bit) or 1 (8-bit), prob of 8-bit.
-        """
+        """Route a single token (inference)."""
         logit = float(np.dot(x.ravel(), self.w) + self.b)
         prob = float(_sigmoid(np.array([logit]))[0])
-        if hard:
-            return (1 if prob > 0.5 else 0), prob
         return (1 if prob > 0.5 else 0), prob
 
     def forward_batch(self, X: np.ndarray, hard: bool = True) -> tuple[np.ndarray, np.ndarray]:
-        """Route a batch of tokens.
-
-        Args:
-            X: (batch, d_model) float32.
-
-        Returns:
-            (choices, probs): choices (batch,) int, probs (batch,) float.
-        """
+        """Route a batch of tokens (inference: hard argmax)."""
         logits = X @ self.w + self.b  # (batch,)
         probs = _sigmoid(logits)
-        choices = (probs > 0.5).astype(np.int32) if hard else (probs > 0.5).astype(np.int32)
+        choices = (probs > 0.5).astype(np.int32)
         return choices, probs
+
+    def forward_gumbel(self, X: np.ndarray,
+                        temperature: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+        """Gumbel-Softmax routing (training: soft blending).
+
+        Returns:
+            (weights, logits_2):
+                weights: (batch, 2) soft expert weights summing to 1.
+                logits_2: (batch, 2) raw logits (for gradient computation).
+        """
+        # 2-way logits: [logit_expert0, logit_expert1]
+        # Expert 0 = 4-bit (default), Expert 1 = 8-bit
+        logit_1 = X @ self.w + self.b  # prob of expert 1
+        logit_0 = -logit_1             # symmetric: prob of expert 0
+        logits_2 = np.stack([logit_0, logit_1], axis=-1).astype(np.float32)
+
+        weights = _gumbel_softmax_2way(logits_2, temperature, self.rng)
+        return weights, logits_2
 
 
 class MoQELayer:

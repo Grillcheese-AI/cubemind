@@ -49,12 +49,22 @@ skip_dirs:
 - node_modules
 - .venv
 - dist
+- cloned
+- data
+- __pycache__
+- .git
+- .mypy_cache
+- .pytest_cache
+- htmlcov
+- .ruff_cache
+- build
+- .eggs
 user_profile:
   auto_observe: true
   decay_days: 90
   enabled: true
 vector_search:
-  enabled: true
+  enabled: false
   encoder_model: all-MiniLM-L6-v2
   qdrant_url: http://localhost:6333
 ---
