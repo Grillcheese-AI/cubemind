@@ -376,7 +376,7 @@ class SceneAnalyzer:
 
         # Fallback: grayscale spatial statistics
         if frame.ndim == 3:
-            gray = np.mean(frame.astype(np.float32), axis=2) / 255.0
+            gray = np.dot(frame.astype(np.float32), [0.114, 0.587, 0.299]) / 255.0
         else:
             gray = frame.astype(np.float32)
             if gray.max() > 1.0:
