@@ -63,14 +63,26 @@ except ImportError:
 
 
 def _gpu_linear(x, w, b=None):
-    """GPU linear projection: x @ w.T + b."""
+    """GPU linear projection: x @ w.T + b.
+
+    Avoids VulkanTensor → numpy → upload round-trip by converting
+    VulkanTensor weights to numpy ONCE (cached by caller at init).
+    """
     if _bridge is not None:
         try:
-            r = _bridge.linear(
-                np.ascontiguousarray(x, dtype=np.float32),
-                np.ascontiguousarray(w, dtype=np.float32),
-                np.ascontiguousarray(b, dtype=np.float32) if b is not None else None,
-            )
+            # Ensure numpy arrays (VulkanTensors should be pre-converted at init)
+            x_np = np.asarray(x, dtype=np.float32) if not isinstance(x, np.ndarray) else x
+            w_np = np.asarray(w, dtype=np.float32) if not isinstance(w, np.ndarray) else w
+            if not x_np.flags["C_CONTIGUOUS"]:
+                x_np = np.ascontiguousarray(x_np)
+            if not w_np.flags["C_CONTIGUOUS"]:
+                w_np = np.ascontiguousarray(w_np)
+            b_np = None
+            if b is not None:
+                b_np = np.asarray(b, dtype=np.float32) if not isinstance(b, np.ndarray) else b
+                if not b_np.flags["C_CONTIGUOUS"]:
+                    b_np = np.ascontiguousarray(b_np)
+            r = _bridge.linear(x_np, w_np, b_np)
             if r is not None:
                 return np.asarray(r, dtype=np.float32)
         except Exception:
@@ -125,7 +137,7 @@ def _layernorm(x, weight, bias, eps=1e-6):
 
 
 def _softmax(x, axis=-1):
-    """Softmax — GPU for 2D row-wise, numpy fallback otherwise."""
+    """Softmax — GPU for 2D row-wise, numpy fallback with in-place ops."""
     if _bridge is not None and x.ndim == 2 and axis == -1:
         try:
             r = _bridge.softmax(np.ascontiguousarray(x, dtype=np.float32))
@@ -133,9 +145,15 @@ def _softmax(x, axis=-1):
                 return np.asarray(r, dtype=np.float32)
         except Exception:
             pass
-    m = np.max(x, axis=axis, keepdims=True)
-    e = np.exp(x - m)
-    return (e / (e.sum(axis=axis, keepdims=True) + 1e-8)).astype(np.float32)
+    # In-place fallback: fewer temporary allocations, less GC pressure
+    out = x.astype(np.float32)  # single copy
+    m = np.max(out, axis=axis, keepdims=True)
+    np.subtract(out, m, out=out)
+    np.exp(out, out=out)
+    s = out.sum(axis=axis, keepdims=True)
+    s += 1e-8
+    np.divide(out, s, out=out)
+    return out
 
 
 class SigLIPVulkan:
