@@ -215,13 +215,19 @@ class SceneAnalyzer:
         processed = 0
 
         while processed < max_frames:
-            ret, frame = cap.read()
+            # grab() advances the pointer without decoding (instant)
+            # Only retrieve() (decode) when we actually need the frame
+            ret = cap.grab()
             if not ret:
                 break
 
             frame_idx += 1
             if frame_idx % subsample != 0:
                 continue
+
+            ret, frame = cap.retrieve()
+            if not ret:
+                break
 
             # Extract features
             feat, face_emo = self._extract_frame_features(frame)
