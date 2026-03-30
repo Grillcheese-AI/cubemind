@@ -446,9 +446,9 @@ class SigLIPVulkan:
                 if fa_out is not None:
                     out = np.asarray(fa_out, dtype=np.float32)[0]
                     out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-                    layer_idx = int(prefix.split(".")[-2])
-                    return _gpu_linear(out, self._out_proj_w[layer_idx],
-                                        self._out_proj_b[layer_idx])
+                    li = int(prefix.split(".")[2])
+                    return _gpu_linear(out, self._out_proj_w[li],
+                                        self._out_proj_b[li])
             except Exception:
                 pass
 
@@ -462,9 +462,9 @@ class SigLIPVulkan:
             a = _softmax(s, axis=-1)
             out[h] = _gpu_matmul(a, V[h])
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-        layer_idx = int(prefix.split(".")[-2])
-        return _gpu_linear(out, self._out_proj_w[layer_idx],
-                            self._out_proj_b[layer_idx])
+        li = int(prefix.split(".")[2])
+        return _gpu_linear(out, self._out_proj_w[li],
+                            self._out_proj_b[li])
 
     def _self_attention(self, x: np.ndarray, prefix: str) -> np.ndarray:
         """Multi-head self attention — fused QKV + Flash Attention 2."""
@@ -501,9 +501,9 @@ class SigLIPVulkan:
                     # (1, heads, seq, head_dim) → (seq, hidden)
                     out = np.asarray(fa_out, dtype=np.float32)[0]
                     out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-                    layer_idx = int(prefix.split(".")[-2])
-                    return _gpu_linear(out, self._out_proj_w[layer_idx],
-                                        self._out_proj_b[layer_idx])
+                    li = int(prefix.split(".")[2])
+                    return _gpu_linear(out, self._out_proj_w[li],
+                                        self._out_proj_b[li])
             except Exception:
                 pass
 
@@ -520,9 +520,9 @@ class SigLIPVulkan:
             out[h] = _gpu_matmul(a, V[h])
 
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-        layer_idx = int(prefix.split(".")[-2])
-        return _gpu_linear(out, self._out_proj_w[layer_idx],
-                            self._out_proj_b[layer_idx])
+        li = int(prefix.split(".")[2])
+        return _gpu_linear(out, self._out_proj_w[li],
+                            self._out_proj_b[li])
 
     def _mlp(self, x: np.ndarray, prefix: str) -> np.ndarray:
         """Feed-forward MLP — fused fc1→GELU→fc2 when available."""
