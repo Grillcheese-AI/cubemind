@@ -333,7 +333,7 @@ class SigLIPVulkan:
         return x
 
     def _self_attention(self, x: np.ndarray, prefix: str) -> np.ndarray:
-        """Multi-head self attention."""
+        """Multi-head self attention — Flash Attention 2 when available."""
         seq_len = x.shape[0]
 
         # Q, K, V projections (GPU linear)
@@ -344,29 +344,45 @@ class SigLIPVulkan:
         V = _gpu_linear(x, self._np(f"{prefix}.self_attn.v_proj.weight"),
                          self._np(f"{prefix}.self_attn.v_proj.bias"))
 
-        # Reshape to multi-head: (seq, hidden) → (heads, seq, head_dim)
-        Q = Q.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
-        K = K.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
-        V = V.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
+        # Reshape: (seq, hidden) → (batch=1, heads, seq, head_dim)
+        Q = Q.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+        K = K.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+        V = V.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
 
-        # Scaled dot-product attention — per-head GPU matmul
-        scale = math.sqrt(self.head_dim)
+        # Try Flash Attention 2 (single GPU dispatch for all heads)
+        scale = 1.0 / math.sqrt(self.head_dim)
+        if _bridge is not None:
+            try:
+                fa_out = _bridge.flash_attention2(
+                    np.ascontiguousarray(Q, dtype=np.float32),
+                    np.ascontiguousarray(K, dtype=np.float32),
+                    np.ascontiguousarray(V, dtype=np.float32),
+                    scale=scale,
+                )
+                if fa_out is not None:
+                    # (1, heads, seq, head_dim) → (seq, hidden)
+                    out = np.asarray(fa_out, dtype=np.float32)[0]
+                    out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
+                    return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
+                                        self._np(f"{prefix}.self_attn.out_proj.bias"))
+            except Exception:
+                pass
+
+        # Fallback: per-head matmul
+        Q = Q[0]  # (heads, seq, head_dim)
+        K = K[0]
+        V = V[0]
+        inv_scale = math.sqrt(self.head_dim)
         out = np.zeros_like(V)
         for h in range(self.num_heads):
-            # Q[h] @ K[h].T → scores for this head
-            s = _gpu_linear(Q[h], K[h], None) / scale  # (seq, seq)
+            s = _gpu_linear(Q[h], K[h], None) / inv_scale
             s = np.clip(s, -50, 50)
             a = _softmax(s, axis=-1)
-            # attn @ V[h] → output for this head
-            out[h] = _gpu_matmul(a, V[h])  # (seq, head_dim)
+            out[h] = _gpu_matmul(a, V[h])
 
-        # Concat heads
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-
-        # Output projection
-        out = _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
-                           self._np(f"{prefix}.self_attn.out_proj.bias"))
-        return out
+        return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
+                            self._np(f"{prefix}.self_attn.out_proj.bias"))
 
     def _mlp(self, x: np.ndarray, prefix: str) -> np.ndarray:
         """Feed-forward MLP: Linear → GELU → Linear."""
@@ -390,20 +406,40 @@ class SigLIPVulkan:
         k = _gpu_linear(x, in_proj_w[768:1536], in_proj_b[768:1536])     # (seq, 768)
         v = _gpu_linear(x, in_proj_w[1536:], in_proj_b[1536:])           # (seq, 768)
 
-        # Attention: probe attends to all patches — per-head GPU matmul
-        scale = math.sqrt(self.head_dim)
-        q_h = q.reshape(1, self.num_heads, self.head_dim).transpose(1, 0, 2)   # (heads, 1, hd)
-        k_h = k.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)  # (heads, seq, hd)
-        v_h = v.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)  # (heads, seq, hd)
+        # Attention pooling — Flash Attention 2 or per-head fallback
+        scale = 1.0 / math.sqrt(self.head_dim)
+        # Shape: (batch=1, heads, seq, head_dim)
+        q_4d = q.reshape(1, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+        k_4d = k.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+        v_4d = v.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
 
-        pooled_heads = np.zeros((self.num_heads, 1, self.head_dim), dtype=np.float32)
-        for h in range(self.num_heads):
-            s = _gpu_linear(q_h[h], k_h[h], None) / scale  # (1, seq)
-            s = np.clip(s, -50, 50)
-            a = _softmax(s, axis=-1)                         # (1, seq)
-            pooled_heads[h] = _gpu_matmul(a, v_h[h])  # (1, hd)
+        pooled = None
+        if _bridge is not None:
+            try:
+                fa_out = _bridge.flash_attention2(
+                    np.ascontiguousarray(q_4d, dtype=np.float32),
+                    np.ascontiguousarray(k_4d, dtype=np.float32),
+                    np.ascontiguousarray(v_4d, dtype=np.float32),
+                    scale=scale,
+                )
+                if fa_out is not None:
+                    pooled = np.asarray(fa_out, dtype=np.float32)[0]
+                    pooled = pooled.transpose(1, 0, 2).reshape(1, self.hidden_size)
+            except Exception:
+                pass
 
-        pooled = pooled_heads.transpose(1, 0, 2).reshape(1, self.hidden_size)
+        if pooled is None:
+            q_h = q_4d[0]
+            k_h = k_4d[0]
+            v_h = v_4d[0]
+            inv_scale = math.sqrt(self.head_dim)
+            pooled_heads = np.zeros((self.num_heads, 1, self.head_dim), dtype=np.float32)
+            for h in range(self.num_heads):
+                s = _gpu_linear(q_h[h], k_h[h], None) / inv_scale
+                s = np.clip(s, -50, 50)
+                a = _softmax(s, axis=-1)
+                pooled_heads[h] = _gpu_matmul(a, v_h[h])
+            pooled = pooled_heads.transpose(1, 0, 2).reshape(1, self.hidden_size)
 
         # Output projection
         pooled = _gpu_linear(pooled, self._np("head.attention.out_proj.weight"),
