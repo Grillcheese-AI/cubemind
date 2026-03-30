@@ -339,22 +339,86 @@ class SigLIPVulkan:
         return x.astype(np.float32)
 
     def _transformer_layer(self, x: np.ndarray, layer_idx: int) -> np.ndarray:
-        """Single transformer encoder layer."""
+        """Single transformer encoder layer — fused ops when available."""
         prefix = f"encoder.layers.{layer_idx}"
 
         # Pre-norm + Self-attention
-        normed = _layernorm(x, self._np(f"{prefix}.layer_norm1.weight"),
-                            self._np(f"{prefix}.layer_norm1.bias"))
-        attn_out = self._self_attention(normed, prefix)
+        # Try fused LayerNorm → QKV projection (1 dispatch instead of 2)
+        qkv_w = self._qkv_w[layer_idx]
+        qkv_b = self._qkv_b[layer_idx]
+        if not isinstance(qkv_w, np.ndarray):
+            qkv_w = np.asarray(qkv_w, dtype=np.float32)
+        if not isinstance(qkv_b, np.ndarray):
+            qkv_b = np.asarray(qkv_b, dtype=np.float32)
+
+        fused_qkv = None
+        if _bridge is not None:
+            try:
+                fused_qkv = _bridge.fused_layernorm_linear(
+                    x,
+                    self._np(f"{prefix}.layer_norm1.weight"),
+                    self._np(f"{prefix}.layer_norm1.bias"),
+                    qkv_w, qkv_b,
+                )
+                if fused_qkv is not None:
+                    fused_qkv = np.asarray(fused_qkv, dtype=np.float32)
+            except Exception:
+                fused_qkv = None
+
+        if fused_qkv is not None:
+            attn_out = self._self_attention_from_qkv(fused_qkv, prefix)
+        else:
+            normed = _layernorm(x, self._np(f"{prefix}.layer_norm1.weight"),
+                                self._np(f"{prefix}.layer_norm1.bias"))
+            attn_out = self._self_attention(normed, prefix)
         x = x + attn_out
 
-        # Pre-norm + MLP
+        # Pre-norm + MLP (fused inside _mlp)
         normed = _layernorm(x, self._np(f"{prefix}.layer_norm2.weight"),
                             self._np(f"{prefix}.layer_norm2.bias"))
         mlp_out = self._mlp(normed, prefix)
         x = x + mlp_out
 
         return x
+
+    def _self_attention_from_qkv(self, qkv: np.ndarray, prefix: str) -> np.ndarray:
+        """Self attention from pre-computed fused QKV (from fused_layernorm_linear)."""
+        seq_len = qkv.shape[0]
+        Q, K, V = np.split(qkv, 3, axis=-1)
+
+        Q = Q.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+        K = K.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+        V = V.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)[np.newaxis]
+
+        scale = 1.0 / math.sqrt(self.head_dim)
+        if _bridge is not None:
+            try:
+                fa_out = _bridge.flash_attention2(
+                    np.ascontiguousarray(Q, dtype=np.float32),
+                    np.ascontiguousarray(K, dtype=np.float32),
+                    np.ascontiguousarray(V, dtype=np.float32),
+                    scale=scale,
+                )
+                if fa_out is not None:
+                    out = np.asarray(fa_out, dtype=np.float32)[0]
+                    out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
+                    return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
+                                        self._np(f"{prefix}.self_attn.out_proj.bias"))
+            except Exception:
+                pass
+
+        # Fallback: per-head
+        Q, K, V = Q[0], K[0], V[0]
+        inv_scale = math.sqrt(self.head_dim)
+        out = np.zeros_like(V)
+        for h in range(self.num_heads):
+            s = _gpu_linear(Q[h], K[h], None) / inv_scale
+            s = np.clip(s, -50, 50)
+            a = _softmax(s, axis=-1)
+            out[h] = _gpu_matmul(a, V[h])
+        out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
+        return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
+                            self._np(f"{prefix}.self_attn.out_proj.bias"))
 
     def _self_attention(self, x: np.ndarray, prefix: str) -> np.ndarray:
         """Multi-head self attention — fused QKV + Flash Attention 2."""
@@ -413,12 +477,25 @@ class SigLIPVulkan:
                             self._np(f"{prefix}.self_attn.out_proj.bias"))
 
     def _mlp(self, x: np.ndarray, prefix: str) -> np.ndarray:
-        """Feed-forward MLP: Linear → GELU → Linear."""
-        h = _gpu_linear(x, self._np(f"{prefix}.mlp.fc1.weight"),
-                         self._np(f"{prefix}.mlp.fc1.bias"))
+        """Feed-forward MLP — fused fc1→GELU→fc2 when available."""
+        w1 = self._np(f"{prefix}.mlp.fc1.weight")
+        b1 = self._np(f"{prefix}.mlp.fc1.bias")
+        w2 = self._np(f"{prefix}.mlp.fc2.weight")
+        b2 = self._np(f"{prefix}.mlp.fc2.bias")
+
+        # Try fused MLP (single GPU dispatch, hidden stays in LDS)
+        if _bridge is not None:
+            try:
+                result = _bridge.fused_mlp_gelu(x, w1, b1, w2, b2)
+                if result is not None:
+                    return np.asarray(result, dtype=np.float32)
+            except Exception:
+                pass
+
+        # Fallback: 3 separate ops
+        h = _gpu_linear(x, w1, b1)
         h = _gelu(h)
-        return _gpu_linear(h, self._np(f"{prefix}.mlp.fc2.weight"),
-                            self._np(f"{prefix}.mlp.fc2.bias"))
+        return _gpu_linear(h, w2, b2)
 
     def _attention_pool(self, x: np.ndarray) -> np.ndarray:
         """SigLIP2 attention pooling head."""
