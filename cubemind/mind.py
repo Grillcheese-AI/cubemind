@@ -53,12 +53,15 @@ _DetectedObject = None
 _SemanticEncoder = None
 _VisionEncoder = None
 _AudioEncoder = None
+_BottleneckFusion = None
+_PerceiverIO = None
 
 
 def _lazy_imports():
     """Load heavy modules on first use."""
     global _FacePerception, _SceneAnalyzer, _VQAEngine, _DetectedObject
     global _SemanticEncoder, _VisionEncoder, _AudioEncoder
+    global _BottleneckFusion, _PerceiverIO
     if _FacePerception is None:
         try:
             from cubemind.perception.face import FacePerception as _FP
@@ -94,6 +97,13 @@ def _lazy_imports():
         try:
             from cubemind.perception.audio import AudioEncoder as _AE
             _AudioEncoder = _AE
+        except Exception:
+            pass
+    if _BottleneckFusion is None:
+        try:
+            from grilly.nn.multimodal import BottleneckFusion as _BF, PerceiverIO as _PIO
+            _BottleneckFusion = _BF
+            _PerceiverIO = _PIO
         except Exception:
             pass
 
@@ -211,6 +221,25 @@ class Mind:
                 self.audio_encoder = _AudioEncoder(
                     snn_neurons=snn_neurons, d_vsa=d_vsa, seed=seed + 5,
                 )
+            except Exception:
+                pass
+
+        # ── Multimodal Fusion (grilly) ─────────────────────────────────
+        # BottleneckFusion: fuse two modalities through learned bottleneck tokens
+        # PerceiverIO: map any modality to fixed latent then to any output
+        self.fusion_dim = d_model
+        self.bottleneck_fusion = None
+        self.perceiver_io = None
+        if _BottleneckFusion is not None:
+            try:
+                self.bottleneck_fusion = _BottleneckFusion(
+                    d_model=d_model, num_bottlenecks=16, num_heads=4, dropout=0.0,
+                )
+                self.perceiver_io = _PerceiverIO(
+                    input_dim=d_model, latent_dim=d_model, num_latents=32,
+                    num_heads=4, num_layers=2, dropout=0.0,
+                )
+                print(f"Multimodal fusion: BottleneckFusion({d_model}D, 16 tokens) + PerceiverIO(32 latents)")
             except Exception:
                 pass
 
@@ -535,17 +564,21 @@ class Mind:
 
     def learn(self, label: str, frame: np.ndarray | None = None,
               audio: np.ndarray | None = None) -> dict:
-        """Multi-modal learning: bind see + hear + feel into one concept.
+        """Multi-modal learning: fuse see + hear + feel into one concept.
 
-        When you show it a bear and say "this is a bear", it binds:
-          visual_vec XOR audio_vec XOR emotion_vec = concept "bear"
+        Two fusion modes:
+          1. BottleneckFusion (grilly): learned cross-attention fusion of
+             modality pairs through bottleneck tokens → PerceiverIO → VSA.
+             Richer representation, captures cross-modal relationships.
 
-        Later, any single modality retrieves the others:
-          see bear → retrieves word "bear" + emotion
-          hear "bear" → retrieves visual pattern + emotion
+          2. XOR binding (fallback): visual ⊕ audio ⊕ text ⊕ emotion.
+             Simpler but still effective for cross-modal recall.
 
-        This is how humans learn: simultaneous multi-sensory experience
-        fused into a single memory trace.
+        When you show it a bear and say "this is a bear", it fuses:
+          vision features + text embedding + audio features + emotion state
+          → single unified concept vector stored in semantic memory.
+
+        Later, any single modality retrieves the others.
 
         Args:
             label:  What this concept is called (e.g., "bear").
@@ -556,67 +589,140 @@ class Mind:
             Dict with the concept vector and what was bound.
         """
         self.state.interaction_count += 1
+        modalities = {}
         modalities_bound = []
+        d = self.fusion_dim
 
-        # Start with the label as text
+        # ── Collect feature vectors per modality ──────────────────────
+
+        # Text
         if self.text_encoder is not None:
             text_vec = self.text_encoder.encode_action(label).ravel()
-            text_proj = binarize_and_pack(self.lsh.project(
-                text_vec[:self.lsh.d_input] if len(text_vec) >= self.lsh.d_input
-                else np.pad(text_vec, (0, self.lsh.d_input - len(text_vec)))
-            ))
+            text_feat = text_vec[:d] if len(text_vec) >= d else np.pad(text_vec, (0, d - len(text_vec)))
+            modalities["text"] = text_feat.astype(np.float32)
             modalities_bound.append("text")
         else:
-            # Hash fallback
-            seed = hash(label) % (2**31)
-            rng = np.random.default_rng(seed)
-            text_proj = rng.integers(0, 2**32, size=self.episodic_memory.words_per_vec, dtype=np.uint32)
+            rng = np.random.default_rng(hash(label) % (2**31))
+            modalities["text"] = rng.standard_normal(d).astype(np.float32) * 0.1
             modalities_bound.append("text_hash")
 
-        concept_vec = text_proj.copy()
-
-        # Bind visual modality if provided
+        # Vision
         if frame is not None:
-            visual_feat = self._grid_features(frame, self.lsh.d_input)
             if self.vision_encoder is not None:
                 bc = self.vision_encoder.encode_image(frame)
-                visual_feat = bc.ravel()[:self.lsh.d_input]
-                if len(visual_feat) < self.lsh.d_input:
-                    visual_feat = np.pad(visual_feat, (0, self.lsh.d_input - len(visual_feat)))
-            visual_proj = binarize_and_pack(self.lsh.project(visual_feat))
-            concept_vec = np.bitwise_xor(concept_vec, visual_proj)
+                vis_feat = bc.ravel()[:d]
+            else:
+                vis_feat = self._grid_features(frame, d)
+            if len(vis_feat) < d:
+                vis_feat = np.pad(vis_feat, (0, d - len(vis_feat)))
+            modalities["vision"] = vis_feat.astype(np.float32)
             modalities_bound.append("vision")
 
-            # Also process through SNN for neurochemistry
+            # SNN neurochemistry from seeing
             snn_feat = self._grid_features(frame, 104)
             self.snn.step(snn_feat / (np.std(snn_feat) + 1e-6) * 0.3)
 
-        # Bind audio modality if provided
+        # Audio
         if audio is not None and self.audio_encoder is not None:
-            audio_vec = self.audio_encoder.encode_audio(audio)
-            concept_vec = np.bitwise_xor(concept_vec, audio_vec)
+            audio_feats = self.audio_encoder.features.extract_stream(audio)
+            # Pool audio features to single vector
+            audio_pooled = np.mean(audio_feats, axis=0)
+            if len(audio_pooled) < d:
+                audio_pooled = np.pad(audio_pooled, (0, d - len(audio_pooled)))
+            modalities["audio"] = audio_pooled[:d].astype(np.float32)
             modalities_bound.append("audio")
 
-        # Bind current emotional state (how it FEELS about this concept)
-        from cubemind.perception.scene import _emotion_to_vector
-        emotion_vec = _emotion_to_vector(self.snn.neurochemistry, self.d_vsa)
-        concept_vec = np.bitwise_xor(concept_vec, emotion_vec)
+        # Emotion
+        nc = self.snn.neurochemistry
+        emotion_feat = np.array([
+            nc.cortisol, nc.dopamine, nc.serotonin, nc.oxytocin,
+            nc.valence, nc.arousal, nc.stress,
+            1.0 if nc.dominant_emotion == "joy" else 0.0,
+            1.0 if nc.dominant_emotion == "curious" else 0.0,
+            1.0 if nc.dominant_emotion == "anxious" else 0.0,
+        ], dtype=np.float32)
+        if len(emotion_feat) < d:
+            emotion_feat = np.pad(emotion_feat, (0, d - len(emotion_feat)))
+        modalities["emotion"] = emotion_feat[:d]
         modalities_bound.append("emotion")
 
-        # Store the multi-modal concept
+        # ── Fuse modalities ───────────────────────────────────────────
+
+        fusion_method = "xor"
+        fused_feat = None
+
+        if self.bottleneck_fusion is not None and len(modalities) >= 2:
+            # BottleneckFusion: pairwise cross-attention through bottleneck tokens
+            try:
+                mod_keys = list(modalities.keys())
+                # Reshape to (1, 1, d) for attention (batch=1, seq=1)
+                m1 = modalities[mod_keys[0]].reshape(1, 1, d)
+                m2 = modalities[mod_keys[1]].reshape(1, 1, d)
+
+                # If more than 2 modalities, stack them as sequence tokens
+                if len(mod_keys) > 2:
+                    extra = np.stack([modalities[k].reshape(1, d) for k in mod_keys[2:]], axis=1)
+                    m2 = np.concatenate([m2, extra], axis=1)  # (1, N-1, d)
+
+                # BottleneckFusion: (1, bottleneck_tokens, d)
+                fused = self.bottleneck_fusion.forward(m1, m2)
+
+                # Pool bottleneck tokens → single vector
+                fused_feat = np.mean(fused[0], axis=0).astype(np.float32)  # (d,)
+                fusion_method = "bottleneck"
+
+                # Optionally refine through PerceiverIO
+                if self.perceiver_io is not None:
+                    all_modalities = np.stack(
+                        [modalities[k] for k in mod_keys], axis=0,
+                    ).reshape(1, len(mod_keys), d)
+                    pio_out = self.perceiver_io.forward(all_modalities)
+                    fused_feat = np.mean(pio_out[0], axis=0).astype(np.float32)
+                    fusion_method = "perceiver_io"
+
+            except Exception:
+                fused_feat = None  # Fall back to XOR
+
+        # ── Project to binary VSA ─────────────────────────────────────
+
+        if fused_feat is not None:
+            # Bottleneck/PerceiverIO path: project fused features to VSA
+            proj_input = fused_feat[:self.lsh.d_input]
+            if len(proj_input) < self.lsh.d_input:
+                proj_input = np.pad(proj_input, (0, self.lsh.d_input - len(proj_input)))
+            concept_vec = binarize_and_pack(self.lsh.project(proj_input))
+        else:
+            # XOR binding fallback
+            fusion_method = "xor"
+            concept_vec = None
+            for key, feat in modalities.items():
+                proj_input = feat[:self.lsh.d_input]
+                if len(proj_input) < self.lsh.d_input:
+                    proj_input = np.pad(proj_input, (0, self.lsh.d_input - len(proj_input)))
+                packed = binarize_and_pack(self.lsh.project(proj_input))
+                if concept_vec is None:
+                    concept_vec = packed
+                else:
+                    concept_vec = np.bitwise_xor(concept_vec, packed)
+
+        # ── Store in memory ───────────────────────────────────────────
+
         self.semantic_memory.learn(concept_vec, label=label)
 
-        # Also store each modality separately for cross-modal retrieval
-        # see bear → query semantic memory → retrieve "bear" label
-        if "vision" in modalities_bound:
-            self.episodic_memory.learn(visual_proj, label=f"visual:{label}")
-        if "audio" in modalities_bound:
-            self.episodic_memory.learn(audio_vec, label=f"audio:{label}")
+        # Store per-modality vectors for cross-modal retrieval
+        for key in ["vision", "audio"]:
+            if key in modalities:
+                proj_input = modalities[key][:self.lsh.d_input]
+                if len(proj_input) < self.lsh.d_input:
+                    proj_input = np.pad(proj_input, (0, self.lsh.d_input - len(proj_input)))
+                packed = binarize_and_pack(self.lsh.project(proj_input))
+                self.episodic_memory.learn(packed, label=f"{key}:{label}")
 
         return {
             "label": label,
             "modalities": modalities_bound,
-            "emotion": self.snn.neurochemistry.dominant_emotion,
+            "fusion": fusion_method,
+            "emotion": nc.dominant_emotion,
             "semantic_memories": self.semantic_memory.size,
             "episodic_memories": self.episodic_memory.size,
         }
