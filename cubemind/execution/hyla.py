@@ -56,14 +56,19 @@ class HYLA:
     Maps a VSA block-code embedding e (d_vsa,) through a two-layer hypernetwork
     to produce a mainnet weight matrix W (d_out, d_vsa), then applies W @ x.
 
+    Uses factored weight generation: instead of a single (d_out*d_vsa, d_hidden)
+    output matrix (which is 53GB at d_vsa=10240), generates two low-rank factors
+    A (d_out, rank) and B (rank, d_vsa) so that W = A @ B.
+
     Hypernetwork architecture::
 
-        h = GELU(e @ W_h^T + b_h)             # hidden layer  (d_hidden,)
-        W = reshape(h @ W_H^T, d_out, d_vsa)  # output weights
+        h = GELU(e @ W_h^T + b_h)           # hidden layer  (d_hidden,)
+        A = reshape(h @ W_A^T, d_out, rank)  # left factor
+        B = reshape(h @ W_B^T, rank, d_vsa)  # right factor
+        W = A @ B                             # mainnet weights (d_out, d_vsa)
 
-    MIP normalization is applied to the embedding before the hypernetwork,
-    normalizing each of the k blocks independently and applying learnable
-    affine parameters (gamma, beta) per block.
+    Memory: O(d_hidden * rank * (d_out + d_vsa)) instead of O(d_hidden * d_out * d_vsa).
+    At d_vsa=10240, rank=64: 160MB vs 53GB.
 
     Args:
         d_vsa: Total VSA dimension (must equal k * l).
@@ -71,6 +76,7 @@ class HYLA:
         d_out: Mainnet output dimension.
         k: Number of blocks.
         l: Block length.
+        rank: Rank of factored weight generation.
         seed: Random seed for reproducibility.
         init: Initialization scheme -- 'hyperfan' or 'xavier'.
     """
@@ -82,6 +88,7 @@ class HYLA:
         d_out: int,
         k: int = K_BLOCKS,
         l: int = L_BLOCK,
+        rank: int = 64,
         seed: int = 42,
         init: str = "hyperfan",
     ) -> None:
@@ -92,41 +99,35 @@ class HYLA:
         self.d_out = d_out
         self.k = k
         self.l = l
+        self.rank = rank
 
         rng = np.random.default_rng(seed)
 
         # -- Hypernet hidden layer (Linear_h): d_vsa -> d_hidden ---------------
-        # Standard Xavier initialization for the first layer
         xavier_std_h = np.sqrt(2.0 / (d_vsa + d_hidden))
         self.W_h = rng.normal(0, xavier_std_h, size=(d_hidden, d_vsa)).astype(
             np.float32
         )
         self.b_h = np.zeros(d_hidden, dtype=np.float32)
 
-        # -- Hypernet output layer (Linear_H): d_hidden -> d_out * d_vsa -------
-        if init == "hyperfan":
-            # Hyperfan-in: accounts for block-code embedding variance (Theorem 3)
-            self.W_H = hyperfan_init(
-                fan_out=d_out,
-                fan_in=d_vsa,
-                d_k=d_hidden,
-                l=l,
-                has_bias=False,
-                activation="gelu",
-                rng=rng,
-            )
-        elif init == "xavier":
-            xavier_std_H = np.sqrt(2.0 / (d_hidden + d_out * d_vsa))
-            self.W_H = rng.normal(
-                0, xavier_std_H, size=(d_out * d_vsa, d_hidden)
-            ).astype(np.float32)
-        else:
-            raise ValueError(f"Unknown init scheme: {init!r}")
+        # -- Factored output: h -> A(d_out, rank) and h -> B(rank, d_vsa) -----
+        # Old: W_H was (d_out * d_vsa, d_hidden) = 53GB at d_vsa=10240
+        # New: W_A is (d_out * rank, d_hidden) + W_B is (rank * d_vsa, d_hidden)
+        xavier_std_A = np.sqrt(2.0 / (d_hidden + d_out * rank))
+        self.W_A = rng.normal(
+            0, xavier_std_A, size=(d_out * rank, d_hidden)
+        ).astype(np.float32)
+
+        xavier_std_B = np.sqrt(2.0 / (d_hidden + rank * d_vsa))
+        self.W_B = rng.normal(
+            0, xavier_std_B, size=(rank * d_vsa, d_hidden)
+        ).astype(np.float32)
 
         # Wrap weight matrices in VulkanTensor for linear_t fast path
         if _VulkanTensor is not None:
             self.W_h = _VulkanTensor(self.W_h)
-            self.W_H = _VulkanTensor(self.W_H)
+            self.W_A = _VulkanTensor(self.W_A)
+            self.W_B = _VulkanTensor(self.W_B)
 
         # -- MIP affine parameters (per block) ---------------------------------
         self.gamma = np.ones(k, dtype=np.float32)
@@ -163,6 +164,10 @@ class HYLA:
     def generate_weights(self, e_flat: np.ndarray) -> np.ndarray:
         """Generate mainnet weight matrix from a VSA embedding.
 
+        Uses factored generation: h -> A(d_out, rank) and B(rank, d_vsa),
+        then W = A @ B. Never materializes the full (d_out, d_vsa) matrix
+        in the hypernetwork parameters.
+
         Args:
             e_flat: Flat embedding vector (d_vsa,).
 
@@ -172,24 +177,17 @@ class HYLA:
         e_norm = self.mip_normalize(e_flat)
 
         # Hidden layer: h = GELU(Linear(e_norm))
-        if _bridge is not None:
-            try:
-                h = _bridge.linear(e_norm.reshape(1, -1), self.W_h, self.b_h)
-                if h is not None:
-                    h = np.asarray(h, dtype=np.float32).ravel()
-                    h = gelu(h)  # GPU GELU
-                    W_flat = _bridge.linear(h.reshape(1, -1), self.W_H, None)
-                    if W_flat is not None:
-                        return np.asarray(W_flat, dtype=np.float32).reshape(self.d_out, self.d_vsa)
-            except Exception:
-                pass
-
-        # CPU fallback — np.asarray handles both ndarray and VulkanTensor
         W_h = np.asarray(self.W_h, dtype=np.float32)
-        W_H = np.asarray(self.W_H, dtype=np.float32)
-        h = gelu(e_norm @ W_h.T + self.b_h)
-        W_flat = h @ W_H.T
-        return W_flat.reshape(self.d_out, self.d_vsa).astype(np.float32)
+        W_A = np.asarray(self.W_A, dtype=np.float32)
+        W_B = np.asarray(self.W_B, dtype=np.float32)
+
+        h = gelu(e_norm @ W_h.T + self.b_h)  # (d_hidden,)
+
+        # Factored weight generation
+        A = (h @ W_A.T).reshape(self.d_out, self.rank)   # (d_out, rank)
+        B = (h @ W_B.T).reshape(self.rank, self.d_vsa)   # (rank, d_vsa)
+
+        return (A @ B).astype(np.float32)  # (d_out, d_vsa)
 
     # -- Forward pass ----------------------------------------------------------
 

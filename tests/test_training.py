@@ -131,7 +131,7 @@ class TestTrainer:
     def setup(self):
         from cubemind.model import CubeMind
         from cubemind.training.trainer import Trainer
-        self.model = CubeMind(k=K, l=L, n_codebook=8, d_hidden=16, cache_size=50)
+        self.model = CubeMind(k=K, l=L, n_codebook=8)
         self.trainer = Trainer(self.model)
         self.bc = BlockCodes(K, L)
 

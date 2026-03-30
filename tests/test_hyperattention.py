@@ -6,15 +6,15 @@ from cubemind.telemetry import metrics
 
 def run_context_stress_test():
     print("🚀 Starting CubeMind Attention Stress Test...")
-    
+
     # Configuration
     K, L_BLOCK = 16, 32  # d_vsa = 512
     # We test across these context lengths
-    context_lengths = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 16384 * 2] 
-    
-    # Initialize both models
-    model_baseline = CubeMind(k=K, l=L_BLOCK, use_hyper_attention=False)
-    model_hyper = CubeMind(k=K, l=L_BLOCK, use_hyper_attention=True)
+    context_lengths = [64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 16384 * 2]
+
+    # CubeMind always uses HyperAxialAttention now
+    model_baseline = CubeMind(k=K, l=L_BLOCK)
+    model_hyper = CubeMind(k=K, l=L_BLOCK)
     
     results = {
         "baseline_latency": [],
@@ -75,8 +75,8 @@ def run_context_stress_test():
 def test_causal_integrity():
     """Verify that the causal mask prevents 'future' data leakage."""
     print("\n🛡️ Testing Causal Integrity...")
-    model = CubeMind(use_hyper_attention=True)
-    
+    model = CubeMind(k=4, l=32, n_codebook=8)
+
     L = 100
     history = [model.bc.random_discrete() for _ in range(L)]
     input_phi = model.bc.random_discrete()

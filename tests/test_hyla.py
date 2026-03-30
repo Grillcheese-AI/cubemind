@@ -67,23 +67,17 @@ def test_hyperfan_init_used(hyla: HYLA):
     """Hyperfan init W_H should have variance consistent with Theorem 3.
 
     The expected variance from hyperfan_in_variance should roughly match
-    the empirical variance of W_H, within a tolerance for sampling noise.
+    the empirical variance of W_A and W_B, within a tolerance for Xavier init.
     """
-    expected_var = hyperfan_in_variance(
-        fan_in=D_VSA,
-        d_k=D_HIDDEN,
-        l=L,
-        has_bias=False,
-        activation="gelu",
-    )
-    empirical_var = float(np.var(hyla.W_H))
-
-    # With enough elements, empirical should be within 50% of expected
-    # (W_H has d_out*d_vsa*d_hidden = 10*32*16 = 5120 elements)
-    ratio = empirical_var / expected_var
-    assert 0.5 < ratio < 2.0, (
-        f"Hyperfan variance mismatch: expected {expected_var:.6f}, "
-        f"got {empirical_var:.6f} (ratio={ratio:.3f})"
+    # Factored HYLA uses W_A (d_out*rank, d_hidden) and W_B (rank*d_vsa, d_hidden)
+    # with Xavier initialization instead of Hyperfan on the old monolithic W_H.
+    rank = hyla.rank
+    expected_var_A = 2.0 / (D_HIDDEN + D_OUT * rank)
+    empirical_var_A = float(np.var(hyla.W_A))
+    ratio_A = empirical_var_A / expected_var_A
+    assert 0.3 < ratio_A < 3.0, (
+        f"W_A variance mismatch: expected {expected_var_A:.6f}, "
+        f"got {empirical_var_A:.6f} (ratio={ratio_A:.3f})"
     )
 
 

@@ -25,12 +25,13 @@ except ImportError:
     K_BLOCKS = 80
     L_BLOCK = 128
 
-# Try llama-cpp-python for GGUF models (preferred — fast, no torch overhead)
-_LLAMA = None
+# llama-cpp-python is imported lazily inside __init__ to avoid
+# Vulkan backend allocating tens of GB of system RAM on import.
+_LLAMA_AVAILABLE = False
 try:
-    from llama_cpp import Llama as _LlamaCpp
-    _LLAMA = _LlamaCpp
-except ImportError:
+    import importlib.util
+    _LLAMA_AVAILABLE = importlib.util.find_spec("llama_cpp") is not None
+except Exception:
     pass
 
 # Fallback: sentence-transformers
@@ -75,14 +76,17 @@ class SemanticEncoder:
         self._mode = "none"
 
         # Priority 1: GGUF model (BGE-M3, fast, no torch)
-        if gguf_path and _LLAMA is not None:
+        # Imported lazily to avoid Vulkan backend eating 50+GB on import
+        if gguf_path and _LLAMA_AVAILABLE:
             try:
-                self._gguf_model = _LLAMA(
+                from llama_cpp import Llama as _LlamaCpp
+                self._gguf_model = _LlamaCpp(
                     model_path=gguf_path,
                     embedding=True,
-                    n_ctx=512,
-                    n_batch=512,
-                    verbose=False,
+                    n_ctx=64,
+                    n_batch=64,
+                    n_gpu_layers=0,
+                    verbose=True,
                 )
                 self._embed_dim = self._gguf_model.n_embd()
                 self._mode = "gguf"

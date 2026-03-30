@@ -37,103 +37,124 @@ def oja_update_batch(memories: np.ndarray, inputs: np.ndarray, eta: float = 0.01
 # ── O(L) Attention Engine ──────────────────────────────────────────────────
 
 class HyperAxialAttention:
-    def __init__(self, d_model, heads=4, bucket_size=32, sample_size=16):
+    def __init__(self, d_model, heads=4, bucket_size=32, sample_size=16, rank=128):
         self.d_model = d_model
         self.n_h = heads
         self.d_h = d_model // heads
-        self.bucket_size = bucket_size # Reduced for testing/small docs
+        self.bucket_size = bucket_size
         self.sample_size = sample_size
+        self.rank = rank
         self.rng = np.random.default_rng(42)
         self.projections = self.rng.standard_normal((self.d_h, 32)).astype(np.float32)
-        
-        std = 1.0 / math.sqrt(d_model)
-        self.W_Q = self.rng.normal(0, std, (d_model, d_model)).astype(np.float32)
-        self.W_K = self.rng.normal(0, std, (d_model, d_model)).astype(np.float32)
-        self.W_V = self.rng.normal(0, std, (d_model, d_model)).astype(np.float32)
+
+        # Low-rank Q/K/V projections: d_model → rank → d_model
+        # Full-rank W_Q would be (10240, 10240) = 400MB each.
+        # Low-rank: (10240, 128) + (128, 10240) = 2.5MB each. 480x smaller.
+        std = 1.0 / math.sqrt(rank)
+        self.W_Q_down = self.rng.normal(0, std, (d_model, rank)).astype(np.float32)
+        self.W_Q_up = self.rng.normal(0, std, (rank, d_model)).astype(np.float32)
+        self.W_K_down = self.rng.normal(0, std, (d_model, rank)).astype(np.float32)
+        self.W_K_up = self.rng.normal(0, std, (rank, d_model)).astype(np.float32)
+        self.W_V_down = self.rng.normal(0, std, (d_model, rank)).astype(np.float32)
+        self.W_V_up = self.rng.normal(0, std, (rank, d_model)).astype(np.float32)
 
     def _hash(self, x):
         return np.sum((x @ self.projections > 0) * (2 ** np.arange(32)), axis=-1)
 
     def forward(self, X, causal=True, refine=True):
         L, d = X.shape
-        
-        # 1. ORTHOGONAL SALIENCY (Aggressive Noise Removal)
-        global_mean = np.mean(X, axis=0, keepdims=True)
-        # We subtract 99% of the 'Book average' to leave only the unique spikes
-        X_saliency = X - (global_mean * 0.99) 
+        scale = math.sqrt(self.d_h)
 
-        # Early exit for small docs
+        # 1. SDLS Noise Removal: orthogonal projection onto null-space of mean
+        # Instead of crude X - 0.99*mean, project out the mean axis properly
+        mean = np.mean(X, axis=0)
+        mean_norm = np.linalg.norm(mean)
+        if mean_norm > 1e-8:
+            noise_axis = mean / mean_norm
+            projections = X @ noise_axis  # (L,)
+            X_clean = X - np.outer(projections, noise_axis)
+        else:
+            X_clean = X
+
+        # Low-rank projections: X @ W_down @ W_up  (d → rank → d)
+        def proj_q(x): return (x @ self.W_Q_down) @ self.W_Q_up
+        def proj_k(x): return (x @ self.W_K_down) @ self.W_K_up
+        def proj_v(x): return (x @ self.W_V_down) @ self.W_V_up
+
+        # Early exit for small docs — standard scaled dot-product attention
         if L <= self.bucket_size:
-            Q, K, V = X_saliency @ self.W_Q, X_saliency @ self.W_K, X @ self.W_V
-            # TEMPERATURE GATING
-            scores = (Q @ K.T) / (math.sqrt(self.d_h) * 0.001)
-            scores -= np.mean(scores, axis=-1, keepdims=True) # Center scores
+            Q = proj_q(X_clean)
+            K = proj_k(X_clean)
+            V = proj_v(X)  # Values from original (not denoised)
+            scores = (Q @ K.T) / scale
+            if causal:
+                mask = np.tril(np.ones((L, L), dtype=bool))
+                scores = np.where(mask, scores, -1e9)
             m = np.max(scores, axis=-1, keepdims=True)
             ex = np.exp(scores - m)
             return (ex / (ex.sum(axis=-1, keepdims=True) + 1e-6)) @ V
 
-        # Project and Multi-head split
-        Q_all = (X_saliency @ self.W_Q).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
-        K_all = (X_saliency @ self.W_K).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
-        V_all = (X @ self.W_V).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
+        # Multi-head split: Q,K from denoised, V from original
+        Q_all = proj_q(X_clean).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
+        K_all = proj_k(X_clean).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
+        V_all = proj_v(X).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
 
         out_heads = []
         orig_indices = np.arange(L)
 
         for h in range(self.n_h):
-            q_idx, k_idx = np.argsort(self._hash(Q_all[h])), np.argsort(self._hash(K_all[h]))
+            # LSH bucketing via SimHash
+            q_idx = np.argsort(self._hash(Q_all[h]))
+            k_idx = np.argsort(self._hash(K_all[h]))
             qs, ks, vs = Q_all[h][q_idx], K_all[h][k_idx], V_all[h][k_idx]
             qp, kp = orig_indices[q_idx], orig_indices[k_idx]
 
             num_b = int(math.ceil(L / self.bucket_size))
             L_padded = num_b * self.bucket_size
-            
-            # PADDING
+
+            # Pad to uniform bucket size
             pad_len = L_padded - L
             if pad_len > 0:
                 qs = np.pad(qs, ((0, pad_len), (0, 0)))
                 ks = np.pad(ks, ((0, pad_len), (0, 0)))
                 vs = np.pad(vs, ((0, pad_len), (0, 0)))
                 qp = np.pad(qp, (0, pad_len), constant_values=-1)
-                kp = np.pad(kp, (0, pad_len), constant_values=L+1)
+                kp = np.pad(kp, (0, pad_len), constant_values=L + 1)
 
             qb = qs.reshape(num_b, self.bucket_size, -1)
             kb = ks.reshape(num_b, self.bucket_size, -1)
             vb = vs.reshape(num_b, self.bucket_size, -1)
-            
-            # --- SUPER-CENTROID REFINEMENT ---
+
+            # Oja refinement: sharpen bucket centroids (optional)
             if refine:
-                # Calculate P as the Principal Direction of the bucket
                 p = np.mean(qb, axis=1)
-                for _ in range(5): 
-                    p = oja_update_batch(p, np.mean(kb, axis=1), eta=0.4)
-                
-                # Saliency Projection: Keep only the component of V that matches the Bucket theme
-                alignment = np.sum(vb * p[:, np.newaxis, :], axis=-1, keepdims=True)
-                # Filter: If alignment is weak, suppress the token entirely
-                vb = np.where(alignment > np.mean(alignment, axis=1, keepdims=True), vb, 0.0)
+                for _ in range(3):
+                    p = oja_update_batch(p, np.mean(kb, axis=1), eta=0.3)
+                # Soft suppression: scale V by alignment (not hard zero)
+                alignment = np.sum(
+                    vb * p[:, np.newaxis, :], axis=-1, keepdims=True,
+                )
+                align_mean = np.mean(
+                    alignment, axis=1, keepdims=True,
+                )
+                # Sigmoid gate: smoothly suppress weak alignments
+                gate = 1.0 / (1.0 + np.exp(-(alignment - align_mean) * 5.0))
+                vb = vb * gate
 
-            # --- POWER-6 SQUEEZING ---
-            # Raise similarity to the 6th power. This turns a 0.2 match into 0.00006 
-            # and a 0.8 match into 0.26. Noise literally disappears.
-            # scores_b = (qb @ kb.transpose(0, 2, 1)) / (math.sqrt(self.d_h) * 0.001)
-            # scores_b -= np.mean(scores_b, axis=-1, keepdims=True) # Contrast Stretch
-            # scores_b = np.sign(scores_b) * (np.abs(scores_b) ** 6) 
-            threshold = np.percentile(scores_b, 98)
-            scores_b = np.where(scores_b > threshold, scores_b, -1e9)
-            
-            # Use an even sharper temperature
-            scores_b /= 0.001
+            # Standard scaled dot-product attention within buckets
+            scores_b = (qb @ kb.transpose(0, 2, 1)) / scale
 
+            # Causal mask
             if causal:
                 mask = qp.reshape(num_b, -1, 1) >= kp.reshape(num_b, 1, -1)
                 scores_b = np.where(mask, scores_b, -1e9)
 
+            # Stable softmax
             m_b = np.max(scores_b, axis=-1, keepdims=True)
             exp_b = np.exp(scores_b - m_b)
             out_b = (exp_b / (exp_b.sum(axis=-1, keepdims=True) + 1e-6)) @ vb
 
-            # Unsort and append
+            # Unsort back to original order
             out_local_flat = out_b.reshape(L_padded, -1)[:L]
             out_heads.append(out_local_flat[np.argsort(q_idx)])
 
