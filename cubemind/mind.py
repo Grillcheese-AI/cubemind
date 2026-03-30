@@ -893,30 +893,193 @@ class Mind:
         return {"happy": 0.6, "surprised": 0.2, "warm": 0.4,
                 "sad": -0.4, "angry": -0.5, "fearful": -0.3}.get(emotion or "", 0.0)
 
-    def _generate_response(self, user_input: str, context: dict) -> str:
-        """Generate a response based on brain state.
+    def understand(self, sentence: str) -> dict:
+        """Understand a sentence by decomposing it into known concepts.
 
-        Currently template-based. With MoQE LLM, this would be:
+        Pipeline:
+          1. Tokenize sentence into words/phrases
+          2. For each token, recall from memory what we know about it
+          3. Compute overall sentiment from matched concepts' emotions
+          4. Build a "mental scene" from recognized concepts
+          5. Route through brain for appropriate response strategy
+
+        This is comprehension, not generation. It answers:
+        "What do I know about what was just said?"
+
+        Args:
+            sentence: Natural language input.
+
+        Returns:
+            Dict with recognized concepts, sentiment, knowledge gaps,
+            and the brain's routing decision.
+        """
+        nc = self.snn.neurochemistry
+        words = sentence.lower().split()
+
+        # 1. Try to recall each word and meaningful n-grams from memory
+        recognized = []
+        unknown = []
+        seen = set()
+
+        # Try bigrams first, then individual words
+        chunks = []
+        i = 0
+        while i < len(words):
+            if i + 1 < len(words):
+                chunks.append(f"{words[i]} {words[i+1]}")
+            chunks.append(words[i])
+            i += 1
+
+        # Known labels for exact matching
+        all_labels = set()
+        for mem in [self.semantic_memory, self.episodic_memory]:
+            for i in range(mem.size):
+                lbl = mem._labels[i]
+                # Strip prefixes like "visual:", "read:", "audio:"
+                clean = lbl.split(":", 1)[-1] if ":" in lbl else lbl
+                all_labels.add(clean.lower())
+
+        stop_words = {"the", "a", "an", "is", "are", "was", "were",
+                      "in", "on", "at", "to", "of", "and", "or", "it",
+                      "i", "you", "we", "they", "he", "she", "my", "your",
+                      "this", "that", "with", "for", "from", "by", "do",
+                      "does", "did", "has", "have", "had", "be", "been"}
+
+        for chunk in chunks:
+            if chunk in seen:
+                continue
+
+            # First: exact label match (fast, reliable)
+            if chunk in all_labels:
+                recognized.append({
+                    "token": chunk,
+                    "matched": chunk,
+                    "similarity": 1.0,
+                    "memory": "exact",
+                })
+                seen.add(chunk)
+                for w in chunk.split():
+                    seen.add(w)
+                continue
+
+            # Second: semantic similarity recall
+            results = self.recall(query_text=chunk, k=1)
+            if results and results[0]["similarity"] > 0.55:
+                recognized.append({
+                    "token": chunk,
+                    "matched": results[0]["label"],
+                    "similarity": results[0]["similarity"],
+                    "memory": results[0]["memory"],
+                })
+                seen.add(chunk)
+                for w in chunk.split():
+                    seen.add(w)
+            elif " " not in chunk and chunk not in seen:
+                if chunk not in stop_words:
+                    unknown.append(chunk)
+                seen.add(chunk)
+
+        # 2. Compute sentiment from recognized concepts
+        known_count = len(recognized)
+        total_sim = sum(r["similarity"] for r in recognized) if recognized else 0
+        content_words = set(words) - {"the","a","an","is","are","was","were","in","on","at","to","of","and","or","it","i","you","we","they"}
+        comprehension = min(1.0, known_count / max(len(content_words), 1))
+
+        # 3. Update neurochemistry based on comprehension
+        if comprehension > 0.7:
+            # High understanding → dopamine (reward) + serotonin (stability)
+            self.snn.neurochemistry.update(novelty=0.1, valence=0.3, focus=0.5)
+        elif comprehension > 0.3:
+            # Partial understanding → curiosity
+            self.snn.neurochemistry.update(novelty=0.5, valence=0.1, focus=0.3)
+        else:
+            # Low understanding → mild stress (confusion)
+            self.snn.neurochemistry.update(novelty=0.7, valence=-0.1, threat=0.2)
+
+        # 4. Route through brain
+        text_result = self.read(sentence)
+
+        # 5. Build understanding summary
+        return {
+            "sentence": sentence,
+            "recognized": recognized,
+            "unknown": unknown,
+            "comprehension": comprehension,
+            "known_concepts": known_count,
+            "knowledge_gaps": len(unknown),
+            "emotion": self.snn.neurochemistry.dominant_emotion,
+            "strategy": text_result["strategy"]["strategy"],
+            "personality_style": text_result["personality_style"],
+            "route": text_result["route"]["primary_route"],
+            # What the system would say about its understanding
+            "introspection": self._introspect(recognized, unknown, comprehension),
+        }
+
+    def _introspect(self, recognized: list, unknown: list, comprehension: float) -> str:
+        """Generate introspective text about understanding level."""
+        nc = self.snn.neurochemistry
+
+        if comprehension > 0.8:
+            opener = "I understand this well."
+        elif comprehension > 0.5:
+            opener = "I partially understand."
+        elif comprehension > 0.2:
+            opener = "I'm not sure I fully grasp this."
+        else:
+            opener = "This is mostly new to me."
+
+        parts = [opener]
+
+        if recognized:
+            known = ", ".join(f'"{r["matched"]}"' for r in recognized[:5])
+            parts.append(f"I recognize: {known}.")
+
+        if unknown:
+            gaps = ", ".join(f'"{u}"' for u in unknown[:5])
+            parts.append(f"I don't know: {gaps}.")
+            if nc.dominant_emotion == "curious":
+                parts.append("I'd like to learn about those.")
+
+        return " ".join(parts)
+
+    def _generate_response(self, user_input: str, context: dict) -> str:
+        """Generate a response based on brain state + understanding.
+
+        Uses understand() to check what we know, then shapes the
+        response with personality and strategy.
+
+        With MoQE LLM, this becomes:
         VSA memory → adapter → LLM embedding → autoregressive generation.
         """
+        # Try to understand the input first
+        understanding = self.understand(user_input)
+
         strategy = context["strategy"]["strategy"]
-        emotion = self.snn.neurochemistry.dominant_emotion
         style = context["personality_style"]
-        temporal = self.circadian.get_state()
+        nc = self.snn.neurochemistry
 
-        # Template responses shaped by personality + strategy + emotion
-        prefix = ""
+        # Build response from understanding + personality
+        parts = []
+
+        # Strategy-shaped prefix
         if strategy == "empathetic":
-            prefix = "I understand. "
-        elif strategy == "questioning":
-            prefix = "Interesting — "
+            parts.append("I hear you.")
+        elif strategy == "questioning" and understanding["knowledge_gaps"] > 0:
+            gap = understanding["unknown"][0] if understanding["unknown"] else "that"
+            parts.append(f'What do you mean by "{gap}"?')
         elif strategy == "action":
-            prefix = "Let me help. "
+            parts.append("Let me think about this.")
 
-        # This is where MoQE LLM would generate the actual text
-        return (f"[{style}/{strategy}] {prefix}"
-                f"(emotion: {emotion}, route: {context['route']['primary_route']}) "
-                f"Processing: '{user_input[:80]}'")
+        # Understanding-based content
+        parts.append(understanding["introspection"])
+
+        # Emotion color
+        if nc.dominant_emotion == "curious":
+            parts.append("Tell me more.")
+        elif nc.dominant_emotion == "joy":
+            parts.append("This resonates with me.")
+
+        return f"[{style}] " + " ".join(parts)
 
     @property
     def neurochemistry(self) -> NeurochemicalState:
