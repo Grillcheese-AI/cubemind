@@ -220,6 +220,34 @@ class SigLIPVulkan:
             except Exception:
                 pass
 
+        # Pre-fuse MLP weights: concatenate fc1+fc2 per layer for faster access
+        self._mlp_w1 = {}
+        self._mlp_b1 = {}
+        self._mlp_w2 = {}
+        self._mlp_b2 = {}
+        for i in range(self.num_layers):
+            prefix = f"encoder.layers.{i}"
+            self._mlp_w1[i] = self._np(f"{prefix}.mlp.fc1.weight")
+            self._mlp_b1[i] = self._np(f"{prefix}.mlp.fc1.bias")
+            self._mlp_w2[i] = self._np(f"{prefix}.mlp.fc2.weight")
+            self._mlp_b2[i] = self._np(f"{prefix}.mlp.fc2.bias")
+
+        # Pre-cache LayerNorm weights
+        self._ln1_w = {}
+        self._ln1_b = {}
+        self._ln2_w = {}
+        self._ln2_b = {}
+        self._out_proj_w = {}
+        self._out_proj_b = {}
+        for i in range(self.num_layers):
+            prefix = f"encoder.layers.{i}"
+            self._ln1_w[i] = self._np(f"{prefix}.layer_norm1.weight")
+            self._ln1_b[i] = self._np(f"{prefix}.layer_norm1.bias")
+            self._ln2_w[i] = self._np(f"{prefix}.layer_norm2.weight")
+            self._ln2_b[i] = self._np(f"{prefix}.layer_norm2.bias")
+            self._out_proj_w[i] = self._np(f"{prefix}.self_attn.out_proj.weight")
+            self._out_proj_b[i] = self._np(f"{prefix}.self_attn.out_proj.bias")
+
         print(f"SigLIP2 Vulkan: {self.hidden_size}D, {self.num_layers} layers, "
               f"{self.num_patches} patches, GPU={'yes' if self.use_gpu else 'no'}, "
               f"JIT={'yes' if self._jit_encode else 'no'}")
@@ -368,17 +396,33 @@ class SigLIPVulkan:
         if fused_qkv is not None:
             attn_out = self._self_attention_from_qkv(fused_qkv, prefix)
         else:
-            normed = _layernorm(x, self._np(f"{prefix}.layer_norm1.weight"),
-                                self._np(f"{prefix}.layer_norm1.bias"))
+            normed = _layernorm(x, self._ln1_w[layer_idx], self._ln1_b[layer_idx])
             attn_out = self._self_attention(normed, prefix)
         x = x + attn_out
 
-        # Pre-norm + MLP (fused inside _mlp)
-        normed = _layernorm(x, self._np(f"{prefix}.layer_norm2.weight"),
-                            self._np(f"{prefix}.layer_norm2.bias"))
-        mlp_out = self._mlp(normed, prefix)
-        x = x + mlp_out
+        # Pre-norm + Fused MLP
+        normed = _layernorm(x, self._ln2_w[layer_idx], self._ln2_b[layer_idx])
 
+        # Try fused MLP with pre-cached weights
+        mlp_out = None
+        if _bridge is not None:
+            try:
+                mlp_out = _bridge.fused_mlp_gelu(
+                    normed,
+                    self._mlp_w1[layer_idx], self._mlp_b1[layer_idx],
+                    self._mlp_w2[layer_idx], self._mlp_b2[layer_idx],
+                )
+                if mlp_out is not None:
+                    mlp_out = np.asarray(mlp_out, dtype=np.float32)
+            except Exception:
+                mlp_out = None
+
+        if mlp_out is None:
+            h = _gpu_linear(normed, self._mlp_w1[layer_idx], self._mlp_b1[layer_idx])
+            h = _gelu(h)
+            mlp_out = _gpu_linear(h, self._mlp_w2[layer_idx], self._mlp_b2[layer_idx])
+
+        x = x + mlp_out
         return x
 
     def _self_attention_from_qkv(self, qkv: np.ndarray, prefix: str) -> np.ndarray:
@@ -402,8 +446,9 @@ class SigLIPVulkan:
                 if fa_out is not None:
                     out = np.asarray(fa_out, dtype=np.float32)[0]
                     out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-                    return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
-                                        self._np(f"{prefix}.self_attn.out_proj.bias"))
+                    layer_idx = int(prefix.split(".")[-2])
+                    return _gpu_linear(out, self._out_proj_w[layer_idx],
+                                        self._out_proj_b[layer_idx])
             except Exception:
                 pass
 
@@ -417,8 +462,9 @@ class SigLIPVulkan:
             a = _softmax(s, axis=-1)
             out[h] = _gpu_matmul(a, V[h])
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-        return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
-                            self._np(f"{prefix}.self_attn.out_proj.bias"))
+        layer_idx = int(prefix.split(".")[-2])
+        return _gpu_linear(out, self._out_proj_w[layer_idx],
+                            self._out_proj_b[layer_idx])
 
     def _self_attention(self, x: np.ndarray, prefix: str) -> np.ndarray:
         """Multi-head self attention — fused QKV + Flash Attention 2."""
@@ -455,8 +501,9 @@ class SigLIPVulkan:
                     # (1, heads, seq, head_dim) → (seq, hidden)
                     out = np.asarray(fa_out, dtype=np.float32)[0]
                     out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-                    return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
-                                        self._np(f"{prefix}.self_attn.out_proj.bias"))
+                    layer_idx = int(prefix.split(".")[-2])
+                    return _gpu_linear(out, self._out_proj_w[layer_idx],
+                                        self._out_proj_b[layer_idx])
             except Exception:
                 pass
 
@@ -473,8 +520,9 @@ class SigLIPVulkan:
             out[h] = _gpu_matmul(a, V[h])
 
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
-        return _gpu_linear(out, self._np(f"{prefix}.self_attn.out_proj.weight"),
-                            self._np(f"{prefix}.self_attn.out_proj.bias"))
+        layer_idx = int(prefix.split(".")[-2])
+        return _gpu_linear(out, self._out_proj_w[layer_idx],
+                            self._out_proj_b[layer_idx])
 
     def _mlp(self, x: np.ndarray, prefix: str) -> np.ndarray:
         """Feed-forward MLP — fused fc1→GELU→fc2 when available."""
