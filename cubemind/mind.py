@@ -1,0 +1,570 @@
+"""CubeMind — Unified Cognitive Architecture Orchestrator.
+
+Single entry point that wires together all subsystems:
+  Perception → SNN → Neurochemistry → Thalamus → Brain → Memory → Output
+
+Accepts any input modality (text, image, video, audio, webcam) and routes
+it through the appropriate perception pipeline, SNN temporal encoding,
+brain cortex routing, and response generation.
+
+Usage:
+    mind = CubeMind()
+    mind.see(frame)                    # Process a single image/frame
+    mind.watch(video_path)             # Analyze a video with critique
+    mind.hear(audio)                   # Process audio stream (future)
+    mind.read(text)                    # Process text input
+    mind.ask(question)                 # VQA about current scene
+    mind.think()                       # Internal reflection/consolidation
+    mind.respond(user_input)           # Full pipeline: perceive → reason → respond
+
+    mind.save("cubemind_state")        # Persist everything
+    mind.load("cubemind_state")        # Restore from disk
+"""
+
+from __future__ import annotations
+
+import os
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from cubemind.ops.block_codes import BlockCodes
+from cubemind.ops.vsa_bridge import (
+    LSHProjector,
+    ContinuousItemMemory,
+    binarize_and_pack,
+    hamming_similarity,
+)
+from cubemind.perception.snn import SNNEncoder, NeurochemicalState
+from cubemind.brain.cortex import (
+    CircadianCells,
+    Thalamus,
+    BasalGanglia,
+    CentralNervousSystem,
+    PersonalityLayer,
+)
+
+# Optional heavy imports — lazy loaded
+_FacePerception = None
+_SceneAnalyzer = None
+_VQAEngine = None
+_DetectedObject = None
+_SemanticEncoder = None
+
+
+def _lazy_imports():
+    """Load heavy modules on first use."""
+    global _FacePerception, _SceneAnalyzer, _VQAEngine, _DetectedObject, _SemanticEncoder
+    if _FacePerception is None:
+        try:
+            from cubemind.perception.face import FacePerception as _FP
+            _FacePerception = _FP
+        except Exception:
+            pass
+    if _SceneAnalyzer is None:
+        try:
+            from cubemind.perception.scene import SceneAnalyzer as _SA
+            _SceneAnalyzer = _SA
+        except Exception:
+            pass
+    if _VQAEngine is None:
+        try:
+            from cubemind.reasoning.vqa import VQAEngine as _VE, DetectedObject as _DO
+            _VQAEngine = _VE
+            _DetectedObject = _DO
+        except Exception:
+            pass
+    if _SemanticEncoder is None:
+        try:
+            from cubemind.perception.semantic_encoder import SemanticEncoder as _SE
+            _SemanticEncoder = _SE
+        except Exception:
+            pass
+
+
+try:
+    from cubemind.core import K_BLOCKS, L_BLOCK
+except ImportError:
+    K_BLOCKS = 8
+    L_BLOCK = 64
+
+
+# ── State ─────────────────────────────────────────────────────────────────
+
+@dataclass
+class MindState:
+    """Current state of the CubeMind system."""
+    # What it's currently perceiving
+    current_scene: dict = field(default_factory=dict)
+    current_face: dict | None = None
+    current_emotion: str = "neutral"
+
+    # Brain routing
+    thalamus_route: str = "reasoning"
+    strategy: str = "default"
+    consciousness: str = "ALERT"
+
+    # Accumulated context
+    interaction_count: int = 0
+    session_start: float = 0.0
+    last_input_type: str = ""
+
+    # Taste
+    total_experiences: int = 0
+    taste_valence: float = 0.0
+
+
+# ── Main Orchestrator ─────────────────────────────────────────────────────
+
+class Mind:
+    """CubeMind unified cognitive architecture.
+
+    Wires together all subsystems into a single coherent pipeline.
+    Each input is perceived, emotionally processed, routed through
+    the brain cortex, and either stored in memory or used to generate
+    a response.
+
+    Args:
+        k:          VSA block count.
+        l:          VSA block length.
+        d_vsa:      Binary VSA dimension for packed vectors.
+        snn_neurons: Number of SNN neurons.
+        d_model:    Personality/brain model dimension.
+        enable_face: Enable MediaPipe face perception.
+        seed:       Random seed.
+    """
+
+    def __init__(
+        self,
+        k: int = K_BLOCKS,
+        l: int = L_BLOCK,
+        d_vsa: int = 2048,
+        snn_neurons: int = 256,
+        d_model: int = 256,
+        enable_face: bool = True,
+        seed: int = 42,
+    ) -> None:
+        _lazy_imports()
+
+        self.k = k
+        self.l = l
+        self.d_vsa = d_vsa
+        self.bc = BlockCodes(k=k, l=l)
+
+        # ── Perception ────────────────────────────────────────────────
+        self.snn = SNNEncoder(
+            d_input=104,  # 52 blendshapes + 52 deltas (face) or grid features
+            n_neurons=snn_neurons,
+            d_vsa=d_vsa,
+            neuron_type="lif",
+            tau=15.0,
+            v_threshold=0.1,
+            seed=seed,
+        )
+        self.snn.stdp_lr_potentiate = 0.0002
+        self.snn.stdp_lr_depress = 0.0001
+        self.snn.stdp_weight_clip = 0.3
+
+        self.face = None
+        if enable_face and _FacePerception is not None:
+            try:
+                self.face = _FacePerception(max_faces=1)
+            except Exception:
+                pass
+
+        self.text_encoder = None
+        if _SemanticEncoder is not None:
+            try:
+                self.text_encoder = _SemanticEncoder(k=k, l=l)
+            except Exception:
+                pass
+
+        # ── Brain Cortex ──────────────────────────────────────────────
+        self.circadian = CircadianCells()
+        self.thalamus = Thalamus(embedding_dim=d_model)
+        self.basal_ganglia = BasalGanglia()
+        self.cns = CentralNervousSystem()
+        self.personality = PersonalityLayer(d_model=d_model)
+
+        # ── Memory ────────────────────────────────────────────────────
+        self.episodic_memory = ContinuousItemMemory(d_vsa=d_vsa, max_capacity=50000)
+        self.semantic_memory = ContinuousItemMemory(d_vsa=d_vsa, max_capacity=50000)
+        self.lsh = LSHProjector(d_input=d_model, d_output=d_vsa, seed=seed + 10)
+
+        # ── Scene Understanding ───────────────────────────────────────
+        self.scene_analyzer = None
+        if _SceneAnalyzer is not None:
+            self.scene_analyzer = _SceneAnalyzer(
+                feature_dim=104, snn_neurons=snn_neurons, d_vsa=d_vsa,
+            )
+
+        # ── VQA ───────────────────────────────────────────────────────
+        self.vqa = None
+        if _VQAEngine is not None:
+            self.vqa = _VQAEngine(k=k, l=l)
+
+        # ── State ─────────────────────────────────────────────────────
+        self.state = MindState(session_start=time.time())
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def see(self, frame: np.ndarray) -> dict:
+        """Process a single image/frame through the full perception pipeline.
+
+        frame → face perception → SNN encoding → neurochemistry → thalamus
+        → brain routing → memory storage
+
+        Returns dict with perception results, emotion, and routing decision.
+        """
+        self.state.last_input_type = "vision"
+        self.state.interaction_count += 1
+
+        result = {
+            "modality": "vision",
+            "face": None,
+            "spikes": None,
+            "neurochemistry": {},
+            "route": {},
+            "strategy": {},
+            "emotion": "neutral",
+        }
+
+        # 1. Face perception
+        face_feat = None
+        face_emotion = None
+        if self.face is not None:
+            snn_feat = self.face.get_snn_features(frame)
+            if snn_feat is not None:
+                face_feat = snn_feat
+                face_result = self.face.process_frame(frame)
+                if face_result:
+                    face_emotion = face_result["emotion"]
+                    result["face"] = {
+                        "emotion": face_emotion,
+                        "blendshapes_active": int(np.sum(face_result["blendshapes"] > 0.1)),
+                        "micro_expressions": face_result.get("micro_expressions", []),
+                    }
+                    self.state.current_face = result["face"]
+
+        # 2. SNN encoding
+        if face_feat is not None:
+            feat = face_feat[:104]
+            if len(feat) < 104:
+                feat = np.pad(feat, (0, 104 - len(feat)))
+        else:
+            # Fallback: spatial grid features from frame
+            feat = self._grid_features(frame, 104)
+
+        feat_norm = feat / (np.std(feat) + 1e-6) * 0.3
+        spikes = self.snn.step(feat_norm)
+        spike_rate = float(np.mean(spikes))
+        result["spikes"] = {"rate": spike_rate, "active": int(np.sum(spikes > 0))}
+
+        # 3. Neurochemistry update
+        face_valence = self._emotion_to_valence(face_emotion)
+        self.snn.neurochemistry.update(
+            novelty=spike_rate,
+            valence=face_valence,
+            threat=0.0,
+            focus=0.4 if face_emotion else 0.1,
+        )
+        nc = self.snn.neurochemistry
+        result["neurochemistry"] = nc.to_dict()
+        result["emotion"] = nc.dominant_emotion
+        self.state.current_emotion = nc.dominant_emotion
+
+        # 4. Thalamus routing
+        embedding = feat[:min(len(feat), self.thalamus.embedding_dim)]
+        if len(embedding) < self.thalamus.embedding_dim:
+            embedding = np.pad(embedding, (0, self.thalamus.embedding_dim - len(embedding)))
+        route = self.thalamus.route(embedding, arousal=nc.arousal, valence=nc.valence)
+        result["route"] = route
+        self.state.thalamus_route = route["primary_route"]
+
+        # 5. Strategy selection
+        strategy = self.basal_ganglia.select_strategy(
+            route["routes"], valence=nc.valence, arousal=nc.arousal, stress=nc.stress,
+        )
+        result["strategy"] = strategy
+        self.state.strategy = strategy["strategy"]
+
+        # 6. CNS update
+        cns_state = self.cns.update(arousal=nc.arousal, stress=nc.stress)
+        self.state.consciousness = cns_state.consciousness.name
+
+        # 7. Store in episodic memory
+        projected = self.lsh.project(embedding[:self.lsh.d_input])
+        packed = binarize_and_pack(projected)
+        self.episodic_memory.learn(packed, label=f"see:{nc.dominant_emotion}")
+
+        return result
+
+    def watch(self, video_path: str, **kwargs) -> dict:
+        """Analyze a video and produce a taste-informed critique.
+
+        Returns scene analysis with segments, emotional arc, and critique.
+        """
+        self.state.last_input_type = "video"
+        self.state.interaction_count += 1
+
+        if self.scene_analyzer is None:
+            return {"error": "SceneAnalyzer not available"}
+
+        result = self.scene_analyzer.analyze_video(video_path, **kwargs)
+        self.state.total_experiences = self.scene_analyzer.taste.total_scenes
+        return result
+
+    def read(self, text: str) -> dict:
+        """Process text input through semantic encoding + brain routing.
+
+        Returns encoded representation, routing decision, and memory storage.
+        """
+        self.state.last_input_type = "text"
+        self.state.interaction_count += 1
+
+        result = {"modality": "text", "text": text[:100]}
+
+        # Encode text to VSA
+        if self.text_encoder is not None:
+            vec = self.text_encoder.encode_action(text)
+            embedding = vec.ravel()[:self.thalamus.embedding_dim]
+        else:
+            # Hash fallback
+            embedding = np.zeros(self.thalamus.embedding_dim, dtype=np.float32)
+            for i, ch in enumerate(text.encode()[:self.thalamus.embedding_dim]):
+                embedding[i] = float(ch) / 255.0
+
+        if len(embedding) < self.thalamus.embedding_dim:
+            embedding = np.pad(embedding, (0, self.thalamus.embedding_dim - len(embedding)))
+
+        # Route through brain
+        nc = self.snn.neurochemistry
+        route = self.thalamus.route(embedding, arousal=nc.arousal, valence=nc.valence)
+        strategy = self.basal_ganglia.select_strategy(
+            route["routes"], valence=nc.valence, arousal=nc.arousal, stress=nc.stress,
+        )
+
+        # Personality styling
+        styled, style_name = self.personality.forward(
+            embedding, valence=nc.valence, arousal=nc.arousal, stress=nc.stress,
+        )
+
+        result["route"] = route
+        result["strategy"] = strategy
+        result["personality_style"] = style_name
+        result["emotion"] = nc.dominant_emotion
+
+        # Store in semantic memory
+        projected = self.lsh.project(embedding[:self.lsh.d_input])
+        packed = binarize_and_pack(projected)
+        self.semantic_memory.learn(packed, label=f"read:{text[:50]}")
+
+        return result
+
+    def ask(self, question: str, objects: list | None = None) -> dict:
+        """Answer a question about the current scene via VQA.
+
+        Args:
+            question: Natural language question.
+            objects:  Optional list of DetectedObject. Uses current scene if None.
+
+        Returns:
+            VQA result with answer, confidence, and program trace.
+        """
+        if self.vqa is None:
+            return {"answer": "VQA not available", "confidence": 0.0}
+
+        if objects is not None and _DetectedObject is not None:
+            self.vqa.set_scene(objects)
+
+        result = self.vqa.answer(question)
+        return {
+            "answer": result.answer,
+            "confidence": result.confidence,
+            "program": result.program,
+        }
+
+    def respond(self, user_input: str) -> dict:
+        """Full pipeline: understand input → route → generate response.
+
+        This is the main interaction point. Determines input type,
+        routes through the appropriate pipeline, and produces a
+        response shaped by personality and emotional state.
+        """
+        self.state.interaction_count += 1
+        nc = self.snn.neurochemistry
+
+        # Determine input type
+        if "?" in user_input:
+            # Question — try VQA first, then text reasoning
+            if self.vqa and self.vqa.scene.objects:
+                vqa_result = self.ask(user_input)
+                if vqa_result["confidence"] > 0.3:
+                    return {
+                        "type": "vqa",
+                        "response": vqa_result["answer"],
+                        "confidence": vqa_result["confidence"],
+                        "emotion": nc.dominant_emotion,
+                        "strategy": self.state.strategy,
+                    }
+
+        # Text processing
+        text_result = self.read(user_input)
+
+        # Build response metadata
+        temporal = self.circadian.get_state()
+
+        return {
+            "type": "text",
+            "strategy": text_result["strategy"]["strategy"],
+            "personality_style": text_result["personality_style"],
+            "emotion": nc.dominant_emotion,
+            "consciousness": self.state.consciousness,
+            "route": text_result["route"]["primary_route"],
+            "temporal": temporal["time_of_day"],
+            "interaction": self.state.interaction_count,
+            # The actual text response would come from MoQE LLM here
+            "response": self._generate_response(user_input, text_result),
+        }
+
+    def think(self) -> dict:
+        """Internal reflection — consolidate memories, update personality.
+
+        Called periodically or between interactions. The system reflects
+        on accumulated experience and adjusts its personality weights.
+        """
+        nc = self.snn.neurochemistry
+
+        # Hebbian update: reinforce current personality style
+        embedding = np.random.default_rng().standard_normal(
+            self.personality.d_model
+        ).astype(np.float32) * 0.1
+        _, style = self.personality.forward(
+            embedding, valence=nc.valence, arousal=nc.arousal, stress=nc.stress,
+        )
+        # Strengthen the dominant style based on recent experience
+        style_idx = list(self.personality.STYLES).index(style) if style in self.personality.STYLES else 0
+        self.personality.hebbian_update(embedding, style_idx)
+
+        # CNS update
+        self.cns.update(arousal=nc.arousal, stress=nc.stress)
+
+        return {
+            "personality_style": style,
+            "emotion": nc.dominant_emotion,
+            "consciousness": self.state.consciousness,
+            "episodic_memories": self.episodic_memory.size,
+            "semantic_memories": self.semantic_memory.size,
+            "taste_experiences": self.state.total_experiences,
+        }
+
+    # ── Persistence ───────────────────────────────────────────────────────
+
+    def save(self, path: str) -> None:
+        """Save entire mind state to disk."""
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+
+        self.snn.save(f"{path}_snn.npz")
+        if self.episodic_memory.size > 0:
+            self.episodic_memory.save(f"{path}_episodic")
+        if self.semantic_memory.size > 0:
+            self.semantic_memory.save(f"{path}_semantic")
+        if self.scene_analyzer:
+            self.scene_analyzer.save(f"{path}_scene")
+
+        # Save mind state
+        np.savez_compressed(
+            f"{path}_mind.npz",
+            interaction_count=np.int32(self.state.interaction_count),
+            total_experiences=np.int32(self.state.total_experiences),
+        )
+        print(f"Mind saved to {path}_*")
+
+    def load(self, path: str) -> None:
+        """Load mind state from disk."""
+        if os.path.exists(f"{path}_snn.npz"):
+            self.snn.load(f"{path}_snn.npz")
+        if os.path.exists(f"{path}_episodic.npz"):
+            self.episodic_memory.load(f"{path}_episodic")
+        if os.path.exists(f"{path}_semantic.npz"):
+            self.semantic_memory.load(f"{path}_semantic")
+        if self.scene_analyzer and os.path.exists(f"{path}_scene_taste.npz"):
+            self.scene_analyzer.load(f"{path}_scene")
+        if os.path.exists(f"{path}_mind.npz"):
+            data = np.load(f"{path}_mind.npz")
+            self.state.interaction_count = int(data["interaction_count"])
+            self.state.total_experiences = int(data["total_experiences"])
+
+        print(f"Mind loaded: {self.episodic_memory.size} episodic, "
+              f"{self.semantic_memory.size} semantic memories")
+
+    # ── Private helpers ───────────────────────────────────────────────────
+
+    def _grid_features(self, frame: np.ndarray, dim: int) -> np.ndarray:
+        """Extract spatial grid features from a frame."""
+        if frame.ndim == 3:
+            gray = np.mean(frame.astype(np.float32), axis=2) / 255.0
+        else:
+            gray = frame.astype(np.float32)
+            if gray.max() > 1.0:
+                gray /= 255.0
+        h, w = gray.shape[:2]
+        grid_n = max(2, int(np.sqrt(dim / 4)))
+        cell_h, cell_w = max(1, h // grid_n), max(1, w // grid_n)
+        features = []
+        for i in range(grid_n):
+            for j in range(grid_n):
+                cell = gray[i * cell_h:(i + 1) * cell_h, j * cell_w:(j + 1) * cell_w]
+                if cell.size > 0:
+                    features.extend([float(np.mean(cell)), float(np.std(cell)),
+                                     float(np.max(cell)), float(np.min(cell))])
+        feat = np.array(features[:dim], dtype=np.float32)
+        if len(feat) < dim:
+            feat = np.pad(feat, (0, dim - len(feat)))
+        return feat
+
+    @staticmethod
+    def _emotion_to_valence(emotion: str | None) -> float:
+        return {"happy": 0.6, "surprised": 0.2, "warm": 0.4,
+                "sad": -0.4, "angry": -0.5, "fearful": -0.3}.get(emotion or "", 0.0)
+
+    def _generate_response(self, user_input: str, context: dict) -> str:
+        """Generate a response based on brain state.
+
+        Currently template-based. With MoQE LLM, this would be:
+        VSA memory → adapter → LLM embedding → autoregressive generation.
+        """
+        strategy = context["strategy"]["strategy"]
+        emotion = self.snn.neurochemistry.dominant_emotion
+        style = context["personality_style"]
+        temporal = self.circadian.get_state()
+
+        # Template responses shaped by personality + strategy + emotion
+        prefix = ""
+        if strategy == "empathetic":
+            prefix = "I understand. "
+        elif strategy == "questioning":
+            prefix = "Interesting — "
+        elif strategy == "action":
+            prefix = "Let me help. "
+
+        # This is where MoQE LLM would generate the actual text
+        return (f"[{style}/{strategy}] {prefix}"
+                f"(emotion: {emotion}, route: {context['route']['primary_route']}) "
+                f"Processing: '{user_input[:80]}'")
+
+    @property
+    def neurochemistry(self) -> NeurochemicalState:
+        return self.snn.neurochemistry
+
+    @property
+    def emotion(self) -> str:
+        return self.snn.neurochemistry.dominant_emotion
+
+    def __repr__(self) -> str:
+        nc = self.snn.neurochemistry
+        return (f"CubeMind(emotion={nc.dominant_emotion}, "
+                f"consciousness={self.state.consciousness}, "
+                f"memories={self.episodic_memory.size + self.semantic_memory.size}, "
+                f"interactions={self.state.interaction_count})")
