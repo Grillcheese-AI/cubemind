@@ -25,3 +25,5 @@ cubemind_taste_profile.npz
 checkcam.py
 vcpkg-configuration.json
 vcpkg.json
+ihl_expert_chunks.json
+ihl_purified_chunks.json
