@@ -11,9 +11,10 @@ param(
     [string]$Src      = "G:\MYDRIVE",
     [string]$Data     = "data\logits_512",
     [string]$SaveDir  = "data\checkpoints",
+    [string]$Resume   = "",           # Path to checkpoint .npz to resume from
     [int]$Vocab       = 151936,
     [int]$DModel      = 2048,
-    [int]$NLayers     = 12, # 24 moqe experts (4bit, 8bit = 2 experts per layer) 32 tokens per expert = 768 most stable for local training / distillation
+    [int]$NLayers     = 12,
     [int]$Epochs      = 3,
     [int]$MaxSeqLen   = 768,
     [float]$Temperature = 2.0,
@@ -34,6 +35,9 @@ Write-Host "  Data:    $Data (seq_len=$MaxSeqLen)"
 Write-Host "  Train:   epochs=$Epochs lr=$LR T=$Temperature"
 Write-Host "  Target:  $Target8bit 8-bit fraction"
 Write-Host "  Save:    $SaveDir (every $SaveEvery batches)"
+if ($Resume -ne "") {
+    Write-Host "  Resume:  $Resume"
+}
 Write-Host "============================================"
 
 # Step 1: Preprocess logits (optional)
@@ -62,7 +66,7 @@ Write-Host "Starting training..."
 
 $pyCode = @"
 from cubemind.execution.moqe import MoQEModel
-from cubemind.training.moqe_distillation import run_offline_distillation
+from cubemind.training.moqe_distillation import run_offline_distillation, load_checkpoint
 import time, json, os
 
 model = MoQEModel(
@@ -71,18 +75,28 @@ model = MoQEModel(
     n_layers=$NLayers,
     seed=42,
 )
-print(f'MoQE: v={model.vocab_size} d={model.d_model} L={model.n_layers}')
+
+resume_path = '$Resume'.replace('\\', '/')
+if resume_path:
+    print('Resuming from: ' + resume_path)
+    info = load_checkpoint(model, resume_path)
+    if 'lr_history' in info and len(info['lr_history']) > 0:
+        lr_hist = info['lr_history']
+        print('  Last LR: %.6f (%d steps)' % (lr_hist[-1], len(lr_hist)))
+    print('  Checkpoint loaded successfully')
+
+print('MoQE: v=%d d=%d L=%d' % (model.vocab_size, model.d_model, model.n_layers))
 
 t = time.perf_counter()
 stats = run_offline_distillation(
     model,
-    data_dir=r'$Data',
+    data_dir='$Data'.replace('\\', '/'),
     epochs=$Epochs,
     max_seq_len=$MaxSeqLen,
     temperature=$Temperature,
     target_8bit=$Target8bit,
     lr=$LR,
-    save_dir=r'$SaveDir',
+    save_dir='$SaveDir'.replace('\\', '/'),
     save_every=$SaveEvery,
 )
 elapsed = time.perf_counter() - t
@@ -92,20 +106,20 @@ print('=' * 44)
 print('  Training Complete')
 print('=' * 44)
 total_batches = sum(s['n_batches'] for s in stats)
-print(f'  Time:    {elapsed:.1f}s ({total_batches/elapsed:.1f} batch/s)')
+print('  Time:    %.1fs (%.1f batch/s)' % (elapsed, total_batches/elapsed))
 for s in stats:
-    print(f'  E{s["epoch"]}: loss={s["avg_loss"]:.4f} CE={s["avg_ce"]:.4f} KD={s["avg_kd"]:.4f} 8b={s["avg_8bit_frac"]*100:.1f}%')
+    print('  E%d: loss=%.4f CE=%.4f KD=%.4f 8b=%.1f%%' % (s['epoch'], s['avg_loss'], s['avg_ce'], s['avg_kd'], s['avg_8bit_frac']*100))
 
-os.makedirs(r'$SaveDir', exist_ok=True)
+os.makedirs('$SaveDir'.replace('\\', '/'), exist_ok=True)
 summary = {
     'model': {'vocab': $Vocab, 'd_model': $DModel, 'n_layers': $NLayers},
     'training': {'epochs': $Epochs, 'lr': $LR, 'temperature': $Temperature},
     'elapsed_seconds': elapsed,
     'epoch_stats': stats,
 }
-with open(os.path.join(r'$SaveDir', 'training_summary.json'), 'w') as f:
+with open(os.path.join('$SaveDir'.replace('\\', '/'), 'training_summary.json'), 'w') as f:
     json.dump(summary, f, indent=2, default=float)
-print(f'  Summary: $SaveDir/training_summary.json')
+print('  Summary: $SaveDir/training_summary.json')
 "@
 
 uv run python -u -c $pyCode

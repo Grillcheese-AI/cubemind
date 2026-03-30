@@ -14,6 +14,7 @@ Usage:
 
 Controls:
     T + type label + Enter: Teach current frame with label
+    M: Hold to listen (microphone) → release → teach with last label
     R: Recall — ask "what is it?" about current frame
     Space: Pause/resume video
     S: Screenshot + save state
@@ -42,10 +43,14 @@ from cubemind.ops.vsa_bridge import (
 from cubemind.experimental.affective_graph import affective_alpha
 from cubemind.perception.experiential import ExperientialEncoder
 
-# Optional: microphone
+# Optional: microphone + audio encoder
 _HAS_MIC = False
+_MicrophoneCapture = None
+_AudioEncoder = None
 try:
-    from cubemind.perception.audio import MicrophoneCapture
+    from cubemind.perception.audio import MicrophoneCapture as _MC, AudioEncoder as _AE
+    _MicrophoneCapture = _MC
+    _AudioEncoder = _AE
     _HAS_MIC = True
 except Exception:
     pass
@@ -99,10 +104,78 @@ class TeachingMind:
         self.semantic_memory = ContinuousItemMemory(d_vsa=d_vsa, max_capacity=1000)
         self.episodic_memory = ContinuousItemMemory(d_vsa=d_vsa, max_capacity=5000)
 
+        # Audio
+        self.mic = None
+        self.audio_encoder = None
+        if _HAS_MIC:
+            try:
+                self.mic = _MicrophoneCapture(sample_rate=16000, chunk_size=512)
+                self.audio_encoder = _AudioEncoder(
+                    sample_rate=16000, snn_neurons=128, d_vsa=d_vsa, seed=seed + 20)
+                print("Microphone: ready (hold M to listen)")
+            except Exception as e:
+                print(f"Microphone: not available ({e})")
+        self.is_listening = False
+        self.audio_buffer: list[np.ndarray] = []
+        self.voice_energy = 0.0
+
         # Teaching log
         self.concepts: dict[str, dict] = {}
         self.teach_count = 0
         self.recall_log: list[dict] = []
+
+    def start_listening(self):
+        """Start capturing audio from microphone."""
+        if self.mic is None:
+            return
+        try:
+            self.mic.start()
+            self.is_listening = True
+            self.audio_buffer.clear()
+        except Exception:
+            pass
+
+    def stop_listening(self) -> np.ndarray | None:
+        """Stop capturing and return audio buffer."""
+        if self.mic is None or not self.is_listening:
+            return None
+        self.is_listening = False
+        try:
+            audio = self.mic.stop()
+            if audio is not None and len(audio) > 0:
+                self.voice_energy = float(np.sqrt(np.mean(audio ** 2)))
+                return audio
+        except Exception:
+            pass
+        return None
+
+    def process_audio_chunk(self):
+        """Read a chunk from mic and update energy meter."""
+        if self.mic is None or not self.is_listening:
+            return
+        try:
+            chunk = self.mic.read_chunk()
+            if chunk is not None:
+                self.audio_buffer.append(chunk)
+                self.voice_energy = float(np.sqrt(np.mean(chunk ** 2)))
+        except Exception:
+            pass
+
+    def teach_with_audio(self, frame: np.ndarray, label: str,
+                          audio: np.ndarray | None = None) -> dict:
+        """Teach with visual + audio + label (full multi-modal binding)."""
+        result = self.teach(frame, label)
+
+        # If we have audio, also encode and store it
+        if audio is not None and self.audio_encoder is not None and len(audio) > 1600:
+            try:
+                audio_packed = self.audio_encoder.encode_audio(audio)
+                self.episodic_memory.learn(audio_packed, label=f"audio:{label}")
+                result["audio_bound"] = True
+                result["audio_energy"] = float(np.sqrt(np.mean(audio ** 2)))
+            except Exception:
+                result["audio_bound"] = False
+        return result
 
     def _frame_features(self, frame: np.ndarray) -> np.ndarray:
         """Extract features from a frame."""
@@ -330,6 +403,31 @@ def main():
                           (ox + CAM_W, oy + CAM_H), (0, 255, 0), 1)
             draw_text(dash, ox + 2, oy + CAM_H + 12, "YOU", (0, 255, 0), 0.35)
 
+        # Audio level meter (if listening)
+        if mind.is_listening:
+            mind.process_audio_chunk()
+            av_x, av_y = 15, 10 + VID_H - 30
+            cv2.rectangle(dash, (av_x, av_y), (av_x + 200, av_y + 20), (30, 30, 30), -1)
+            bar_w = int(min(mind.voice_energy * 2000, 200))
+            bar_color = (0, 255, 0) if mind.voice_energy > 0.01 else (100, 100, 100)
+            cv2.rectangle(dash, (av_x, av_y), (av_x + bar_w, av_y + 20), bar_color, -1)
+            draw_text(dash, av_x + 205, av_y + 14, "MIC ACTIVE", (255, 100, 255), 0.4)
+
+        # Key legend (bottom of video area)
+        ky = 10 + VID_H + 30
+        keys = [
+            ("[T] Teach", (100, 255, 100)),
+            ("[R] Recall", (100, 200, 255)),
+            ("[M] Mic", (255, 100, 255) if mind.mic else (80, 80, 80)),
+            ("[Space] Pause", (255, 200, 100)),
+            ("[S] Save", (200, 200, 255)),
+            ("[Q] Quit", (255, 100, 100)),
+        ]
+        kx = 15
+        for label, color in keys:
+            draw_text(dash, kx, ky, label, color, 0.32)
+            kx += 90
+
         # Source label
         src = args.video.split("/")[-1].split("\\")[-1] if args.video else "Webcam"
         status = "PAUSED" if paused else f"{fps:.0f} FPS"
@@ -454,6 +552,12 @@ def main():
                 input_mode = True
                 input_buffer = ""
                 messages.append(("Type label and press Enter...", (255, 255, 100)))
+            elif key == ord('m'):
+                # Hold M to listen — start recording
+                if not mind.is_listening and mind.mic is not None:
+                    mind.start_listening()
+                    messages.append(("Listening... release M when done",
+                                     (255, 100, 255)))
             elif key == ord('r'):
                 results = mind.recall(process_frame)
                 last_recall = results
@@ -471,6 +575,28 @@ def main():
                 paused = not paused
                 messages.append(
                     ("Paused" if paused else "Resumed", (255, 200, 100)))
+
+            # M key release: if we were listening and M is no longer held
+            if mind.is_listening and key != ord('m'):
+                audio = mind.stop_listening()
+                if audio is not None and mind.voice_energy > 0.005:
+                    # Audio captured — teach with last known label or prompt
+                    if mind.concepts:
+                        # Re-teach last concept with audio binding
+                        last_label = list(mind.concepts.keys())[-1]
+                        result = mind.teach_with_audio(
+                            process_frame, last_label, audio)
+                        messages.append(
+                            (f"Audio+Visual: '{last_label}' (E={mind.voice_energy:.3f})",
+                             (255, 100, 255)))
+                        last_teach = result
+                        teach_display_until = time.time() + 5.0
+                    else:
+                        messages.append(
+                            ("Heard you! Teach a label first with T, then use M.",
+                             (255, 200, 100)))
+                elif audio is not None:
+                    messages.append(("Too quiet — speak louder!", (255, 100, 100)))
             elif key == ord('s'):
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 cv2.imwrite(f"cubemind_teach_{ts}.png", dash)
