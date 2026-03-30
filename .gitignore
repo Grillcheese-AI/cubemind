@@ -15,3 +15,13 @@ data/
 .env
 .claude/scheduled_tasks.lock
 *.npy
+/vcpkg_installed
+/gguf
+docs/distil_to_moqe.ipynb
+cubemind_taste_taste.npz
+cubemind_taste_snn.npz
+cubemind_taste_profile.npz
+/cloned
+checkcam.py
+vcpkg-configuration.json
+vcpkg.json
