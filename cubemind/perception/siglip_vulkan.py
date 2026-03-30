@@ -41,6 +41,14 @@ try:
 except Exception:
     pass
 
+# JIT fusion
+_jit = None
+try:
+    from grilly.backend.jit import jit as _grilly_jit
+    _jit = _grilly_jit
+except Exception:
+    pass
+
 # Safetensors
 try:
     from safetensors.numpy import load_file as _load_safetensors
@@ -100,6 +108,14 @@ def _layernorm(x, weight, bias, eps=1e-6):
 
 
 def _softmax(x, axis=-1):
+    """Softmax — GPU for 2D row-wise, numpy fallback otherwise."""
+    if _bridge is not None and x.ndim == 2 and axis == -1:
+        try:
+            r = _bridge.softmax(np.ascontiguousarray(x, dtype=np.float32))
+            if r is not None:
+                return np.asarray(r, dtype=np.float32)
+        except Exception:
+            pass
     m = np.max(x, axis=axis, keepdims=True)
     e = np.exp(x - m)
     return (e / (e.sum(axis=axis, keepdims=True) + 1e-8)).astype(np.float32)
@@ -155,8 +171,17 @@ class SigLIPVulkan:
         while f"encoder.layers.{self.num_layers}.self_attn.q_proj.weight" in self.w:
             self.num_layers += 1
 
+        # JIT-traced encode: fuses ops after first call
+        self._jit_encode = None
+        if _jit is not None:
+            try:
+                self._jit_encode = _jit(self._encode_inner, warmup=1)
+            except Exception:
+                pass
+
         print(f"SigLIP2 Vulkan: {self.hidden_size}D, {self.num_layers} layers, "
-              f"{self.num_patches} patches, GPU={'yes' if self.use_gpu else 'no'}")
+              f"{self.num_patches} patches, GPU={'yes' if self.use_gpu else 'no'}, "
+              f"JIT={'yes' if self._jit_encode else 'no'}")
 
     def _load_weights(self, model_id: str) -> dict:
         """Download and load safetensors weights."""
@@ -197,10 +222,23 @@ class SigLIPVulkan:
         Returns:
             (768,) float32 embedding vector, L2-normalized.
         """
-        # Preprocess
+        # Preprocess (CPU: resize, normalize, patchify)
         x = self._preprocess(image)  # (1024, 768)
 
-        # Transformer encoder
+        # Transformer + pool (GPU, JIT-fused after first call)
+        if self._jit_encode is not None:
+            try:
+                embedding = self._jit_encode(x)
+                norm = np.linalg.norm(embedding) + 1e-8
+                return (embedding / norm).astype(np.float32)
+            except Exception:
+                pass
+
+        return self._encode_inner(x)
+
+    def _encode_inner(self, x: np.ndarray) -> np.ndarray:
+        """Inner encode: transformer layers + pool. Separable for JIT tracing."""
+        # Transformer encoder (all GPU ops)
         for i in range(self.num_layers):
             x = self._transformer_layer(x, i)
 
@@ -294,12 +332,16 @@ class SigLIPVulkan:
         K = K.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
         V = V.reshape(seq_len, self.num_heads, self.head_dim).transpose(1, 0, 2)
 
-        # Scaled dot-product attention (float64 for stability with 1024 patches)
+        # Scaled dot-product attention — per-head GPU matmul
         scale = math.sqrt(self.head_dim)
-        scores = np.matmul(Q.astype(np.float64), K.transpose(0, 2, 1).astype(np.float64)) / scale
-        scores = np.clip(scores, -50, 50)  # Prevent exp overflow
-        attn = _softmax(scores.astype(np.float32), axis=-1)
-        out = np.matmul(attn, V)  # (heads, seq, head_dim)
+        out = np.zeros_like(V)
+        for h in range(self.num_heads):
+            # Q[h] @ K[h].T → scores for this head
+            s = _gpu_linear(Q[h], K[h], None) / scale  # (seq, seq)
+            s = np.clip(s, -50, 50)
+            a = _softmax(s, axis=-1)
+            # attn @ V[h] → output for this head
+            out[h] = _gpu_linear(a, V[h], None)  # (seq, head_dim)
 
         # Concat heads
         out = out.transpose(1, 0, 2).reshape(seq_len, self.hidden_size)
@@ -331,18 +373,20 @@ class SigLIPVulkan:
         k = _gpu_linear(x, in_proj_w[768:1536], in_proj_b[768:1536])     # (seq, 768)
         v = _gpu_linear(x, in_proj_w[1536:], in_proj_b[1536:])           # (seq, 768)
 
-        # Attention: probe attends to all patches
+        # Attention: probe attends to all patches — per-head GPU matmul
         scale = math.sqrt(self.head_dim)
-        # Multi-head: reshape to (heads, seq/1, head_dim)
-        q_h = q.reshape(1, self.num_heads, self.head_dim).transpose(1, 0, 2)
-        k_h = k.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)
-        v_h = v.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)
+        q_h = q.reshape(1, self.num_heads, self.head_dim).transpose(1, 0, 2)   # (heads, 1, hd)
+        k_h = k.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)  # (heads, seq, hd)
+        v_h = v.reshape(-1, self.num_heads, self.head_dim).transpose(1, 0, 2)  # (heads, seq, hd)
 
-        scores = np.matmul(q_h.astype(np.float64), k_h.transpose(0, 2, 1).astype(np.float64)) / scale
-        scores = np.clip(scores, -50, 50)
-        attn = _softmax(scores.astype(np.float32), axis=-1)
-        pooled = np.matmul(attn, v_h)  # (heads, 1, head_dim)
-        pooled = pooled.transpose(1, 0, 2).reshape(1, self.hidden_size)
+        pooled_heads = np.zeros((self.num_heads, 1, self.head_dim), dtype=np.float32)
+        for h in range(self.num_heads):
+            s = _gpu_linear(q_h[h], k_h[h], None) / scale  # (1, seq)
+            s = np.clip(s, -50, 50)
+            a = _softmax(s, axis=-1)                         # (1, seq)
+            pooled_heads[h] = _gpu_linear(a, v_h[h], None)  # (1, hd)
+
+        pooled = pooled_heads.transpose(1, 0, 2).reshape(1, self.hidden_size)
 
         # Output projection
         pooled = _gpu_linear(pooled, self._np("head.attention.out_proj.weight"),
