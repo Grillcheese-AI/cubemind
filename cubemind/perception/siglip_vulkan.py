@@ -248,9 +248,44 @@ class SigLIPVulkan:
             self._out_proj_w[i] = self._np(f"{prefix}.self_attn.out_proj.weight")
             self._out_proj_b[i] = self._np(f"{prefix}.self_attn.out_proj.bias")
 
+        # Try native batched encoder (ONE GPU submit for all layers)
+        self._native_handle = None
+        try:
+            import grilly_core as _core_mod
+            if hasattr(_core_mod, 'siglip_upload_weights'):
+                dev = _bridge._get_device() if _bridge else None
+                if dev is not None:
+                    # Build weight list in expected order
+                    weight_list = []
+                    for i in range(self.num_layers):
+                        qkv_w = np.asarray(self._qkv_w[i], dtype=np.float32)
+                        qkv_b = np.asarray(self._qkv_b[i], dtype=np.float32)
+                        weight_list.extend([
+                            qkv_w, qkv_b,
+                            self._out_proj_w[i], self._out_proj_b[i],
+                            self._ln1_w[i], self._ln1_b[i],
+                            self._ln2_w[i], self._ln2_b[i],
+                            self._mlp_w1[i], self._mlp_b1[i],
+                            self._mlp_w2[i], self._mlp_b2[i],
+                        ])
+                    weight_list.extend([
+                        self._np("post_layernorm.weight"),
+                        self._np("post_layernorm.bias"),
+                    ])
+                    self._native_handle = _core_mod.siglip_upload_weights(
+                        dev, weight_list,
+                        self.num_layers, self.num_patches, self.hidden_size,
+                        self.num_heads, 3072,
+                    )
+                    self._core_mod = _core_mod
+                    self._dev = dev
+        except Exception:
+            self._native_handle = None
+
         print(f"SigLIP2 Vulkan: {self.hidden_size}D, {self.num_layers} layers, "
               f"{self.num_patches} patches, GPU={'yes' if self.use_gpu else 'no'}, "
-              f"JIT={'yes' if self._jit_encode else 'no'}")
+              f"JIT={'yes' if self._jit_encode else 'no'}, "
+              f"native={'yes' if self._native_handle else 'no'}")
 
     def _load_weights(self, model_id: str) -> dict:
         """Download and load safetensors weights."""
@@ -294,7 +329,21 @@ class SigLIPVulkan:
         # Preprocess (CPU: resize, normalize, patchify)
         x = self._preprocess(image)  # (1024, 768)
 
-        # Transformer + pool (GPU, JIT-fused after first call)
+        # Native batched path: ONE GPU submit for entire encoder
+        if self._native_handle is not None:
+            try:
+                result = self._core_mod.siglip_encode(
+                    self._dev, self._native_handle,
+                    np.ascontiguousarray(x, dtype=np.float32),
+                )
+                if result is not None:
+                    emb = np.asarray(result, dtype=np.float32).ravel()
+                    norm = np.linalg.norm(emb) + 1e-8
+                    return (emb / norm).astype(np.float32)
+            except Exception:
+                pass
+
+        # JIT path (fallback)
         if self._jit_encode is not None:
             try:
                 embedding = self._jit_encode(x)
