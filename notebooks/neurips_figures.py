@@ -86,9 +86,28 @@ def fig1_hdgot_comparison():
     codebook = bc.codebook_discrete(10, seed=42)
     N_TRIALS = 500
 
+    # HMM ensemble for likelihood-weighted baseline
+    small_cb = bc.codebook_discrete(5, seed=42)
+
+    def ensemble_resolve(candidates):
+        """Likelihood-weighted averaging (standard HMMEnsemble approach)."""
+        # Simulate: weight each candidate by how "central" it is
+        # (cosine sim to mean = proxy for likelihood)
+        mean_vec = np.mean(candidates, axis=0)
+        weights = np.array([float(bc.similarity(c, mean_vec)) for c in candidates])
+        weights = np.clip(weights, 0, None)
+        total = weights.sum()
+        if total < 1e-8:
+            weights = np.ones(len(candidates)) / len(candidates)
+        else:
+            weights = weights / total
+        result = sum(w * c for w, c in zip(weights, candidates))
+        return result.astype(np.float32)
+
     methods = {
         "HD-GoT\n(top-3)": lambda c: hd_got_resolve(c, bc, top_k=3),
         "HD-GoT\n(top-1)": lambda c: hd_got_resolve(c, bc, top_k=1),
+        "Ensemble\n(weighted)": ensemble_resolve,
         "Majority\nVote": lambda c: np.mean(c, axis=0).astype(np.float32),
         "Random": lambda c: c[np.random.randint(len(c))],
     }
@@ -106,11 +125,11 @@ def fig1_hdgot_comparison():
             sims.append(float(bc.similarity(result, gt)))
         results[name] = (np.mean(sims), np.std(sims))
 
-    fig, ax = plt.subplots(figsize=(5, 3.5))
+    fig, ax = plt.subplots(figsize=(6, 3.5))
     names = list(results.keys())
     means = [results[n][0] for n in names]
     stds = [results[n][1] for n in names]
-    colors = [COLORS["cubemind"], COLORS["cubemind"],
+    colors = [COLORS["cubemind"], COLORS["cubemind"], COLORS["oxytocin"],
               COLORS["baseline"], COLORS["random"]]
 
     bars = ax.bar(names, means, yerr=stds, capsize=4, color=colors,
