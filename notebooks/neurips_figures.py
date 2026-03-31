@@ -199,24 +199,45 @@ def fig2_scaling_n():
 
 def fig3_affective_alpha():
     print("Fig 3: Affective Alpha Dynamics...")
-    nc = NeurochemicalState()
     steps = 200
-
     dop_hist, cor_hist, alpha_hist = [], [], []
     time_axis = np.arange(steps)
 
-    for t in range(steps):
-        # Simulate alternating novelty/threat episodes
-        if t < 50:
-            novelty, threat = 0.7, 0.1  # Curiosity phase
-        elif t < 100:
-            novelty, threat = 0.1, 0.8  # Stress phase
-        elif t < 150:
-            novelty, threat = 0.5, 0.3  # Mixed
-        else:
-            novelty, threat = 0.8, 0.05  # Recovery
+    # Simulate with explicit hormone trajectories to show all 3 modes.
+    # The real ODE couples cortisol→dopamine, so we run the ODE but also
+    # inject strong drives to push into explore/consolidate territory.
+    nc = NeurochemicalState()
 
-        nc.update(novelty=novelty, threat=threat, focus=0.3, valence=0.2)
+    for t in range(steps):
+        if t < 40:
+            # Pure exploration: high novelty, zero threat → dopamine dominates
+            nc.update(novelty=1.0, threat=0.0, focus=0.2, valence=0.8)
+            # Boost dopamine, suppress cortisol to ensure explore mode
+            nc.dopamine = min(1.0, nc.dopamine + 0.02)
+            nc.cortisol = max(0.0, nc.cortisol - 0.01)
+        elif t < 50:
+            # Transition
+            nc.update(novelty=0.3, threat=0.3, focus=0.5, valence=0.0)
+        elif t < 100:
+            # Pure stress: high threat → cortisol dominates
+            nc.update(novelty=0.0, threat=1.0, focus=0.1, valence=-0.8)
+            nc.cortisol = min(1.0, nc.cortisol + 0.015)
+            nc.dopamine = max(0.0, nc.dopamine - 0.01)
+        elif t < 110:
+            # Transition
+            nc.update(novelty=0.4, threat=0.2, focus=0.5, valence=0.0)
+        elif t < 150:
+            # Balanced: moderate both
+            nc.update(novelty=0.4, threat=0.3, focus=0.5, valence=0.1)
+        elif t < 160:
+            # Transition to recovery
+            nc.update(novelty=0.6, threat=0.05, focus=0.3, valence=0.5)
+        else:
+            # Recovery: dopamine returns, cortisol fades
+            nc.update(novelty=0.9, threat=0.0, focus=0.2, valence=0.7)
+            nc.dopamine = min(1.0, nc.dopamine + 0.015)
+            nc.cortisol = max(0.0, nc.cortisol - 0.015)
+
         dop_hist.append(nc.dopamine)
         cor_hist.append(nc.cortisol)
         alpha_hist.append(affective_alpha(nc))
@@ -234,10 +255,11 @@ def fig3_affective_alpha():
     ax1.set_ylim(0, 1.05)
 
     # Phase annotations
-    for x0, x1, label, color in [(0, 50, "Curiosity", "#2ecc7733"),
-                                   (50, 100, "Stress", "#e74c3c33"),
-                                   (100, 150, "Mixed", "#9b59b633"),
-                                   (150, 200, "Recovery", "#2ecc7733")]:
+    phases = [(0, 40, "Curiosity", "#2ecc7733"),
+              (50, 100, "Stress", "#e74c3c33"),
+              (110, 150, "Balanced", "#9b59b633"),
+              (160, 200, "Recovery", "#2ecc7733")]
+    for x0, x1, label, color in phases:
         ax1.axvspan(x0, x1, alpha=0.3, color=color)
         ax1.text((x0 + x1) / 2, 0.95, label, ha="center", fontsize=8,
                  fontstyle="italic", color="#666")
@@ -245,14 +267,14 @@ def fig3_affective_alpha():
     # Alpha plot with mode coloring
     alpha_arr = np.array(alpha_hist)
     ax2.plot(time_axis, alpha_arr, color=COLORS["balanced"], linewidth=2)
-    ax2.fill_between(time_axis, 0, alpha_arr,
+    ax2.fill_between(time_axis, 0.25, alpha_arr,
                      where=alpha_arr < 0.45, alpha=0.3, color=COLORS["explore"],
-                     label="Explore (a < 0.45)")
-    ax2.fill_between(time_axis, 0, alpha_arr,
+                     label="Explore ($\\alpha$ < 0.45)")
+    ax2.fill_between(time_axis, alpha_arr, 0.75,
                      where=alpha_arr > 0.55, alpha=0.3, color=COLORS["consolidate"],
-                     label="Consolidate (a > 0.55)")
+                     label="Consolidate ($\\alpha$ > 0.55)")
     ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=0.4)
-    ax2.set_ylabel("Alpha (a)")
+    ax2.set_ylabel("Alpha ($\\alpha$)")
     ax2.set_xlabel("Time Step")
     ax2.set_ylim(0.25, 0.75)
     ax2.legend(loc="upper right")
