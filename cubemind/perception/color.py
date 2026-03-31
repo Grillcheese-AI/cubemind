@@ -62,13 +62,19 @@ def extract_color_stats(frame: np.ndarray) -> dict:
     }
 
 
-def color_to_neurochemistry(color_stats: dict) -> dict:
+def color_to_neurochemistry(color_stats: dict,
+                            prev_stats: dict | None = None) -> dict:
     """Map color statistics to neurochemical drives.
 
     Based on Roy et al. (2021) EEG findings:
       Blue: highest brain complexity -> dopamine (exploration)
       Red: highest arousal -> cortisol (alertness)
       Green: calmness -> serotonin (relaxation)
+      High saturation + warm: intense arousal (explosions, fire)
+
+    Also detects sudden visual transients (flash/explosion) by comparing
+    to previous frame's stats. A sudden brightness spike with high
+    saturation triggers a multi-channel arousal burst.
     """
     sat = color_stats["saturation"]
     r = color_stats["red_ratio"]
@@ -78,10 +84,32 @@ def color_to_neurochemistry(color_stats: dict) -> dict:
     warmth = color_stats["warmth"]
 
     intensity = sat * 0.8
+
+    # Base drives from color channels
     novelty = intensity * (b * 2.0 + brightness * 0.3) + b * 0.2
     threat = intensity * (r * 1.2 - g * 0.3)
     focus = intensity * (sat * 0.5 + abs(brightness - 0.5) * 0.5)
     valence = warmth * 0.3 + g * 0.4 - r * 0.1
+
+    # Transient detection: sudden brightness/saturation change = explosion/flash
+    if prev_stats is not None:
+        brightness_delta = abs(brightness - prev_stats.get("brightness", brightness))
+        sat_delta = abs(sat - prev_stats.get("saturation", sat))
+        warmth_delta = abs(warmth - prev_stats.get("warmth", warmth))
+
+        # Flash/explosion: bright + saturated + warm + sudden
+        transient = brightness_delta + sat_delta * 0.5 + warmth_delta * 0.3
+        if transient > 0.15:
+            # Multi-channel arousal burst
+            novelty += transient * 1.5   # Surprising!
+            threat += transient * 0.8    # Startling
+            focus += transient * 1.0     # Grabs attention
+
+    # Hot colors at high saturation = intense (fire, explosions, blood)
+    hot_intensity = max(0, warmth) * sat
+    if hot_intensity > 0.3:
+        novelty += hot_intensity * 0.5
+        threat += hot_intensity * 0.4
 
     return {
         "novelty": float(max(0, min(1, novelty))),

@@ -42,6 +42,7 @@ from cubemind.ops.vsa_bridge import (
 from cubemind.experimental.affective_graph import affective_alpha
 from cubemind.perception.experiential import ExperientialEncoder
 from cubemind.perception.bio_vision import BioVisionEncoder
+from cubemind.perception.color import extract_color_stats, color_to_neurochemistry
 
 
 # ── SRT Parser ───────────────────────────────────────────────────────
@@ -188,6 +189,7 @@ def run_srt_teacher(
     }
 
     t0 = time.time()
+    prev_color_stats = None
 
     for i, entry in enumerate(entries):
         if i % sample_every_n != 0:
@@ -204,21 +206,23 @@ def run_srt_teacher(
         if not ret:
             continue
 
-        # Biological vision: opponent-color + motion + luminance
-        features = bio_vision.process(frame)
-        feat_norm = features / (np.std(features) + 1e-6) * 0.3
+        # ALL channels fire in parallel on the same frame:
 
-        # SNN perception — neurochemistry reacts to bio vision features
+        # 1. Bio vision: opponent-color + motion + luminance (parallel channels)
+        features = bio_vision.process(frame)
+
+        # 2. Color perception: wavelength → neurochemical drives (parallel)
+        color_stats = extract_color_stats(frame)
+        color_drive = color_to_neurochemistry(color_stats, prev_stats=prev_color_stats)
+        prev_color_stats = color_stats
+
+        # 3. SNN: all bio vision features → spikes (parallel neurons)
+        feat_norm = features / (np.std(features) + 1e-6) * 0.3
         spikes = snn.step(feat_norm)
         nc = snn.neurochemistry
         spike_rate = float(np.mean(spikes))
 
-        # Color perception — wavelength modulates neurochemistry
-        from cubemind.perception.color import extract_color_stats, color_to_neurochemistry
-        color_stats = extract_color_stats(frame)
-        color_drive = color_to_neurochemistry(color_stats)
-
-        # Combine SNN spike-based novelty with color-driven signals
+        # 4. Neurochemistry: fuse ALL signals simultaneously
         nc.update(
             novelty=max(spike_rate, color_drive["novelty"]),
             threat=color_drive["threat"],
@@ -226,7 +230,7 @@ def run_srt_teacher(
             valence=color_drive["valence"],
         )
 
-        # Developmental growth: STDP pruning sharpens tuning over time
+        # 5. Developmental growth: STDP pruning sharpens tuning
         bio_vision.grow(delta=0.001)
 
         # Thalamus routing
