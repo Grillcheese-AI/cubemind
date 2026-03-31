@@ -7,7 +7,6 @@ Usage:
 """
 
 import argparse
-import json
 import time
 
 import numpy as np
@@ -15,7 +14,6 @@ import numpy as np
 from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.model import CubeMind
 from cubemind.ops.block_codes import BlockCodes
-from cubemind.routing.router import CubeMindRouter
 from cubemind.training.trainer import Trainer
 from cubemind.telemetry import metrics
 from cubemind.telemetry.visualizer import PaperPlotter
@@ -48,7 +46,7 @@ def main():
 
     bc = BlockCodes(K_BLOCKS, L_BLOCK)
 
-    print(f"CubeMind Training")
+    print("CubeMind Training")
     print(f"  k={K_BLOCKS}, l={L_BLOCK}, d_vsa={K_BLOCKS * L_BLOCK}")
     print(f"  codebook={args.n_codebook}, hmm_rules={args.n_hmm_rules}")
     print(f"  epochs={args.epochs}, lr={args.lr}")

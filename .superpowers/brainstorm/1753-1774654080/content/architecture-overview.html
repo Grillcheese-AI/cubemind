@@ -1,0 +1,129 @@
+<h2>MoWM Architecture — Full Picture</h2>
+<p class="subtitle">Recursive mixture of world models with shared formula library</p>
+
+<div style="background: #1a1a2e; border-radius: 16px; padding: 32px; margin: 24px 0; font-family: monospace; font-size: 13px; color: #e0e0e0; overflow-x: auto;">
+
+<!-- Input -->
+<div style="text-align: center; margin-bottom: 16px;">
+  <span style="background: #4a9eff; color: #fff; padding: 8px 24px; border-radius: 8px; font-weight: bold;">Input (state, action)</span>
+</div>
+<div style="text-align: center; color: #666; margin-bottom: 16px;">|</div>
+
+<!-- HYLA Encoder -->
+<div style="text-align: center; margin-bottom: 16px;">
+  <span style="background: #2d2d4e; border: 1px solid #4a9eff; padding: 8px 24px; border-radius: 8px;">HYLA Encoder &rarr; block-code vectors</span>
+</div>
+<div style="text-align: center; color: #666; margin-bottom: 16px;">|</div>
+
+<!-- Router -->
+<div style="text-align: center; margin-bottom: 16px;">
+  <span style="background: #ff6b6b; color: #fff; padding: 8px 24px; border-radius: 8px; font-weight: bold;">DSelect-k Router</span>
+</div>
+<div style="text-align: center; color: #666; margin-bottom: 8px;">&darr; selects top-k experts</div>
+
+<!-- Global World -->
+<div style="border: 2px solid #ffd93d; border-radius: 16px; padding: 24px; margin: 16px 0; background: #1e1e3a;">
+  <div style="text-align: center; color: #ffd93d; font-weight: bold; font-size: 15px; margin-bottom: 16px;">GLOBAL WORLD (z=0) — Shared Formula Library</div>
+
+  <!-- Formula domains -->
+  <div style="display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 20px;">
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Kinematics (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Dynamics (15)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Energy (15)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Fluids (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Thermo (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">EM (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Waves (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Stochastic (6)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Algorithms (100)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Neural Ops (20)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Symbolic (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Geometry (10)</span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 12px; border-radius: 6px; font-size: 11px;">Stability (10)</span>
+  </div>
+
+  <div style="text-align: center; color: #888; margin-bottom: 16px;">&darr; experts pick &amp; compose formulas &darr;</div>
+
+  <!-- Expert Worlds -->
+  <div style="display: flex; gap: 16px; justify-content: center; flex-wrap: wrap;">
+
+    <!-- Expert 1 -->
+    <div style="border: 1px solid #4a9eff; border-radius: 12px; padding: 16px; background: #1a1a3e; min-width: 200px; flex: 1; max-width: 280px;">
+      <div style="color: #4a9eff; font-weight: bold; text-align: center; margin-bottom: 8px;">Expert World 1 (z=1)</div>
+      <div style="color: #aaa; font-size: 11px; text-align: center; margin-bottom: 12px;">e.g. Rigid Body Dynamics</div>
+      <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 8px;">
+        <span style="background: #333; padding: 3px 8px; border-radius: 4px; font-size: 10px; border: 1px solid #555;">HYLA-spatial</span>
+        <span style="background: #333; padding: 3px 8px; border-radius: 4px; font-size: 10px; border: 1px solid #555;">HYLA-temporal</span>
+      </div>
+
+      <!-- Sub-world -->
+      <div style="border: 1px dashed #ff6bff; border-radius: 8px; padding: 8px; margin-top: 8px; background: #1e1e2e;">
+        <div style="color: #ff6bff; font-size: 10px; text-align: center;">Sub-World (z=2)</div>
+        <div style="color: #888; font-size: 10px; text-align: center;">Contact physics</div>
+        <div style="display: flex; gap: 4px; justify-content: center; margin-top: 4px;">
+          <span style="background: #2a2a3a; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #444;">HYLA</span>
+          <span style="background: #2a2a3a; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #444;">HYLA</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expert 2 -->
+    <div style="border: 1px solid #4a9eff; border-radius: 12px; padding: 16px; background: #1a1a3e; min-width: 200px; flex: 1; max-width: 280px;">
+      <div style="color: #4a9eff; font-weight: bold; text-align: center; margin-bottom: 8px;">Expert World 2 (z=1)</div>
+      <div style="color: #aaa; font-size: 11px; text-align: center; margin-bottom: 12px;">e.g. Fluid Dynamics</div>
+      <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 8px;">
+        <span style="background: #333; padding: 3px 8px; border-radius: 4px; font-size: 10px; border: 1px solid #555;">HYLA-pressure</span>
+        <span style="background: #333; padding: 3px 8px; border-radius: 4px; font-size: 10px; border: 1px solid #555;">HYLA-flow</span>
+      </div>
+
+      <!-- Sub-world -->
+      <div style="border: 1px dashed #ff6bff; border-radius: 8px; padding: 8px; margin-top: 8px; background: #1e1e2e;">
+        <div style="color: #ff6bff; font-size: 10px; text-align: center;">Sub-World (z=2)</div>
+        <div style="color: #888; font-size: 10px; text-align: center;">Turbulence</div>
+        <div style="display: flex; gap: 4px; justify-content: center; margin-top: 4px;">
+          <span style="background: #2a2a3a; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #444;">HYLA</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expert 3 -->
+    <div style="border: 1px solid #4a9eff; border-radius: 12px; padding: 16px; background: #1a1a3e; min-width: 200px; flex: 1; max-width: 280px;">
+      <div style="color: #4a9eff; font-weight: bold; text-align: center; margin-bottom: 8px;">Expert World N (z=1)</div>
+      <div style="color: #aaa; font-size: 11px; text-align: center; margin-bottom: 12px;">e.g. Stochastic</div>
+      <div style="display: flex; gap: 6px; justify-content: center; margin-bottom: 8px;">
+        <span style="background: #333; padding: 3px 8px; border-radius: 4px; font-size: 10px; border: 1px solid #555;">HYLA-drift</span>
+        <span style="background: #333; padding: 3px 8px; border-radius: 4px; font-size: 10px; border: 1px solid #555;">HYLA-diffusion</span>
+      </div>
+      <div style="color: #666; font-size: 10px; text-align: center; margin-top: 8px;">no sub-world needed<br>(tau satisfied at z=1)</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Merge -->
+<div style="text-align: center; color: #666; margin: 8px 0;">&darr; weighted merge (gate weights) &darr;</div>
+
+<!-- Bind & Cleanup -->
+<div style="text-align: center; margin: 12px 0;">
+  <span style="background: #2d2d4e; border: 1px solid #6bff6b; padding: 8px 24px; border-radius: 8px;">Bind &amp; Mixture in Block-Code Space + Cleanup every C steps</span>
+</div>
+<div style="text-align: center; color: #666; margin-bottom: 12px;">|</div>
+
+<!-- CVL -->
+<div style="text-align: center; margin-bottom: 12px;">
+  <span style="background: #2d2d4e; border: 1px solid #ff6b6b; padding: 8px 24px; border-radius: 8px;">CVL &rarr; Q-values from occupancy measure</span>
+</div>
+<div style="text-align: center; color: #666; margin-bottom: 12px;">|</div>
+
+<!-- HYLA Decoder -->
+<div style="text-align: center; margin-bottom: 12px;">
+  <span style="background: #2d2d4e; border: 1px solid #4a9eff; padding: 8px 24px; border-radius: 8px;">HYLA Decoder &rarr; Predicted Next State + Value</span>
+</div>
+
+</div>
+
+<div style="margin-top: 24px; padding: 16px; background: rgba(255,255,255,0.05); border-radius: 8px; font-size: 13px;">
+  <strong style="color: #ffd93d;">Key insight:</strong> The Global World's formula library is encoded as block-code vectors.
+  Experts don't re-implement formulas — they <em>select and compose</em> them via VSA binding.
+  Recursion stops when prediction quality exceeds tau (WorldManager's surprise threshold).
+</div>

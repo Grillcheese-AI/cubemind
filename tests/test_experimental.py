@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 
-from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops import BlockCodes
 
 

@@ -1,7 +1,6 @@
 """Tests for cubemind.core — constants, Strategy enum, and Hyperfan init."""
 
 import numpy as np
-import pytest
 
 from cubemind.core import (
     BLAKE3,
@@ -23,9 +22,9 @@ from cubemind.core import (
 
 
 def test_constants():
-    assert K_BLOCKS == 16
+    assert K_BLOCKS == 80
     assert L_BLOCK == 128
-    assert D_VSA == 2048  # K_BLOCKS * L_BLOCK
+    assert D_VSA == 10240  # K_BLOCKS * L_BLOCK
     assert EPS == 1e-20
 
 

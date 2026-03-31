@@ -194,7 +194,7 @@ class VSATrace:
                     for r in range(3)
                 ], dtype=float)
 
-                im = ax_grid.imshow(grid_vals, cmap="viridis", aspect="equal", vmin=-1, vmax=9)
+                ax_grid.imshow(grid_vals, cmap="viridis", aspect="equal", vmin=-1, vmax=9)
                 for r in range(3):
                     for c in range(3):
                         val = grid_vals[r, c]

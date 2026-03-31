@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CubeMind Cognitive Architecture - Live Demo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a12; color: #c8c8d0; font-family: system-ui, -apple-system, sans-serif; overflow-x: hidden; }
+:root { --neon-green: #00ff88; --neon-blue: #00aaff; --neon-purple: #aa66ff; --neon-red: #ff4466; --neon-yellow: #ffaa00; --panel-bg: #12121e; --border: #2a2a3a; }
+
+.header { background: linear-gradient(90deg, #1a1a2e, #16213e); padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+.header h1 { font-size: 18px; color: var(--neon-green); font-weight: 600; letter-spacing: 0.5px; }
+.header .status { font-size: 12px; color: var(--neon-blue); }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto auto; gap: 8px; padding: 8px; max-width: 1400px; margin: 0 auto; }
+
+.panel { background: var(--panel-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.panel-title { background: #1a1a2e; padding: 8px 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--neon-blue); border-bottom: 1px solid var(--border); }
+.panel-body { padding: 12px; }
+
+/* Video */
+.video-panel { grid-column: 1; grid-row: 1 / 3; min-height: 400px; position: relative; }
+#videoArea { width: 100%; height: 350px; background: #080810; border-radius: 4px; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
+#videoArea video { width: 100%; height: 100%; object-fit: cover; }
+#videoArea .placeholder { color: #444; font-size: 14px; text-align: center; }
+.video-controls { display: flex; gap: 8px; margin-top: 8px; }
+.video-controls button { background: #1e1e30; border: 1px solid var(--border); color: #aaa; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+.video-controls button:hover { border-color: var(--neon-green); color: var(--neon-green); }
+.video-controls button.active { background: #1a2a1a; border-color: var(--neon-green); color: var(--neon-green); }
+#webcamOverlay { position: absolute; top: 10px; right: 10px; width: 160px; height: 120px; border: 2px solid var(--neon-green); border-radius: 4px; z-index: 10; display: none; }
+#webcamOverlay video { width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
+#dropZone { position: absolute; inset: 0; background: rgba(0,170,255,0.1); border: 2px dashed var(--neon-blue); display: none; align-items: center; justify-content: center; z-index: 20; font-size: 16px; color: var(--neon-blue); }
+
+/* Neurochemistry */
+.neuro-bar { margin: 8px 0; }
+.neuro-label { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 3px; }
+.neuro-track { height: 14px; background: #1a1a2a; border-radius: 7px; overflow: hidden; }
+.neuro-fill { height: 100%; border-radius: 7px; transition: width 0.3s ease; }
+.neuro-fill.dopamine { background: linear-gradient(90deg, #006633, var(--neon-green)); }
+.neuro-fill.cortisol { background: linear-gradient(90deg, #660022, var(--neon-red)); }
+.neuro-fill.serotonin { background: linear-gradient(90deg, #002266, var(--neon-blue)); }
+.neuro-fill.oxytocin { background: linear-gradient(90deg, #664400, var(--neon-yellow)); }
+.emotion-badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; margin-top: 8px; }
+
+/* SNN Spikes */
+.spike-grid { display: grid; grid-template-columns: repeat(32, 1fr); gap: 2px; }
+.spike-cell { aspect-ratio: 1; background: #151520; border-radius: 2px; transition: background 0.1s; }
+.spike-cell.active { background: var(--neon-green); box-shadow: 0 0 4px var(--neon-green); }
+.spike-stats { margin-top: 8px; font-size: 11px; color: #888; }
+
+/* Teaching */
+.teach-section { display: flex; gap: 8px; margin-bottom: 10px; }
+.teach-input { flex: 1; background: #1a1a2a; border: 1px solid var(--border); color: #ddd; padding: 8px 12px; border-radius: 4px; font-size: 13px; }
+.teach-input:focus { outline: none; border-color: var(--neon-green); }
+.btn { padding: 8px 16px; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.2s; }
+.btn-teach { background: #1a2a1a; color: var(--neon-green); border-color: #1a4a1a; }
+.btn-teach:hover { background: #2a3a2a; box-shadow: 0 0 8px rgba(0,255,136,0.3); }
+.btn-recall { background: #1a1a2a; color: var(--neon-blue); border-color: #1a1a4a; }
+.btn-recall:hover { background: #2a2a3a; box-shadow: 0 0 8px rgba(0,170,255,0.3); }
+.memory-list { max-height: 120px; overflow-y: auto; font-size: 11px; }
+.memory-item { padding: 4px 8px; border-left: 2px solid var(--neon-green); margin: 4px 0; background: #151520; border-radius: 0 4px 4px 0; }
+.recall-result { padding: 6px 10px; margin: 4px 0; border-radius: 4px; font-size: 12px; }
+
+/* Experiential */
+.exp-dim { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 12px; }
+.exp-label { width: 70px; color: #888; }
+.exp-value { color: var(--neon-purple); font-weight: 600; }
+.exp-bar { flex: 1; height: 8px; background: #1a1a2a; border-radius: 4px; overflow: hidden; }
+.exp-bar-fill { height: 100%; background: var(--neon-purple); border-radius: 4px; transition: width 0.5s; }
+
+/* HD-GoT */
+.got-canvas { width: 100%; height: 200px; background: #0a0a14; border-radius: 4px; }
+.got-stats { margin-top: 8px; font-size: 11px; color: #888; display: flex; gap: 16px; }
+
+/* Keys */
+.key-bar { display: flex; gap: 6px; padding: 8px; background: #0e0e18; border-top: 1px solid var(--border); flex-wrap: wrap; justify-content: center; }
+.key { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 4px; font-size: 11px; border: 1px solid var(--border); }
+.key kbd { background: #2a2a3a; padding: 2px 6px; border-radius: 3px; font-family: monospace; font-size: 11px; }
+
+/* Alpha mode */
+.alpha-display { text-align: center; margin-top: 10px; padding: 8px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+.alpha-explore { background: rgba(0,255,136,0.1); color: var(--neon-green); border: 1px solid rgba(0,255,136,0.3); }
+.alpha-hold { background: rgba(0,170,255,0.1); color: var(--neon-blue); border: 1px solid rgba(0,170,255,0.3); }
+.alpha-balanced { background: rgba(170,102,255,0.1); color: var(--neon-purple); border: 1px solid rgba(170,102,255,0.3); }
+
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .video-panel { grid-column: 1; grid-row: auto; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CubeMind Cognitive Architecture</h1>
+  <div class="status" id="statusText">Initializing...</div>
+</div>
+
+<div class="grid">
+  <!-- Video Panel -->
+  <div class="panel video-panel">
+    <div class="panel-title">Visual Input</div>
+    <div class="panel-body">
+      <div id="videoArea">
+        <div id="dropZone">Drop MP4 here</div>
+        <div id="webcamOverlay"><video autoplay muted playsinline></video></div>
+        <video id="mainVideo" loop muted style="display:none"></video>
+        <div class="placeholder" id="videoPlaceholder">
+          Drag &amp; drop an MP4 file<br>or click Webcam below
+        </div>
+      </div>
+      <div class="video-controls">
+        <button onclick="toggleWebcam()" id="btnWebcam">Webcam</button>
+        <button onclick="togglePlay()" id="btnPlay">Play/Pause</button>
+        <button onclick="teachCurrent()" class="btn btn-teach">Teach [T]</button>
+        <button onclick="recallCurrent()" class="btn btn-recall">Recall [R]</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Neurochemistry -->
+  <div class="panel">
+    <div class="panel-title">Neurochemistry</div>
+    <div class="panel-body">
+      <div class="neuro-bar">
+        <div class="neuro-label"><span>Dopamine</span><span id="dopVal">0.40</span></div>
+        <div class="neuro-track"><div class="neuro-fill dopamine" id="dopBar" style="width:40%"></div></div>
+      </div>
+      <div class="neuro-bar">
+        <div class="neuro-label"><span>Cortisol</span><span id="corVal">0.20</span></div>
+        <div class="neuro-track"><div class="neuro-fill cortisol" id="corBar" style="width:20%"></div></div>
+      </div>
+      <div class="neuro-bar">
+        <div class="neuro-label"><span>Serotonin</span><span id="serVal">0.50</span></div>
+        <div class="neuro-track"><div class="neuro-fill serotonin" id="serBar" style="width:50%"></div></div>
+      </div>
+      <div class="neuro-bar">
+        <div class="neuro-label"><span>Oxytocin</span><span id="oxyVal">0.30</span></div>
+        <div class="neuro-track"><div class="neuro-fill oxytocin" id="oxyBar" style="width:30%"></div></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px">
+        <span class="emotion-badge" id="emotionBadge" style="background:#1a2a1a;color:#00ff88">curious</span>
+        <span style="font-size:11px;color:#888" id="arousalText">Arousal: 0.35</span>
+      </div>
+      <div id="alphaDisplay" class="alpha-display alpha-balanced">Alpha: 0.50 - BALANCED</div>
+    </div>
+  </div>
+
+  <!-- SNN Spikes -->
+  <div class="panel">
+    <div class="panel-title">SNN Spike Activity</div>
+    <div class="panel-body">
+      <div class="spike-grid" id="spikeGrid"></div>
+      <div class="spike-stats">
+        <span>Rate: <span id="spikeRate">0</span>%</span>
+        <span>Neurons: 128</span>
+        <span>STDP: active</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Teaching / Memory -->
+  <div class="panel">
+    <div class="panel-title">Teaching &amp; Memory</div>
+    <div class="panel-body">
+      <div class="teach-section">
+        <input type="text" class="teach-input" id="teachInput" placeholder="Type label (e.g. bear)" onkeydown="if(event.key==='Enter')teachCurrent()">
+        <button class="btn btn-teach" onclick="teachCurrent()">Teach</button>
+        <button class="btn btn-recall" onclick="recallCurrent()">Recall</button>
+      </div>
+      <div style="font-size:11px;color:#666;margin-bottom:8px">Concepts: <span id="conceptCount">0</span> | Semantic: <span id="semCount">0</span> | Episodic: <span id="epiCount">0</span></div>
+      <div class="memory-list" id="memoryList"></div>
+      <div id="recallResults"></div>
+    </div>
+  </div>
+
+  <!-- Experiential Encoding -->
+  <div class="panel">
+    <div class="panel-title">Experiential Encoding</div>
+    <div class="panel-body">
+      <div class="exp-dim"><span class="exp-label">Time</span><span class="exp-value" id="expTime">--:--</span><div class="exp-bar"><div class="exp-bar-fill" id="expTimeBar" style="width:50%"></div></div></div>
+      <div class="exp-dim"><span class="exp-label">Season</span><span class="exp-value" id="expSeason">--</span><div class="exp-bar"><div class="exp-bar-fill" id="expSeasonBar" style="width:25%"></div></div></div>
+      <div class="exp-dim"><span class="exp-label">Valence</span><span class="exp-value" id="expValence">--</span><div class="exp-bar"><div class="exp-bar-fill" id="expValenceBar" style="width:50%"></div></div></div>
+      <div class="exp-dim"><span class="exp-label">Arousal</span><span class="exp-value" id="expArousal">--</span><div class="exp-bar"><div class="exp-bar-fill" id="expArousalBar" style="width:35%"></div></div></div>
+      <div class="exp-dim"><span class="exp-label">Circadian</span><span class="exp-value" id="expCircadian">--</span><div class="exp-bar"><div class="exp-bar-fill" id="expCircadianBar" style="width:50%"></div></div></div>
+    </div>
+  </div>
+
+  <!-- HD-GoT Debate -->
+  <div class="panel">
+    <div class="panel-title">HD-GoT Hypothesis Debate</div>
+    <div class="panel-body">
+      <canvas class="got-canvas" id="gotCanvas"></canvas>
+      <div class="got-stats">
+        <span>Hypotheses: <span id="gotHypCount">5</span></span>
+        <span>Consensus: <span id="gotConsensus">0.000</span></span>
+        <span>Debates: <span id="gotDebates">0</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Key Bar -->
+<div class="key-bar">
+  <div class="key"><kbd>T</kbd> Teach</div>
+  <div class="key"><kbd>R</kbd> Recall</div>
+  <div class="key"><kbd>M</kbd> Mic (hold)</div>
+  <div class="key"><kbd>Space</kbd> Pause</div>
+  <div class="key"><kbd>C</kbd> Clear Memory</div>
+  <div class="key" style="color:var(--neon-green)">Drag MP4 to load video</div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────
+const state = {
+  dopamine: 0.4, cortisol: 0.2, serotonin: 0.5, oxytocin: 0.3,
+  spikeRate: 0, frame: 0, webcamActive: false, videoPlaying: false,
+  memories: [], concepts: {}, debateCount: 0, consensusSim: 0,
+};
+
+// ── Neurochemistry simulation ─────────────────────────────
+function updateNeurochemistry() {
+  const t = Date.now() / 1000;
+  const novelty = 0.3 + 0.2 * Math.sin(t * 0.5) + 0.1 * Math.sin(t * 1.3);
+  // ODE: dH/dt = alpha * drive - beta * H (matching cubemind/perception/snn.py)
+  const dt = 0.05;
+  state.dopamine += dt * (0.8 * novelty - 0.5 * state.dopamine);
+  state.cortisol += dt * (0.3 * 0.15 - 0.4 * state.cortisol);
+  state.serotonin += dt * (0.5 * 0.4 - 0.3 * state.serotonin);
+  state.oxytocin += dt * (0.4 * 0.2 - 0.35 * state.oxytocin + 0.06 * state.serotonin);
+  // Non-linear couplings (from cubemind 4-hormone ODE)
+  state.dopamine -= dt * state.cortisol * 0.12;  // cortisol dampens dopamine
+  state.serotonin -= dt * state.cortisol * 0.08; // cortisol dampens serotonin
+  state.oxytocin -= dt * state.cortisol * 0.05;  // cortisol suppresses oxytocin
+  state.oxytocin += dt * state.serotonin * 0.06; // serotonin boosts oxytocin
+  // Clamp [0, 1]
+  state.dopamine = Math.max(0, Math.min(1, state.dopamine));
+  state.cortisol = Math.max(0, Math.min(1, state.cortisol));
+  state.serotonin = Math.max(0, Math.min(1, state.serotonin));
+  state.oxytocin = Math.max(0, Math.min(1, state.oxytocin));
+
+  document.getElementById('dopBar').style.width = (state.dopamine * 100) + '%';
+  document.getElementById('corBar').style.width = (state.cortisol * 100) + '%';
+  document.getElementById('serBar').style.width = (state.serotonin * 100) + '%';
+  document.getElementById('oxyBar').style.width = (state.oxytocin * 100) + '%';
+  document.getElementById('dopVal').textContent = state.dopamine.toFixed(2);
+  document.getElementById('corVal').textContent = state.cortisol.toFixed(2);
+  document.getElementById('serVal').textContent = state.serotonin.toFixed(2);
+  document.getElementById('oxyVal').textContent = state.oxytocin.toFixed(2);
+
+  // Emotion
+  const emotions = [
+    { name: 'joy', val: state.dopamine * 0.6 + state.serotonin * 0.4, color: '#00ff88', bg: '#1a2a1a' },
+    { name: 'curious', val: state.dopamine * 0.8 + (1 - state.cortisol) * 0.2, color: '#ffaa00', bg: '#2a2a1a' },
+    { name: 'anxious', val: state.cortisol * 0.7 + (1 - state.serotonin) * 0.3, color: '#ff4466', bg: '#2a1a1a' },
+    { name: 'calm', val: state.serotonin * 0.5 + state.oxytocin * 0.5, color: '#00aaff', bg: '#1a1a2a' },
+  ];
+  const dominant = emotions.reduce((a, b) => a.val > b.val ? a : b);
+  const badge = document.getElementById('emotionBadge');
+  badge.textContent = dominant.name;
+  badge.style.background = dominant.bg;
+  badge.style.color = dominant.color;
+
+  const arousal = Math.min(1, state.dopamine * 0.4 + state.cortisol * 0.3 + (1 - state.serotonin) * 0.3);
+  document.getElementById('arousalText').textContent = 'Arousal: ' + arousal.toFixed(2);
+
+  // Alpha
+  const alpha = 0.3 + 0.4 * (state.cortisol / (state.dopamine + state.cortisol + 0.001));
+  const ad = document.getElementById('alphaDisplay');
+  if (alpha < 0.45) { ad.className = 'alpha-display alpha-explore'; ad.textContent = `Alpha: ${alpha.toFixed(2)} - EXPLORE`; }
+  else if (alpha > 0.55) { ad.className = 'alpha-display alpha-hold'; ad.textContent = `Alpha: ${alpha.toFixed(2)} - CONSOLIDATE`; }
+  else { ad.className = 'alpha-display alpha-balanced'; ad.textContent = `Alpha: ${alpha.toFixed(2)} - BALANCED`; }
+}
+
+// ── SNN Spikes ────────────────────────────────────────────
+const spikeGrid = document.getElementById('spikeGrid');
+const spikeCells = [];
+for (let i = 0; i < 128; i++) {
+  const cell = document.createElement('div');
+  cell.className = 'spike-cell';
+  spikeGrid.appendChild(cell);
+  spikeCells.push(cell);
+}
+
+function updateSpikes() {
+  let active = 0;
+  const rate = 0.1 + state.dopamine * 0.2 + Math.random() * 0.1;
+  spikeCells.forEach(cell => {
+    const fires = Math.random() < rate;
+    cell.className = fires ? 'spike-cell active' : 'spike-cell';
+    if (fires) active++;
+  });
+  state.spikeRate = Math.round(active / 128 * 100);
+  document.getElementById('spikeRate').textContent = state.spikeRate;
+}
+
+// ── Experiential Encoding ─────────────────────────────────
+function updateExperiential() {
+  const now = new Date();
+  const h = now.getHours(), m = now.getMinutes();
+  const seasons = ['Winter','Winter','Spring','Spring','Spring','Summer','Summer','Summer','Fall','Fall','Fall','Winter'];
+  const season = seasons[now.getMonth()];
+  const valence = state.dopamine / (state.dopamine + state.cortisol + 0.001);
+  const arousal = Math.min(1, state.dopamine * 0.4 + state.cortisol * 0.3);
+  const circadian = 0.5 * (1 + Math.cos(2 * Math.PI * (h - 14) / 24));
+
+  document.getElementById('expTime').textContent = `${h}:${m.toString().padStart(2,'0')}`;
+  document.getElementById('expTimeBar').style.width = (h / 24 * 100) + '%';
+  document.getElementById('expSeason').textContent = season;
+  document.getElementById('expSeasonBar').style.width = ({Winter:25,Spring:50,Summer:75,Fall:100}[season]) + '%';
+  document.getElementById('expValence').textContent = valence > 0.5 ? 'LIGHT' : 'HEAVY';
+  document.getElementById('expValenceBar').style.width = (valence * 100) + '%';
+  document.getElementById('expArousal').textContent = arousal.toFixed(2);
+  document.getElementById('expArousalBar').style.width = (arousal * 100) + '%';
+  document.getElementById('expCircadian').textContent = circadian > 0.5 ? 'Peak' : 'Trough';
+  document.getElementById('expCircadianBar').style.width = (circadian * 100) + '%';
+}
+
+// ── HD-GoT Canvas ─────────────────────────────────────────
+const gotCanvas = document.getElementById('gotCanvas');
+const ctx = gotCanvas.getContext('2d');
+let hypotheses = [];
+
+function initHypotheses() {
+  hypotheses = [];
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2 - Math.PI / 2;
+    hypotheses.push({
+      x: 0.5 + 0.35 * Math.cos(angle),
+      y: 0.5 + 0.35 * Math.sin(angle),
+      rank: Math.random(),
+      label: ['Shape Rule', 'Color Inv.', 'Spatial Tr.', 'Numeric Pr.', 'Composite'][i],
+      pulse: 0,
+    });
+  }
+}
+initHypotheses();
+
+function drawGoT() {
+  const w = gotCanvas.width = gotCanvas.clientWidth;
+  const h = gotCanvas.height = gotCanvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+
+  // Edges
+  for (let i = 0; i < hypotheses.length; i++) {
+    for (let j = i + 1; j < hypotheses.length; j++) {
+      const a = hypotheses[i], b = hypotheses[j];
+      const sim = 1 - Math.abs(a.rank - b.rank);
+      if (sim > 0.3) {
+        ctx.beginPath();
+        ctx.moveTo(a.x * w, a.y * h);
+        ctx.lineTo(b.x * w, b.y * h);
+        ctx.strokeStyle = `rgba(170,102,255,${sim * 0.4})`;
+        ctx.lineWidth = sim * 3;
+        ctx.stroke();
+      }
+    }
+  }
+
+  // Nodes
+  hypotheses.forEach((hyp, i) => {
+    const x = hyp.x * w, y = hyp.y * h;
+    const r = 12 + hyp.rank * 16;
+    hyp.pulse = (hyp.pulse + 0.03) % (Math.PI * 2);
+    const glow = 0.3 + 0.2 * Math.sin(hyp.pulse);
+
+    // Spike diffusion glow
+    ctx.beginPath();
+    ctx.arc(x, y, r + 8, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(0,255,136,${glow * hyp.rank})`;
+    ctx.fill();
+
+    // Node
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    const bright = Math.round(100 + hyp.rank * 155);
+    ctx.fillStyle = `rgb(${Math.round(hyp.rank * 50)},${bright},${Math.round(100 + hyp.rank * 80)})`;
+    ctx.fill();
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth = hyp.rank > 0.7 ? 2 : 1;
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = '#ddd';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(hyp.label, x, y + r + 14);
+    ctx.fillText(`rank: ${hyp.rank.toFixed(2)}`, x, y + r + 24);
+  });
+
+  // Consensus indicator
+  const best = hypotheses.reduce((a, b) => a.rank > b.rank ? a : b);
+  ctx.fillStyle = '#00ff88';
+  ctx.font = 'bold 11px system-ui';
+  ctx.textAlign = 'left';
+  ctx.fillText(`Winner: ${best.label}`, 10, h - 8);
+}
+
+function runDebate() {
+  hypotheses.forEach(h => { h.rank = 0.2 + Math.random() * 0.8; });
+  // Spike diffusion: propagate ranks
+  for (let step = 0; step < 3; step++) {
+    const newRanks = hypotheses.map((h, i) => {
+      let sum = h.rank;
+      let n = 1;
+      hypotheses.forEach((other, j) => {
+        if (i !== j) {
+          const sim = 1 - Math.abs(h.rank - other.rank);
+          if (sim > 0.3) { sum += other.rank * sim; n++; }
+        }
+      });
+      return sum / n;
+    });
+    hypotheses.forEach((h, i) => h.rank = newRanks[i]);
+  }
+  // Normalize
+  const maxR = Math.max(...hypotheses.map(h => h.rank));
+  hypotheses.forEach(h => h.rank /= maxR);
+  state.debateCount++;
+  state.consensusSim = Math.max(...hypotheses.map(h => h.rank));
+  document.getElementById('gotDebates').textContent = state.debateCount;
+  document.getElementById('gotConsensus').textContent = state.consensusSim.toFixed(3);
+}
+
+// ── Teaching & Memory ─────────────────────────────────────
+function hashCode(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  return h;
+}
+
+function makeFeatureVec(label) {
+  const d = 64;
+  const vec = new Float32Array(d);
+  const seed = Math.abs(hashCode(label));
+  for (let i = 0; i < d; i++) {
+    vec[i] = Math.sin(seed * (i + 1) * 0.7) * Math.cos(seed * (i + 2) * 0.3);
+  }
+  // Normalize
+  let norm = 0;
+  for (let i = 0; i < d; i++) norm += vec[i] * vec[i];
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < d; i++) vec[i] /= norm;
+  return vec;
+}
+
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+}
+
+function teachCurrent() {
+  const label = document.getElementById('teachInput').value.trim();
+  if (!label) return;
+  const vec = makeFeatureVec(label);
+  // Add emotion to vector
+  vec[0] += state.dopamine * 0.1;
+  vec[1] += state.cortisol * 0.1;
+  state.memories.push({ label, vec, time: new Date(), emotion: document.getElementById('emotionBadge').textContent });
+  state.concepts[label] = (state.concepts[label] || 0) + 1;
+
+  // Spike dopamine on teach
+  state.dopamine = Math.min(1, state.dopamine + 0.15);
+
+  updateMemoryUI();
+  saveMemory();
+  document.getElementById('teachInput').value = '';
+  runDebate();
+}
+
+function recallCurrent() {
+  if (state.memories.length === 0) {
+    document.getElementById('recallResults').innerHTML = '<div class="recall-result" style="background:#2a1a1a;border-left:3px solid #ff4466">No memories yet - teach me first!</div>';
+    return;
+  }
+  // Create query from current neurochemistry state
+  const query = new Float32Array(64);
+  for (let i = 0; i < 64; i++) query[i] = Math.sin(state.frame * (i+1) * 0.01);
+  query[0] += state.dopamine * 0.1;
+  query[1] += state.cortisol * 0.1;
+  let norm = 0;
+  for (let i = 0; i < 64; i++) norm += query[i]*query[i];
+  norm = Math.sqrt(norm) || 1;
+  for (let i = 0; i < 64; i++) query[i] /= norm;
+
+  const results = state.memories.map(m => ({ label: m.label, sim: cosineSim(query, m.vec), emotion: m.emotion }))
+    .sort((a, b) => b.sim - a.sim).slice(0, 3);
+
+  let html = '';
+  results.forEach(r => {
+    const color = r.sim > 0.5 ? '#00ff88' : '#ffaa00';
+    html += `<div class="recall-result" style="background:#151520;border-left:3px solid ${color}">"${r.label}" sim=${r.sim.toFixed(3)} [${r.emotion}]</div>`;
+  });
+  document.getElementById('recallResults').innerHTML = html;
+  state.cortisol = Math.min(1, state.cortisol + 0.05); // slight stress from query
+}
+
+function updateMemoryUI() {
+  const list = document.getElementById('memoryList');
+  list.innerHTML = state.memories.slice(-6).reverse().map(m =>
+    `<div class="memory-item">${m.label} <span style="color:#666">(${m.emotion}, ${m.time.toLocaleTimeString()})</span></div>`
+  ).join('');
+  document.getElementById('conceptCount').textContent = Object.keys(state.concepts).length;
+  document.getElementById('semCount').textContent = state.memories.length;
+  document.getElementById('epiCount').textContent = state.memories.length * 2;
+}
+
+// ── Video / Webcam ────────────────────────────────────────
+let webcamStream = null;
+
+async function toggleWebcam() {
+  const btn = document.getElementById('btnWebcam');
+  const overlay = document.getElementById('webcamOverlay');
+  if (state.webcamActive) {
+    webcamStream?.getTracks().forEach(t => t.stop());
+    overlay.style.display = 'none';
+    btn.classList.remove('active');
+    state.webcamActive = false;
+  } else {
+    try {
+      webcamStream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } });
+      overlay.querySelector('video').srcObject = webcamStream;
+      overlay.style.display = 'block';
+      btn.classList.add('active');
+      state.webcamActive = true;
+      state.oxytocin = Math.min(1, state.oxytocin + 0.2); // social signal
+    } catch(e) { console.log('Webcam error:', e); }
+  }
+}
+
+function togglePlay() {
+  const v = document.getElementById('mainVideo');
+  if (v.paused) v.play(); else v.pause();
+}
+
+// Drag and drop
+const videoArea = document.getElementById('videoArea');
+const dropZone = document.getElementById('dropZone');
+videoArea.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.display = 'flex'; });
+videoArea.addEventListener('dragleave', () => { dropZone.style.display = 'none'; });
+videoArea.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.style.display = 'none';
+  const file = e.dataTransfer.files[0];
+  if (file && file.type.startsWith('video/')) {
+    const url = URL.createObjectURL(file);
+    const v = document.getElementById('mainVideo');
+    v.src = url;
+    v.style.display = 'block';
+    v.play();
+    document.getElementById('videoPlaceholder').style.display = 'none';
+    state.dopamine = Math.min(1, state.dopamine + 0.3); // novelty spike
+  }
+});
+
+// ── Persistence (localStorage) ────────────────────────────
+function saveMemory() {
+  const data = state.memories.map(m => ({
+    label: m.label, vec: Array.from(m.vec),
+    time: m.time.toISOString(), emotion: m.emotion,
+  }));
+  localStorage.setItem('cubemind_memories', JSON.stringify(data));
+  localStorage.setItem('cubemind_concepts', JSON.stringify(state.concepts));
+}
+
+function loadMemory() {
+  try {
+    const raw = localStorage.getItem('cubemind_memories');
+    if (raw) {
+      const data = JSON.parse(raw);
+      state.memories = data.map(m => ({
+        label: m.label, vec: new Float32Array(m.vec),
+        time: new Date(m.time), emotion: m.emotion,
+      }));
+    }
+    const concepts = localStorage.getItem('cubemind_concepts');
+    if (concepts) state.concepts = JSON.parse(concepts);
+    updateMemoryUI();
+    if (state.memories.length > 0)
+      console.log('Loaded ' + state.memories.length + ' memories from storage');
+  } catch(e) { console.log('No saved memories'); }
+}
+
+function clearMemory() {
+  state.memories = [];
+  state.concepts = {};
+  localStorage.removeItem('cubemind_memories');
+  localStorage.removeItem('cubemind_concepts');
+  updateMemoryUI();
+  document.getElementById('recallResults').innerHTML =
+    '<div class="recall-result" style="background:#2a1a1a;border-left:3px solid #ffaa00">Memory cleared!</div>';
+}
+
+// Load on startup
+loadMemory();
+
+// ── Keyboard shortcuts ────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (document.activeElement === document.getElementById('teachInput')) return;
+  if (e.key === 't' || e.key === 'T') { document.getElementById('teachInput').focus(); }
+  if (e.key === 'r' || e.key === 'R') { recallCurrent(); }
+  if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+  if (e.key === 'c' || e.key === 'C') { if (confirm('Clear all memories?')) clearMemory(); }
+});
+
+// ── WebSocket to real CubeMind backend ────────────────────
+let ws = null;
+let wsConnected = false;
+
+function connectBackend() {
+  try {
+    ws = new WebSocket('ws://localhost:8765/ws');
+    ws.onopen = () => {
+      wsConnected = true;
+      document.getElementById('statusText').textContent = 'Connected to CubeMind backend';
+      document.getElementById('statusText').style.color = '#00ff88';
+    };
+    ws.onclose = () => {
+      wsConnected = false;
+      document.getElementById('statusText').style.color = '#00aaff';
+      setTimeout(connectBackend, 3000); // Reconnect
+    };
+    ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'state') {
+        const d = msg.data;
+        state.dopamine = d.dopamine;
+        state.cortisol = d.cortisol;
+        state.serotonin = d.serotonin;
+        state.oxytocin = d.oxytocin;
+        // Update bars immediately from real data
+        document.getElementById('dopBar').style.width = (d.dopamine * 100) + '%';
+        document.getElementById('corBar').style.width = (d.cortisol * 100) + '%';
+        document.getElementById('serBar').style.width = (d.serotonin * 100) + '%';
+        document.getElementById('oxyBar').style.width = (d.oxytocin * 100) + '%';
+        document.getElementById('dopVal').textContent = d.dopamine.toFixed(2);
+        document.getElementById('corVal').textContent = d.cortisol.toFixed(2);
+        document.getElementById('serVal').textContent = d.serotonin.toFixed(2);
+        document.getElementById('oxyVal').textContent = d.oxytocin.toFixed(2);
+        if (d.emotion) document.getElementById('emotionBadge').textContent = d.emotion;
+        if (d.concepts !== undefined) document.getElementById('conceptCount').textContent = d.concepts;
+        if (d.semantic_size !== undefined) document.getElementById('semCount').textContent = d.semantic_size;
+        if (d.episodic_size !== undefined) document.getElementById('epiCount').textContent = d.episodic_size;
+        if (d.spikes) {
+          d.spikes.forEach((s, i) => {
+            if (i < spikeCells.length)
+              spikeCells[i].className = s > 0 ? 'spike-cell active' : 'spike-cell';
+          });
+        }
+      } else if (msg.type === 'teach') {
+        const d = msg.data;
+        const item = document.createElement('div');
+        item.className = 'memory-item';
+        item.innerHTML = `${d.label} <span style="color:#666">(${d.emotion}, real)</span>`;
+        document.getElementById('memoryList').prepend(item);
+      } else if (msg.type === 'recall') {
+        let html = '';
+        msg.data.forEach(r => {
+          const color = r.similarity > 0.6 ? '#00ff88' : '#ffaa00';
+          html += `<div class="recall-result" style="background:#151520;border-left:3px solid ${color}">"${r.label}" sim=${r.similarity.toFixed(3)} [${r.memory}]</div>`;
+        });
+        document.getElementById('recallResults').innerHTML = html || '<div class="recall-result" style="background:#2a1a1a;border-left:3px solid #ff4466">No matches found</div>';
+      }
+    };
+    ws.onerror = () => {};
+  } catch(e) {}
+}
+
+// Try to connect on load (fails silently if no backend running)
+connectBackend();
+
+// Override teach/recall to use backend when connected
+const _origTeach = teachCurrent;
+teachCurrent = function() {
+  const label = document.getElementById('teachInput').value.trim();
+  if (!label) return;
+  if (wsConnected && ws) {
+    ws.send(JSON.stringify({ cmd: 'teach', label: label }));
+    document.getElementById('teachInput').value = '';
+    runDebate();
+    return;
+  }
+  _origTeach();
+};
+
+const _origRecall = recallCurrent;
+recallCurrent = function() {
+  if (wsConnected && ws) {
+    ws.send(JSON.stringify({ cmd: 'recall' }));
+    return;
+  }
+  _origRecall();
+};
+
+// Periodic state sync with backend
+setInterval(() => {
+  if (wsConnected && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ cmd: 'perceive' }));
+  }
+}, 500);
+
+// ── Main loop ─────────────────────────────────────────────
+function tick() {
+  state.frame++;
+  updateNeurochemistry();
+  if (state.frame % 3 === 0) updateSpikes();
+  if (state.frame % 10 === 0) updateExperiential();
+  drawGoT();
+  if (state.frame % 90 === 0) runDebate();
+
+  document.getElementById('statusText').textContent =
+    `Frame ${state.frame} | ${Object.keys(state.concepts).length} concepts | ${state.memories.length} memories | ${state.spikeRate}% spikes`;
+
+  requestAnimationFrame(tick);
+}
+
+tick();
+</script>
+</body>
+</html>

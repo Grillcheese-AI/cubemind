@@ -8,6 +8,7 @@ dependencies = [
     "datasets>=4.8.2",
     "grilly>=0.5.3",
     "huggingface-hub>=1.7.1",
+    "matplotlib>=3.10.8",
     "numpy>=1.24",
     "pillow>=12.1.1",
     "pyarrow>=23.0.1",
@@ -16,14 +17,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.4"]
+dev = ["httpx>=0.27", "pytest>=8.0", "ruff>=0.4"]
 
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["cubemind*"]
+include = ["cubemind*", "benchmarks*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,6 +20,8 @@ import math
 
 import numpy as np
 
+from cubemind.model import oja_update
+
 # GPU bridge
 _bridge = None
 try:
@@ -303,3 +305,159 @@ class CombinerAxialAttention:
         # Merge heads and remove padding
         output = output_heads.reshape(L_padded, self.d_model)[:L]
         return output
+
+
+# Inside a hypothetical Combiner update:
+def combine_long_context(self, current_phi, history_phis):
+    # Instead of standard attention which is O(History^2)
+    # Use the HyperAttention logic to only look at similar past states
+    # plus a few random 'sampled' historical anchors.
+    combined = self.hyper_attn(current_phi, history_phis, history_phis, causal=True)
+    return combined
+
+
+class HyperAxialAttention:
+    """Hyper-Axial attention with O(L) complexity via SimHash + Sorting.
+    
+    Replaces the O(L*sqrt(L)) summary-based approach with a linear-time 
+    Locality Sensitive Hashing (LSH) mechanism.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int = 4,
+        bucket_size: int = 256,
+        sample_size: int = 128,
+        num_projections: int = 32,
+        rng: np.random.Generator | None = None,
+    ) -> None:
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_head = d_model // num_heads
+        self.bucket_size = bucket_size
+        self.sample_size = sample_size
+        self.num_projections = num_projections
+        
+        if rng is None:
+            self.rng = np.random.default_rng()
+        else:
+            self.rng = rng
+
+        # Xavier initialization for projections
+        std = 1.0 / math.sqrt(d_model)
+        self.W_Q = self.rng.normal(0, std, size=(d_model, d_model)).astype(np.float32)
+        self.W_K = self.rng.normal(0, std, size=(d_model, d_model)).astype(np.float32)
+        self.W_V = self.rng.normal(0, std, size=(d_model, d_model)).astype(np.float32)
+
+        # SimHash projection matrix
+        self.projections = self.rng.standard_normal((self.d_head, num_projections)).astype(np.float32)
+
+    def _hash_vectors(self, x: np.ndarray) -> np.ndarray:
+        """x: (L, d_head) -> returns integer hashes (L,)"""
+        # Locality Sensitive Hashing (SimHash)
+        bools = (x @ self.projections) > 0
+        powers = 2 ** np.arange(self.num_projections)
+        return np.sum(bools * powers, axis=-1)
+
+    def forward(self, X: np.ndarray, causal: bool = True, refine_plasticity: bool = True) -> np.ndarray:
+        L, d = X.shape
+        
+        # --- SAFEGUARD 1: Fallback for very short sequences ---
+        # If the sequence is smaller than one bucket, standard attention is 
+        # faster and avoids the "choice" error.
+        if L <= self.bucket_size:
+            # Reusing your existing helper from combiner.py
+            # Note: You might need to add a causal mask logic here if not present
+            Q = X @ self.W_Q
+            K = X @ self.W_K
+            V = X @ self.W_V
+            return scaled_dot_product_attention(Q, K, V) # Standard O(L^2)
+
+        # Proceed with HyperAttention for L > bucket_size
+        Q = X @ self.W_Q
+        K = X @ self.W_K
+        V = X @ self.W_V
+
+        n_h = self.num_heads
+        d_h = self.d_head
+        Q_heads = Q.reshape(L, n_h, d_h).transpose(1, 0, 2)
+        K_heads = K.reshape(L, n_h, d_h).transpose(1, 0, 2)
+        V_heads = V.reshape(L, n_h, d_h).transpose(1, 0, 2)
+
+        out_heads = []
+        orig_indices = np.arange(L)
+
+        for h in range(n_h):
+            Qh, Kh, Vh = Q_heads[h], K_heads[h], V_heads[h]
+
+            q_hashes = self._hash_vectors(Qh)
+            k_hashes = self._hash_vectors(Kh)
+            
+            q_idx = np.argsort(q_hashes)
+            k_idx = np.argsort(k_hashes)
+            
+            q_sorted = Qh[q_idx]
+            k_sorted = Kh[k_idx]
+            v_sorted = Vh[k_idx]
+            q_pos = orig_indices[q_idx]
+            k_pos = orig_indices[k_idx]
+
+            # 2. Local Bucket Attention
+            num_buckets = L // self.bucket_size
+            L_trunc = num_buckets * self.bucket_size
+            
+            q_b = q_sorted[:L_trunc].reshape(num_buckets, self.bucket_size, d_h)
+            k_b = k_sorted[:L_trunc].reshape(num_buckets, self.bucket_size, d_h)
+            v_b = v_sorted[:L_trunc].reshape(num_buckets, self.bucket_size, d_h)
+            q_p_b = q_pos[:L_trunc].reshape(num_buckets, self.bucket_size)
+            k_p_b = k_pos[:L_trunc].reshape(num_buckets, self.bucket_size)
+
+            scores_b = (q_b @ k_b.transpose(0, 2, 1)) / math.sqrt(d_h)
+            if causal:
+                mask_b = q_p_b[:, :, None] >= k_p_b[:, None, :]
+                scores_b = np.where(mask_b, scores_b, -1e9)
+
+            if refine_plasticity:
+                # For each bucket, we treat the 'Values' as a stream of observations
+                # We update the 'Centroid' of that bucket to reduce noise
+                for b_idx in range(num_buckets):
+                    bucket_values = v_b[b_idx]  # (bucket_size, d_h)
+                    # Use the first value as a seed, or a running mean
+                    centroid = np.mean(bucket_values, axis=0)
+                    
+                    # Apply Oja's rule to the centroid using the bucket's tokens
+                    # This sharpens the 'Value' representation for this specific pass
+                    for val in bucket_values:
+                        centroid = oja_update(centroid, val, eta=0.005)
+                    
+                    # Inject the refined centroid back into the attention weights
+                    # (This makes the model 'focus' on the most consistent signal in the bucket)
+                    v_b[b_idx] = v_b[b_idx] * 0.9 + centroid * 0.1 
+            
+            weights_b = _softmax(scores_b, axis=-1)
+            out_b = weights_b @ v_b
+            out_b = out_b.reshape(L_trunc, d_h)
+
+            # --- SAFEGUARD 2: Dynamic Sample Size ---
+            # Ensure we don't try to sample more than exists in the sequence
+            actual_sample_size = min(L, self.sample_size)
+            s_idx = self.rng.choice(L, actual_sample_size, replace=False)
+            
+            k_s, v_s = Kh[s_idx], Vh[s_idx]
+            
+            scores_s = (q_sorted[:L_trunc] @ k_s.T) / math.sqrt(d_h)
+            if causal:
+                mask_s = q_pos[:L_trunc, None] >= s_idx[None, :]
+                scores_s = np.where(mask_s, scores_s, -1e9)
+            
+            weights_s = _softmax(scores_s, axis=-1)
+            out_s = weights_s @ v_s
+
+            out_merged = (out_b + out_s) / 2.0
+
+            inv_idx = np.argsort(q_idx[:L_trunc])
+            out_heads.append(out_merged[inv_idx])
+
+        final_out = np.concatenate(out_heads, axis=-1)
+        return final_out

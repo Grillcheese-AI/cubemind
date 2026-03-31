@@ -353,7 +353,6 @@ def train_attr_cnn(
 
 if __name__ == "__main__":
     import sys
-    from pathlib import Path
 
     # Load data via parquet
     import pyarrow.parquet as pq

@@ -268,7 +268,7 @@ def align_entities_across_panels(
 
         # Build cost matrix: anchor entities vs this panel's entities
         cost = build_cost_matrix(anchor, entities, attrs)
-        n = cost.shape[0]
+        cost.shape[0]
 
         # Sinkhorn to get soft permutation
         perm = sinkhorn(cost, n_iters=n_iters, temperature=temperature)

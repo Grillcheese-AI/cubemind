@@ -26,7 +26,6 @@ import time
 
 import numpy as np
 
-from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.perception.cnn_encoder import CNNEncoder
 
@@ -79,7 +78,6 @@ logger = logging.getLogger(__name__)
 # ── Try grilly DisARM for gradient estimation ───────────────────────────────
 
 try:
-    from cubemind.training.disarm import discretize_block_codes
     _HAS_DISARM = True
 except Exception:
     _HAS_DISARM = False
@@ -87,7 +85,6 @@ except Exception:
 # ── Try grilly optimizer ────────────────────────────────────────────────────
 
 try:
-    from grilly.optim import SGD as _GrillySGD
     _HAS_GRILLY_OPTIM = True
 except Exception:
     _HAS_GRILLY_OPTIM = False

@@ -21,7 +21,6 @@ import numpy as np
 
 from grilly.nn.conv import Conv2d
 from grilly.nn.normalization import BatchNorm2d
-from grilly.nn.linear import Linear
 
 
 def _relu(x):

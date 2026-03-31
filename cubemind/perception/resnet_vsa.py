@@ -181,7 +181,6 @@ def train_resnet_vsa(problems, bc, n_epochs=30, lr=0.01, temperature=5.0,
                       max_n=None):
     """Train ResNet-18 → VSA projection on RAVEN panels."""
     import xml.etree.ElementTree as ET
-    from PIL import Image
 
     model = ResNetVSA(bc, temperature=temperature, lr=lr)
 

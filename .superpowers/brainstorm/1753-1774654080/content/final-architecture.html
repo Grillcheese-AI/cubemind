@@ -1,0 +1,235 @@
+<h2>MoWM — General-Purpose Mixture of World Models</h2>
+<p class="subtitle">Final architecture with 14 domains, recursive Z-axis, and discovery loop</p>
+
+<div style="background: #1a1a2e; border-radius: 16px; padding: 32px; margin: 24px 0; font-family: monospace; font-size: 12px; color: #e0e0e0; overflow-x: auto;">
+
+<!-- Input -->
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #4a9eff; color: #fff; padding: 8px 24px; border-radius: 8px; font-weight: bold; font-size: 13px;">Input (state, action)</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 10px;">&darr;</div>
+
+<!-- HYLA Encoder -->
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #2d2d4e; border: 1px solid #4a9eff; padding: 6px 20px; border-radius: 8px;">HYLA Encoder &rarr; block-code (k, l)</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 10px;">&darr;</div>
+
+<!-- Router -->
+<div style="text-align: center; margin-bottom: 10px;">
+  <span style="background: #ff6b6b; color: #fff; padding: 6px 20px; border-radius: 8px; font-weight: bold;">DSelect-k Router (dynamic pool, masked inactive slots)</span>
+</div>
+<div style="text-align: center; color: #555; margin-bottom: 6px;">&darr; top-k</div>
+
+<!-- Global World -->
+<div style="border: 2px solid #ffd93d; border-radius: 16px; padding: 20px; margin: 12px 0; background: #1e1e3a;">
+  <div style="text-align: center; color: #ffd93d; font-weight: bold; font-size: 14px; margin-bottom: 14px;">GLOBAL WORLD (z=0) &mdash; Living Axiom Library (~350 axioms)</div>
+
+  <!-- Domain grid -->
+  <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px; margin-bottom: 16px;">
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Physics<br><span style="color: #888;">~180</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Logic<br><span style="color: #888;">~15</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Economics<br><span style="color: #888;">~15</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Social<br><span style="color: #888;">~10</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Linguistics<br><span style="color: #888;">~10</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Causal<br><span style="color: #888;">~15</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Atomic<br><span style="color: #888;">~10</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Bio<br><span style="color: #888;">~15</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Music<br><span style="color: #888;">~10</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Identity<br><span style="color: #888;">~10</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Colors<br><span style="color: #888;">~15</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Language<br><span style="color: #888;">~15</span></span>
+    <span style="background: #2d4a1e; border: 1px solid #6bff6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Historical<br><span style="color: #888;">~15</span></span>
+    <span style="background: #1e3a4a; border: 1px solid #4ac8ff; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center;">Ensemble<br><span style="color: #888;">~15</span></span>
+    <span style="background: #4a1e1e; border: 1px solid #ff6b6b; padding: 4px 8px; border-radius: 6px; font-size: 10px; text-align: center; animation: pulse 2s infinite;">+ Discovered<br><span style="color: #888;">open</span></span>
+  </div>
+
+  <div style="text-align: center; color: #777; margin-bottom: 14px; font-size: 11px;">&darr; experts select axioms via cosine similarity, compose via VSA bind &darr;</div>
+
+  <!-- Expert Worlds -->
+  <div style="display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+
+    <!-- Expert 1 -->
+    <div style="border: 1px solid #4a9eff; border-radius: 10px; padding: 12px; background: #1a1a3e; min-width: 160px; flex: 1; max-width: 200px;">
+      <div style="color: #4a9eff; font-weight: bold; text-align: center; font-size: 11px;">Expert World 1 (z=1)</div>
+      <div style="color: #777; font-size: 9px; text-align: center; margin: 4px 0 8px;">Rigid Body + Dynamics</div>
+      <div style="display: flex; gap: 4px; justify-content: center; margin-bottom: 6px;">
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #555;">HYLA<sub>spatial</sub></span>
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #555;">HYLA<sub>temporal</sub></span>
+      </div>
+      <div style="border: 1px dashed #ff6bff; border-radius: 6px; padding: 6px; background: #1e1e2e;">
+        <div style="color: #ff6bff; font-size: 9px; text-align: center;">z=2: Contact Physics</div>
+        <div style="display: flex; gap: 3px; justify-content: center; margin-top: 3px;">
+          <span style="background: #2a2a3a; padding: 1px 5px; border-radius: 3px; font-size: 8px; border: 1px solid #444;">HYLA</span>
+          <span style="background: #2a2a3a; padding: 1px 5px; border-radius: 3px; font-size: 8px; border: 1px solid #444;">HYLA</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expert 2 -->
+    <div style="border: 1px solid #4a9eff; border-radius: 10px; padding: 12px; background: #1a1a3e; min-width: 160px; flex: 1; max-width: 200px;">
+      <div style="color: #4a9eff; font-weight: bold; text-align: center; font-size: 11px;">Expert World 2 (z=1)</div>
+      <div style="color: #777; font-size: 9px; text-align: center; margin: 4px 0 8px;">Causal + Social</div>
+      <div style="display: flex; gap: 4px; justify-content: center; margin-bottom: 6px;">
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #555;">HYLA<sub>cause</sub></span>
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #555;">HYLA<sub>effect</sub></span>
+      </div>
+      <div style="color: #555; font-size: 9px; text-align: center; margin-top: 6px;">tau satisfied at z=1</div>
+    </div>
+
+    <!-- Expert 3 -->
+    <div style="border: 1px solid #4ac8ff; border-radius: 10px; padding: 12px; background: #1a2a3e; min-width: 160px; flex: 1; max-width: 200px;">
+      <div style="color: #4ac8ff; font-weight: bold; text-align: center; font-size: 11px;">Expert World 3 (z=1)</div>
+      <div style="color: #777; font-size: 9px; text-align: center; margin: 4px 0 8px;">Ensemble (10<sup>9</sup> scale)</div>
+      <div style="display: flex; gap: 4px; justify-content: center; margin-bottom: 6px;">
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #555;">HYLA<sub>mean-field</sub></span>
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #555;">HYLA<sub>entropy</sub></span>
+      </div>
+      <div style="border: 1px dashed #ff6bff; border-radius: 6px; padding: 6px; background: #1e1e2e;">
+        <div style="color: #ff6bff; font-size: 9px; text-align: center;">z=2: Fractal Causality</div>
+        <div style="display: flex; gap: 3px; justify-content: center; margin-top: 3px;">
+          <span style="background: #2a2a3a; padding: 1px 5px; border-radius: 3px; font-size: 8px; border: 1px solid #444;">HYLA</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Spawned Expert -->
+    <div style="border: 1px solid #ff6b6b; border-radius: 10px; padding: 12px; background: #2a1a1a; min-width: 160px; flex: 1; max-width: 200px;">
+      <div style="color: #ff6b6b; font-weight: bold; text-align: center; font-size: 11px;">Expert N <span style="font-size: 8px; color: #ff9999;">(spawned)</span></div>
+      <div style="color: #777; font-size: 9px; text-align: center; margin: 4px 0 8px;">Discovered: -0.5v&sup2;</div>
+      <div style="display: flex; gap: 4px; justify-content: center;">
+        <span style="background: #333; padding: 2px 6px; border-radius: 3px; font-size: 9px; border: 1px solid #ff6b6b;">HYLA</span>
+      </div>
+      <div style="color: #555; font-size: 9px; text-align: center; margin-top: 6px;">from discovery loop</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Post-Global pipeline -->
+<div style="display: flex; gap: 14px; margin: 14px 0; align-items: flex-start;">
+
+  <!-- Main path -->
+  <div style="flex: 2;">
+    <div style="text-align: center; color: #555; margin-bottom: 8px;">&darr; gate-weighted merge &darr;</div>
+    <div style="text-align: center; margin-bottom: 8px;">
+      <span style="background: #2d2d4e; border: 1px solid #6bff6b; padding: 6px 16px; border-radius: 8px; font-size: 11px;">Bind-Compose &amp; Mixture + Cleanup (C=2)</span>
+    </div>
+    <div style="text-align: center; color: #555; margin-bottom: 8px;">&darr;</div>
+    <div style="text-align: center; margin-bottom: 8px;">
+      <span style="background: #2d2d4e; border: 1px solid #ff6b6b; padding: 6px 16px; border-radius: 8px; font-size: 11px;">CVL &rarr; Q-values (InfoNCE + RFF)</span>
+    </div>
+    <div style="text-align: center; color: #555; margin-bottom: 8px;">&darr;</div>
+    <div style="text-align: center; margin-bottom: 8px;">
+      <span style="background: #2d2d4e; border: 1px solid #4a9eff; padding: 6px 16px; border-radius: 8px; font-size: 11px;">HYLA Decoder &rarr; Next State + Value</span>
+    </div>
+
+    <!-- Training -->
+    <div style="margin-top: 12px; border: 1px solid #555; border-radius: 8px; padding: 10px; background: #1e1e2e;">
+      <div style="color: #aaa; font-weight: bold; font-size: 11px; margin-bottom: 6px;">Training Loss</div>
+      <div style="font-size: 10px; color: #888; line-height: 1.6;">
+        L = &lambda;<sub>bind</sub>L<sub>bind</sub> + &lambda;<sub>inv</sub>L<sub>inv</sub> + &lambda;<sub>ortho</sub>L<sub>ortho</sub><br>
+        &nbsp; + &lambda;<sub>div</sub>L<sub>div</sub> + &lambda;<sub>ent</sub>L<sub>ent</sub> + &lambda;<sub>cvl</sub>L<sub>CVL</sub><br>
+        <span style="color: #666;">Gradients: DisARM through discrete selections</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Discovery loop -->
+  <div style="flex: 1; border: 2px solid #ff6b6b; border-radius: 10px; padding: 14px; background: #2a1a1a; min-width: 200px;">
+    <div style="color: #ff6b6b; font-weight: bold; text-align: center; font-size: 12px; margin-bottom: 10px;">Discovery Loop</div>
+    <div style="font-size: 10px; color: #ccc; line-height: 1.7;">
+      <div style="margin-bottom: 6px;">
+        <span style="color: #ff9999;">1.</span> Residual &gt; &tau;?<br>
+        <code style="color: #ffd93d; font-size: 9px;">&nbsp;||y - y&#x302;|| &gt; &tau;<sub>discovery</sub></code>
+      </div>
+      <div style="margin-bottom: 6px;">
+        <span style="color: #ff9999;">2.</span> Semantic mapping<br>
+        <span style="color: #888; font-size: 9px;">&nbsp;unbind(anomaly, domain_A)</span><br>
+        <span style="color: #888; font-size: 9px;">&nbsp;bind(result, domain_B)</span>
+      </div>
+      <div style="margin-bottom: 6px;">
+        <span style="color: #ff9999;">3.</span> Symbolic regression<br>
+        <code style="color: #ffd93d; font-size: 9px;">&nbsp;min MSE + &lambda;&middot;complexity</code><br>
+        <span style="color: #888; font-size: 9px;">&nbsp;numeric: +,-,*,/,sin,exp</span><br>
+        <span style="color: #888; font-size: 9px;">&nbsp;logic: AND,OR,IMPLIES,&forall;</span>
+      </div>
+      <div style="margin-bottom: 6px;">
+        <span style="color: #ff9999;">4.</span> Axiom distillation<br>
+        <span style="color: #888; font-size: 9px;">&nbsp;encode &rarr; block-code vec</span>
+      </div>
+      <div>
+        <span style="color: #ff9999;">5.</span> Spawn expert + add axiom<br>
+        <span style="color: #888; font-size: 9px;">&nbsp;&rarr; Global World grows</span>
+      </div>
+    </div>
+    <div style="text-align: center; margin-top: 10px;">
+      <span style="color: #ff6b6b; font-size: 18px;">&uarr;</span>
+      <div style="color: #666; font-size: 9px;">feeds back to<br>Global World</div>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<!-- Module structure -->
+<div style="margin-top: 20px;">
+  <h3>Module Structure</h3>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+
+    <div style="padding: 14px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+      <div style="font-weight: bold; margin-bottom: 8px; font-size: 13px;">Core (5 files)</div>
+      <div style="font-size: 12px; line-height: 1.8; font-family: monospace;">
+        <span style="color: #4a9eff;">axiom_library.py</span> &mdash; Global World<br>
+        <span style="color: #4a9eff;">world.py</span> &mdash; Recursive World class<br>
+        <span style="color: #4a9eff;">router.py</span> &mdash; DSelect-k + spawn/prune<br>
+        <span style="color: #4a9eff;">pipeline.py</span> &mdash; End-to-end orchestrator<br>
+        <span style="color: #ff6b6b;">discovery.py</span> &mdash; SR + axiom distillation
+      </div>
+    </div>
+
+    <div style="padding: 14px; background: rgba(255,255,255,0.03); border-radius: 8px; border: 1px solid rgba(255,255,255,0.08);">
+      <div style="font-weight: bold; margin-bottom: 8px; font-size: 13px;">Domains (14 + discovered)</div>
+      <div style="font-size: 11px; line-height: 1.7; font-family: monospace; columns: 2; column-gap: 16px;">
+        <span style="color: #6bff6b;">physics.py</span><br>
+        <span style="color: #6bff6b;">logic.py</span><br>
+        <span style="color: #6bff6b;">economics.py</span><br>
+        <span style="color: #6bff6b;">social.py</span><br>
+        <span style="color: #6bff6b;">linguistics.py</span><br>
+        <span style="color: #6bff6b;">causal.py</span><br>
+        <span style="color: #6bff6b;">atomic.py</span><br>
+        <span style="color: #6bff6b;">bio.py</span><br>
+        <span style="color: #6bff6b;">music.py</span><br>
+        <span style="color: #6bff6b;">identity.py</span><br>
+        <span style="color: #6bff6b;">colors.py</span><br>
+        <span style="color: #6bff6b;">language.py</span><br>
+        <span style="color: #6bff6b;">historical.py</span><br>
+        <span style="color: #4ac8ff;">ensemble.py</span><br>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Key properties -->
+<div style="margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
+  <div style="padding: 14px; background: rgba(74,158,255,0.08); border-radius: 8px; border: 1px solid rgba(74,158,255,0.2); text-align: center;">
+    <div style="font-size: 24px; font-weight: bold; color: #4a9eff;">~350</div>
+    <div style="font-size: 11px; color: #888;">pre-seeded axioms</div>
+  </div>
+  <div style="padding: 14px; background: rgba(255,107,107,0.08); border-radius: 8px; border: 1px solid rgba(255,107,107,0.2); text-align: center;">
+    <div style="font-size: 24px; font-weight: bold; color: #ff6b6b;">z<sub>max</sub>=2</div>
+    <div style="font-size: 11px; color: #888;">recursive depth (tests)</div>
+  </div>
+  <div style="padding: 14px; background: rgba(107,255,107,0.08); border-radius: 8px; border: 1px solid rgba(107,255,107,0.2); text-align: center;">
+    <div style="font-size: 24px; font-weight: bold; color: #6bff6b;">&infin;</div>
+    <div style="font-size: 11px; color: #888;">discoverable axioms</div>
+  </div>
+</div>
+
+<style>
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+</style>

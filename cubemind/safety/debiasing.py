@@ -11,7 +11,6 @@ Prediction via Information Projection", NeurIPS 2022.
 from __future__ import annotations
 
 import copy
-from typing import Sequence
 
 import numpy as np
 
