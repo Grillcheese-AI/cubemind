@@ -204,6 +204,7 @@ body { background: #0a0a12; color: #c8c8d0; font-family: system-ui, -apple-syste
   <div class="key"><kbd>R</kbd> Recall</div>
   <div class="key"><kbd>M</kbd> Mic (hold)</div>
   <div class="key"><kbd>Space</kbd> Pause</div>
+  <div class="key"><kbd>C</kbd> Clear Memory</div>
   <div class="key" style="color:var(--neon-green)">Drag MP4 to load video</div>
 </div>
 
@@ -451,6 +452,7 @@ function teachCurrent() {
   state.dopamine = Math.min(1, state.dopamine + 0.15);
 
   updateMemoryUI();
+  saveMemory();
   document.getElementById('teachInput').value = '';
   runDebate();
 }
@@ -540,12 +542,54 @@ videoArea.addEventListener('drop', e => {
   }
 });
 
+// ── Persistence (localStorage) ────────────────────────────
+function saveMemory() {
+  const data = state.memories.map(m => ({
+    label: m.label, vec: Array.from(m.vec),
+    time: m.time.toISOString(), emotion: m.emotion,
+  }));
+  localStorage.setItem('cubemind_memories', JSON.stringify(data));
+  localStorage.setItem('cubemind_concepts', JSON.stringify(state.concepts));
+}
+
+function loadMemory() {
+  try {
+    const raw = localStorage.getItem('cubemind_memories');
+    if (raw) {
+      const data = JSON.parse(raw);
+      state.memories = data.map(m => ({
+        label: m.label, vec: new Float32Array(m.vec),
+        time: new Date(m.time), emotion: m.emotion,
+      }));
+    }
+    const concepts = localStorage.getItem('cubemind_concepts');
+    if (concepts) state.concepts = JSON.parse(concepts);
+    updateMemoryUI();
+    if (state.memories.length > 0)
+      console.log('Loaded ' + state.memories.length + ' memories from storage');
+  } catch(e) { console.log('No saved memories'); }
+}
+
+function clearMemory() {
+  state.memories = [];
+  state.concepts = {};
+  localStorage.removeItem('cubemind_memories');
+  localStorage.removeItem('cubemind_concepts');
+  updateMemoryUI();
+  document.getElementById('recallResults').innerHTML =
+    '<div class="recall-result" style="background:#2a1a1a;border-left:3px solid #ffaa00">Memory cleared!</div>';
+}
+
+// Load on startup
+loadMemory();
+
 // ── Keyboard shortcuts ────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (document.activeElement === document.getElementById('teachInput')) return;
   if (e.key === 't' || e.key === 'T') { document.getElementById('teachInput').focus(); }
   if (e.key === 'r' || e.key === 'R') { recallCurrent(); }
   if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+  if (e.key === 'c' || e.key === 'C') { if (confirm('Clear all memories?')) clearMemory(); }
 });
 
 // ── Main loop ─────────────────────────────────────────────
