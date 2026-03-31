@@ -220,12 +220,22 @@ const state = {
 function updateNeurochemistry() {
   const t = Date.now() / 1000;
   const novelty = 0.3 + 0.2 * Math.sin(t * 0.5) + 0.1 * Math.sin(t * 1.3);
-  state.dopamine = Math.max(0, Math.min(1, state.dopamine + (novelty * 0.1 - state.dopamine * 0.05) * 0.3));
-  state.cortisol = Math.max(0, Math.min(1, state.cortisol + (0.1 - state.cortisol * 0.08) * 0.3));
-  state.serotonin = Math.max(0, Math.min(1, state.serotonin + (0.4 - state.serotonin * 0.06) * 0.2));
-  state.oxytocin = Math.max(0, Math.min(1, state.oxytocin + (0.2 + state.serotonin * 0.06 - state.oxytocin * 0.04) * 0.2));
-  // Cortisol dampens dopamine
-  state.dopamine = Math.max(0, state.dopamine - state.cortisol * 0.012);
+  // ODE: dH/dt = alpha * drive - beta * H (matching cubemind/perception/snn.py)
+  const dt = 0.05;
+  state.dopamine += dt * (0.8 * novelty - 0.5 * state.dopamine);
+  state.cortisol += dt * (0.3 * 0.15 - 0.4 * state.cortisol);
+  state.serotonin += dt * (0.5 * 0.4 - 0.3 * state.serotonin);
+  state.oxytocin += dt * (0.4 * 0.2 - 0.35 * state.oxytocin + 0.06 * state.serotonin);
+  // Non-linear couplings (from cubemind 4-hormone ODE)
+  state.dopamine -= dt * state.cortisol * 0.12;  // cortisol dampens dopamine
+  state.serotonin -= dt * state.cortisol * 0.08; // cortisol dampens serotonin
+  state.oxytocin -= dt * state.cortisol * 0.05;  // cortisol suppresses oxytocin
+  state.oxytocin += dt * state.serotonin * 0.06; // serotonin boosts oxytocin
+  // Clamp [0, 1]
+  state.dopamine = Math.max(0, Math.min(1, state.dopamine));
+  state.cortisol = Math.max(0, Math.min(1, state.cortisol));
+  state.serotonin = Math.max(0, Math.min(1, state.serotonin));
+  state.oxytocin = Math.max(0, Math.min(1, state.oxytocin));
 
   document.getElementById('dopBar').style.width = (state.dopamine * 100) + '%';
   document.getElementById('corBar').style.width = (state.cortisol * 100) + '%';
@@ -591,6 +601,102 @@ document.addEventListener('keydown', e => {
   if (e.key === ' ') { e.preventDefault(); togglePlay(); }
   if (e.key === 'c' || e.key === 'C') { if (confirm('Clear all memories?')) clearMemory(); }
 });
+
+// ── WebSocket to real CubeMind backend ────────────────────
+let ws = null;
+let wsConnected = false;
+
+function connectBackend() {
+  try {
+    ws = new WebSocket('ws://localhost:8765/ws');
+    ws.onopen = () => {
+      wsConnected = true;
+      document.getElementById('statusText').textContent = 'Connected to CubeMind backend';
+      document.getElementById('statusText').style.color = '#00ff88';
+    };
+    ws.onclose = () => {
+      wsConnected = false;
+      document.getElementById('statusText').style.color = '#00aaff';
+      setTimeout(connectBackend, 3000); // Reconnect
+    };
+    ws.onmessage = (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'state') {
+        const d = msg.data;
+        state.dopamine = d.dopamine;
+        state.cortisol = d.cortisol;
+        state.serotonin = d.serotonin;
+        state.oxytocin = d.oxytocin;
+        // Update bars immediately from real data
+        document.getElementById('dopBar').style.width = (d.dopamine * 100) + '%';
+        document.getElementById('corBar').style.width = (d.cortisol * 100) + '%';
+        document.getElementById('serBar').style.width = (d.serotonin * 100) + '%';
+        document.getElementById('oxyBar').style.width = (d.oxytocin * 100) + '%';
+        document.getElementById('dopVal').textContent = d.dopamine.toFixed(2);
+        document.getElementById('corVal').textContent = d.cortisol.toFixed(2);
+        document.getElementById('serVal').textContent = d.serotonin.toFixed(2);
+        document.getElementById('oxyVal').textContent = d.oxytocin.toFixed(2);
+        if (d.emotion) document.getElementById('emotionBadge').textContent = d.emotion;
+        if (d.concepts !== undefined) document.getElementById('conceptCount').textContent = d.concepts;
+        if (d.semantic_size !== undefined) document.getElementById('semCount').textContent = d.semantic_size;
+        if (d.episodic_size !== undefined) document.getElementById('epiCount').textContent = d.episodic_size;
+        if (d.spikes) {
+          d.spikes.forEach((s, i) => {
+            if (i < spikeCells.length)
+              spikeCells[i].className = s > 0 ? 'spike-cell active' : 'spike-cell';
+          });
+        }
+      } else if (msg.type === 'teach') {
+        const d = msg.data;
+        const item = document.createElement('div');
+        item.className = 'memory-item';
+        item.innerHTML = `${d.label} <span style="color:#666">(${d.emotion}, real)</span>`;
+        document.getElementById('memoryList').prepend(item);
+      } else if (msg.type === 'recall') {
+        let html = '';
+        msg.data.forEach(r => {
+          const color = r.similarity > 0.6 ? '#00ff88' : '#ffaa00';
+          html += `<div class="recall-result" style="background:#151520;border-left:3px solid ${color}">"${r.label}" sim=${r.similarity.toFixed(3)} [${r.memory}]</div>`;
+        });
+        document.getElementById('recallResults').innerHTML = html || '<div class="recall-result" style="background:#2a1a1a;border-left:3px solid #ff4466">No matches found</div>';
+      }
+    };
+    ws.onerror = () => {};
+  } catch(e) {}
+}
+
+// Try to connect on load (fails silently if no backend running)
+connectBackend();
+
+// Override teach/recall to use backend when connected
+const _origTeach = teachCurrent;
+teachCurrent = function() {
+  const label = document.getElementById('teachInput').value.trim();
+  if (!label) return;
+  if (wsConnected && ws) {
+    ws.send(JSON.stringify({ cmd: 'teach', label: label }));
+    document.getElementById('teachInput').value = '';
+    runDebate();
+    return;
+  }
+  _origTeach();
+};
+
+const _origRecall = recallCurrent;
+recallCurrent = function() {
+  if (wsConnected && ws) {
+    ws.send(JSON.stringify({ cmd: 'recall' }));
+    return;
+  }
+  _origRecall();
+};
+
+// Periodic state sync with backend
+setInterval(() => {
+  if (wsConnected && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ cmd: 'perceive' }));
+  }
+}, 500);
 
 // ── Main loop ─────────────────────────────────────────────
 function tick() {
