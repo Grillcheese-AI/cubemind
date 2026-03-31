@@ -1,4 +1,4 @@
-# Contrastive Inner Dialogue: Beyond Societies of Thought via Entropy-Gated Neuro-Vector Architectures
+# A Model That Argues With Itself: Contrastive Inner Dialogue Beyond Societies of Thought via Entropy-Gated Neuro-Vector Architectures
 
 **Authors:** Nicolas Cloutier (Grillcheese AI)
 **Target:** NeurIPS 2026 / AAAI 2027
