@@ -74,8 +74,18 @@ class MoQETorch(torch.nn.Module):
 
     def dequant_forward(self, x: torch.Tensor, w_int: torch.Tensor,
                         s: torch.Tensor) -> torch.Tensor:
-        """Dequantize int weights and apply linear transform."""
-        w = w_int * s
+        """Dequantize int weights and apply linear transform.
+
+        w_int: (out, in) int8 quantized weights
+        s: (out, n_blocks) per-block scales where n_blocks = in // block_size
+        """
+        out_dim, in_dim = w_int.shape
+        n_blocks = s.shape[1]
+        block_size = in_dim // n_blocks
+
+        # Expand scales: (out, n_blocks) → (out, n_blocks, block_size) → (out, in)
+        s_expanded = s.unsqueeze(-1).expand(-1, -1, block_size).reshape(out_dim, in_dim)
+        w = w_int.float() * s_expanded
         return x @ w.T
 
     def forward(self, input_ids: torch.Tensor):
@@ -84,8 +94,8 @@ class MoQETorch(torch.nn.Module):
 
         all_probs = []
         for i in range(self.n_layers):
-            # Router decision
-            router_logit = (x @ self.layers_router_w[i].unsqueeze(-1)).squeeze(-1)
+            # Router decision: element-wise dot then sum to scalar per token
+            router_logit = (x * self.layers_router_w[i]).sum(dim=-1)
             router_logit = router_logit + self.layers_router_b[i]
             prob_8bit = torch.sigmoid(router_logit)
 
