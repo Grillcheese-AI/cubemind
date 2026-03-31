@@ -1,14 +1,17 @@
-"""CubeMind API Server — WebSocket bridge between web demo and real Mind.
+"""CubeMind API Server — serves web demo + WebSocket bridge to real Mind.
 
-Runs a FastAPI/uvicorn server that exposes CubeMind's Mind class via
-WebSocket. The web demo connects and sends teach/recall/perceive commands.
+Single server that:
+  1. Serves the HTML dashboard at http://localhost:8765/
+  2. Exposes CubeMind's Mind class via WebSocket at ws://localhost:8765/ws
+  3. Serves static files (videos, images) from data/
+
 All data goes through the real VSA pipeline — no simulation.
 
 Usage:
     python scripts/api_server.py
     python scripts/api_server.py --port 8765
 
-Then open docs/demo/cubemind_live.html and it auto-connects to ws://localhost:8765
+Then open http://localhost:8765 in your browser.
 """
 
 from __future__ import annotations
@@ -24,10 +27,14 @@ import numpy as np
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi.responses import HTMLResponse, FileResponse
+    from fastapi.staticfiles import StaticFiles
     import uvicorn
     HAS_FASTAPI = True
 except ImportError:
     HAS_FASTAPI = False
+
+from pathlib import Path
 
 # CubeMind
 from cubemind.ops import BlockCodes
@@ -264,16 +271,51 @@ async def websocket_endpoint(ws: WebSocket):
 
 @app.get("/")
 def root():
-    return {"status": "CubeMind API running", "concepts": len(mind.concepts),
+    """Serve the web demo HTML."""
+    html_path = Path(__file__).resolve().parent.parent / "docs" / "demo" / "cubemind_live.html"
+    if html_path.exists():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>CubeMind API</h1><p>Demo HTML not found at docs/demo/cubemind_live.html</p>")
+
+
+@app.get("/api/status")
+def api_status():
+    """JSON status endpoint."""
+    return {"status": "running", "concepts": len(mind.concepts),
             "semantic": mind.semantic_memory.size,
             "episodic": mind.episodic_memory.size}
 
 
+@app.get("/data/{filename:path}")
+def serve_data(filename: str):
+    """Serve files from data/ directory (videos, images)."""
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    file_path = data_dir / filename
+    if file_path.exists() and file_path.is_file():
+        # Determine media type
+        suffix = file_path.suffix.lower()
+        media_types = {
+            ".mp4": "video/mp4", ".webm": "video/webm",
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".json": "application/json", ".npz": "application/octet-stream",
+        }
+        media_type = media_types.get(suffix, "application/octet-stream")
+        return FileResponse(str(file_path), media_type=media_type)
+    return HTMLResponse("<h1>404</h1><p>File not found</p>", status_code=404)
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="CubeMind API Server")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", type=str, default="0.0.0.0")
     args = parser.parse_args()
 
-    print(f"CubeMind API: ws://{args.host}:{args.port}/ws")
+    print("=" * 50)
+    print("  CubeMind Cognitive API Server")
+    print("=" * 50)
+    print(f"  Dashboard:  http://localhost:{args.port}/")
+    print(f"  WebSocket:  ws://localhost:{args.port}/ws")
+    print(f"  API Status: http://localhost:{args.port}/api/status")
+    print(f"  Videos:     http://localhost:{args.port}/data/bear.mp4")
+    print("=" * 50)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
