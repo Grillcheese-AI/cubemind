@@ -212,12 +212,18 @@ def run_srt_teacher(
         nc = snn.neurochemistry
         spike_rate = float(np.mean(spikes))
 
-        # Update neurochemistry from visual content
+        # Color perception — wavelength modulates neurochemistry
+        # (Roy et al., Cognitive Neurodynamics 2021)
+        from tests.test_color_perception import extract_color_stats, color_to_neurochemistry
+        color_stats = extract_color_stats(frame)
+        color_drive = color_to_neurochemistry(color_stats)
+
+        # Combine SNN spike-based novelty with color-driven signals
         nc.update(
-            novelty=spike_rate,
-            threat=float(np.clip(np.std(features) * 2 - 0.3, 0, 0.8)),
-            focus=0.3,
-            valence=float(np.clip(np.mean(features) - 0.4, -0.5, 0.5)),
+            novelty=max(spike_rate, color_drive["novelty"]),
+            threat=color_drive["threat"],
+            focus=color_drive["focus"],
+            valence=color_drive["valence"],
         )
 
         # Thalamus routing
@@ -287,6 +293,10 @@ def run_srt_teacher(
             "spike_rate": spike_rate,
             "route": route["primary_route"],
             "strategy": bg["strategy"],
+            "color_warmth": color_stats["warmth"],
+            "color_saturation": color_stats["saturation"],
+            "color_brightness": color_stats["brightness"],
+            "dominant_hue": color_stats["dominant_hue"],
         }
         log["timeline"].append(timeline_entry)
         log["entries_processed"] += 1
