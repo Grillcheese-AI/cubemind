@@ -1,4 +1,4 @@
-# CubeMind v3: Entropy-Gated Cognition, Geometric Debate, and Active Inference in Neuro-Vector-Symbolic Architectures
+# Contrastive Inner Dialogue: Beyond Societies of Thought via Entropy-Gated Neuro-Vector Architectures
 
 **Authors:** Nicolas Cloutier (Grillcheese AI)
 **Target:** NeurIPS 2026 / AAAI 2027
