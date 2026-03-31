@@ -11,3 +11,14 @@ cubemind_pipeline.html
 /tonote
 .claude/settings.local.json
 /docs/project_knowledge
+/data
+*.npz
+/docs/papers
+*.gguf
+*.npy
+ihl_expert_chunks.json
+ihl_purified_chunks.json
+vcpkg-configuration.json
+vcpkg.json
+docs/Medium_Article.md
+docs/distil_to_moqe.ipynb
