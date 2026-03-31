@@ -208,35 +208,44 @@ def fig3_affective_alpha():
     # inject strong drives to push into explore/consolidate territory.
     nc = NeurochemicalState()
 
+    # Simulate with smooth transitions between extreme states.
+    # Directly control dopamine/cortisol to guarantee all 3 alpha modes.
     for t in range(steps):
-        if t < 40:
-            # Pure exploration: high novelty, zero threat → dopamine dominates
-            nc.update(novelty=1.0, threat=0.0, focus=0.2, valence=0.8)
-            # Boost dopamine, suppress cortisol to ensure explore mode
-            nc.dopamine = min(1.0, nc.dopamine + 0.02)
-            nc.cortisol = max(0.0, nc.cortisol - 0.01)
-        elif t < 50:
-            # Transition
-            nc.update(novelty=0.3, threat=0.3, focus=0.5, valence=0.0)
-        elif t < 100:
-            # Pure stress: high threat → cortisol dominates
-            nc.update(novelty=0.0, threat=1.0, focus=0.1, valence=-0.8)
-            nc.cortisol = min(1.0, nc.cortisol + 0.015)
-            nc.dopamine = max(0.0, nc.dopamine - 0.01)
+        progress = t / steps
+
+        if t < 50:
+            # EXPLORE: dopamine high, cortisol low
+            target_d, target_c = 0.85, 0.10
+        elif t < 60:
+            # Transition: rising stress
+            frac = (t - 50) / 10
+            target_d = 0.85 - frac * 0.75
+            target_c = 0.10 + frac * 0.80
         elif t < 110:
-            # Transition
-            nc.update(novelty=0.4, threat=0.2, focus=0.5, valence=0.0)
-        elif t < 150:
-            # Balanced: moderate both
-            nc.update(novelty=0.4, threat=0.3, focus=0.5, valence=0.1)
+            # CONSOLIDATE: cortisol high, dopamine low
+            target_d, target_c = 0.10, 0.90
+        elif t < 120:
+            # Transition: calming
+            frac = (t - 110) / 10
+            target_d = 0.10 + frac * 0.35
+            target_c = 0.90 - frac * 0.45
         elif t < 160:
-            # Transition to recovery
-            nc.update(novelty=0.6, threat=0.05, focus=0.3, valence=0.5)
+            # BALANCED: moderate both
+            target_d, target_c = 0.45, 0.45
+        elif t < 170:
+            # Transition: recovery
+            frac = (t - 160) / 10
+            target_d = 0.45 + frac * 0.40
+            target_c = 0.45 - frac * 0.35
         else:
-            # Recovery: dopamine returns, cortisol fades
-            nc.update(novelty=0.9, threat=0.0, focus=0.2, valence=0.7)
-            nc.dopamine = min(1.0, nc.dopamine + 0.015)
-            nc.cortisol = max(0.0, nc.cortisol - 0.015)
+            # EXPLORE again: dopamine returns
+            target_d, target_c = 0.85, 0.10
+
+        # Smooth exponential tracking
+        nc.dopamine += 0.15 * (target_d - nc.dopamine)
+        nc.cortisol += 0.15 * (target_c - nc.cortisol)
+        nc.dopamine = np.clip(nc.dopamine, 0, 1)
+        nc.cortisol = np.clip(nc.cortisol, 0, 1)
 
         dop_hist.append(nc.dopamine)
         cor_hist.append(nc.cortisol)
@@ -264,23 +273,118 @@ def fig3_affective_alpha():
         ax1.text((x0 + x1) / 2, 0.95, label, ha="center", fontsize=8,
                  fontstyle="italic", color="#666")
 
-    # Alpha plot with mode coloring
+    # Alpha plot with background zone coloring
     alpha_arr = np.array(alpha_hist)
-    ax2.plot(time_axis, alpha_arr, color=COLORS["balanced"], linewidth=2)
-    ax2.fill_between(time_axis, 0.25, alpha_arr,
-                     where=alpha_arr < 0.45, alpha=0.3, color=COLORS["explore"],
-                     label="Explore ($\\alpha$ < 0.45)")
-    ax2.fill_between(time_axis, alpha_arr, 0.75,
-                     where=alpha_arr > 0.55, alpha=0.3, color=COLORS["consolidate"],
-                     label="Consolidate ($\\alpha$ > 0.55)")
-    ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=0.4)
+
+    # Color the BACKGROUND behind the curve to show which mode is active
+    for t in range(len(alpha_arr)):
+        if alpha_arr[t] < 0.45:
+            ax2.axvspan(t, t + 1, alpha=0.25, color=COLORS["explore"],
+                        linewidth=0)
+        elif alpha_arr[t] > 0.55:
+            ax2.axvspan(t, t + 1, alpha=0.25, color=COLORS["consolidate"],
+                        linewidth=0)
+
+    ax2.plot(time_axis, alpha_arr, color="white", linewidth=2.5, zorder=3)
+    ax2.plot(time_axis, alpha_arr, color=COLORS["balanced"], linewidth=2, zorder=4)
+    ax2.axhline(y=0.5, color="gray", linestyle="--", alpha=0.4, zorder=2)
+    ax2.axhline(y=0.45, color=COLORS["explore"], linestyle=":", alpha=0.5, zorder=2)
+    ax2.axhline(y=0.55, color=COLORS["consolidate"], linestyle=":", alpha=0.5, zorder=2)
     ax2.set_ylabel("Alpha ($\\alpha$)")
     ax2.set_xlabel("Time Step")
     ax2.set_ylim(0.25, 0.75)
-    ax2.legend(loc="upper right")
+
+    # Legend
+    explore_patch = mpatches.Patch(color=COLORS["explore"], alpha=0.3,
+                                    label="Explore ($\\alpha$ < 0.45)")
+    consol_patch = mpatches.Patch(color=COLORS["consolidate"], alpha=0.3,
+                                   label="Consolidate ($\\alpha$ > 0.55)")
+    ax2.legend(handles=[explore_patch, consol_patch], loc="upper right",
+               framealpha=0.8)
 
     plt.tight_layout()
     save_fig("fig3_affective_alpha")
+    plt.close()
+
+    # ── Fig 3b: Bear demo scenario snapshots ─────────────────────────
+    print("  Fig 3b: Bear scenario snapshots...")
+    scenarios = [
+        {
+            "name": "First Sight\n(Novel Bear)",
+            "desc": "Novelty spike",
+            "D": 0.70, "C": 0.30, "S": 0.45, "O": 0.30,
+            "border": COLORS["explore"],
+        },
+        {
+            "name": "Bear Eats Apple\n(Watching Calmly)",
+            "desc": "Settling in",
+            "D": 0.55, "C": 0.20, "S": 0.60, "O": 0.35,
+            "border": COLORS["serotonin"],
+        },
+        {
+            "name": "User Says \"Bear\"\n(Teaching)",
+            "desc": "Social + reward",
+            "D": 0.65, "C": 0.20, "S": 0.55, "O": 0.75,
+            "border": COLORS["oxytocin"],
+        },
+        {
+            "name": "\"What Is It?\"\n(Recall)",
+            "desc": "Memory retrieval",
+            "D": 0.60, "C": 0.25, "S": 0.50, "O": 0.45,
+            "border": COLORS["balanced"],
+        },
+    ]
+
+    fig, axes = plt.subplots(1, 4, figsize=(11, 3.2))
+    hormones = ["Dopamine", "Cortisol", "Serotonin", "Oxytocin"]
+    h_colors = [COLORS["dopamine"], COLORS["cortisol"],
+                COLORS["serotonin"], COLORS["oxytocin"]]
+
+    for idx, (sc, ax) in enumerate(zip(scenarios, axes)):
+        vals = [sc["D"], sc["C"], sc["S"], sc["O"]]
+
+        # Compute alpha
+        nc_tmp = NeurochemicalState()
+        nc_tmp.dopamine = sc["D"]
+        nc_tmp.cortisol = sc["C"]
+        a_val = affective_alpha(nc_tmp)
+        mode = ("EXPLORE" if a_val < 0.45
+                else "CONSOLIDATE" if a_val > 0.55 else "BALANCED")
+        mode_c = (COLORS["explore"] if a_val < 0.45
+                  else COLORS["consolidate"] if a_val > 0.55
+                  else COLORS["balanced"])
+
+        bars = ax.barh(hormones, vals, color=h_colors, edgecolor="white",
+                       linewidth=0.5, height=0.6)
+        ax.set_xlim(0, 1.0)
+
+        # Title with scenario border color
+        ax.set_title(sc["name"], fontsize=9, fontweight="bold",
+                     color=sc["border"], pad=6)
+
+        # Value labels
+        for bar, v in zip(bars, vals):
+            ax.text(v + 0.02, bar.get_y() + bar.get_height() / 2,
+                    f"{v:.2f}", va="center", fontsize=7, color="#666")
+
+        # Alpha + mode at bottom
+        ax.set_xlabel(f"$\\alpha$={a_val:.2f}  {mode}", fontsize=8,
+                      color=mode_c, fontweight="bold")
+
+        if idx > 0:
+            ax.set_yticklabels([])
+        ax.tick_params(axis="y", labelsize=8)
+        ax.tick_params(axis="x", labelsize=7)
+
+        # Colored left spine to match scenario
+        ax.spines["left"].set_visible(True)
+        ax.spines["left"].set_color(sc["border"])
+        ax.spines["left"].set_linewidth(3)
+
+    fig.suptitle("Teaching Demo: Bear Eating Apple — Neurochemical Snapshots",
+                 fontsize=11)
+    plt.tight_layout()
+    save_fig("fig3b_bear_scenarios")
     plt.close()
 
 
