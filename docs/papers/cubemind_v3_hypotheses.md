@@ -304,21 +304,47 @@ All three hypotheses were implemented as standalone test modules with zero modif
 
 NVSA [Hersche et al., 2023] demonstrated that probabilistic hyper-dimensional operations solve Raven's Progressive Matrices 100x faster than neuro-symbolic search [11]. RESOLVE [IEEE Access, 2026] extended this with bipolar attention for relational tasks [13]. CubeMind v2 advances both with integrated SNN perception, neurochemical modulation, and MoQE inference [10].
 
-### 8.2 Society of Thought
+Recent work has expanded VSA applications well beyond abstract reasoning. VSA-based probabilistic occupancy grid mapping [33] demonstrates real-time robotic perception using hypervector encoding of spatial occupancy — directly paralleling our SpatialEncoder's fractional power binding for 4D locations. Cumbo et al. [34] provide a practical guide for deploying VSA in biomedical applications, validating our JSON-to-VSA encoder approach for structured clinical records. McMenemy's OpenMem [35] builds persistent neuro-symbolic memory for LLM agents using HDC, addressing the same context window limitations our ContinuousItemMemory solves — though our experiential encoder adds temporal, affective, and circadian dimensions that OpenMem lacks.
+
+### 8.2 Society of Thought and Graph Reasoning
 
 Google Research [21] showed that reasoning models spontaneously simulate multi-agent interactions. Our HD-GoT achieves this geometrically in O(N^2 * k * l) — estimated 20,000x faster than linguistic debate.
 
-### 8.3 Active Inference
+This approach is validated by concurrent work on reasoning topology. Huang et al.'s Network-of-Thought [38] proves that graph topology — not just content — determines reasoning quality on complex tasks. Different topologies (star, tree, mesh) outperform linear chains on different task types. HD-GoT implements this insight natively: spike diffusion centrality IS the topology computation, and the VS-Graph structure naturally adapts to problem structure.
 
-The Free Energy Principle [Friston, 2010; 25, 26, 27] formulates perception as prediction error minimization. Our VSA-HMM implementation provides the first discrete, algebraic realization of Expected Free Energy using transition matrix divergence.
+The Graph-Theoretic Agreement Framework [39] formalizes multi-agent consensus via graph centrality — exactly what HD-GoT does, but they require multiple LLM API calls while we use VSA cosine similarity. The Panoptic Thinking architecture [MatterAI, 2026] proposes graph-orchestrated global reasoning for autonomous systems with a "graph aggregator resolving conflicts" — our spike diffusion + OR-based message passing implements this aggregation algebraically.
 
-### 8.4 Holographic Invariant Storage
+Graph-Native Cognitive Memory [40] proposes versioned graph memory with formal belief revision for AI agents. Our experiential encoder + VS-Graph could implement this: MBAT orthogonal binding provides versioning (different temporal bindings = different versions), while the VS-Graph provides the relational structure.
+
+### 8.3 Neurochemical Modulation
+
+Our affective alpha modulation finds strong biological support in recent neuroscience. Bhatt et al. [36] demonstrate that noradrenaline causes a "spread of association" in the hippocampal cognitive map — high noradrenaline broadens pattern completion, recruiting more distant memories. This is precisely our mechanism: high dopamine (the noradrenaline analog for exploration) lowers alpha, causing VS-Graph nodes to integrate more neighbor information (broader association). The mathematical formulation `alpha = 0.3 + 0.4 * (cortisol / (dopamine + cortisol))` produces the same qualitative dynamics observed in biological hippocampal recordings.
+
+Bhagat et al. [37] show that acetylcholine demixes heterogeneous dopamine signals for learning versus movement in the basal ganglia. This suggests a natural extension: adding acetylcholine as a 5th hormone to our ODE system would allow CubeMind to separate dopamine's role in STDP learning rate modulation from its role in BasalGanglia action selection — currently conflated in our architecture.
+
+The Limbic-Cortex Hybrid Architecture [42] proposes separating emotional (limbic) from rational (cortex) processing in RL agents, with the limbic system modulating reward signals. CubeMind already implements this separation: the 4-hormone ODE is the limbic system, the Thalamus/BasalGanglia is the cortex, and the affective alpha bridges them.
+
+### 8.4 Active Inference
+
+The Free Energy Principle [Friston, 2010; 25, 26, 27] formulates perception as prediction error minimization. Namjoshi's "Fundamentals of Active Inference" [43] — the first comprehensive textbook on the topic (March 2026) — formalizes EFE minimization, policy selection, and implementation in artificial systems. Our VSA-HMM implementation provides the first discrete, algebraic realization of Expected Free Energy using transition matrix divergence.
+
+Kowalski's Tripartite AGI Architecture [2026] proposes three interacting subsystems: reactive (System 1), deliberative (System 2), and meta-cognitive (monitoring). CubeMind maps directly: SNN perception = reactive, HD-GoT debate = deliberative, Active Inference EFE monitoring = meta-cognitive. Our EFE threshold triggering "explore" vs "predict" IS the meta-cognitive mode switch that Kowalski theorizes.
+
+### 8.5 Holographic Invariant Storage
 
 HIS [19, 28] provides closed-form safety guarantees via VSA invariant bundling. Our ensemble divergence metric provides a natural monitoring signal for invariant drift.
 
-### 8.5 Probabilistic Logic Acceleration
+### 8.6 MoE Quantization
+
+DeepSpeed's Mixture-of-Quantization (MoQ) [41] schedules data precisions across training, progressively quantizing as training stabilizes. Our MoQE takes a different approach: instead of temporal scheduling, we route tokens to different precision levels based on learned complexity via the entropy-gated Gumbel-Softmax router. NVIDIA's W4A8 mixed precision for MoE experts [TensorRT-LLM, 2026] and vLLM's MXFP4 W4A4 MoE kernels [2026] confirm that per-expert mixed precision is production-viable — validating our INT4/INT8 dual-expert architecture.
+
+### 8.7 Probabilistic Logic Acceleration
 
 REASON [29] achieves 12-50x speedup via DAG pruning of probabilistic logic trees. Our entropy-gated router implements a related principle: prune low-entropy tokens to cheap compute (4-bit), route high-entropy tokens to deep compute (8-bit).
+
+### 8.8 Wearable Intelligence
+
+Recent advances in intelligent wearable systems [44] survey biomechanical feature extraction for motion intent prediction, identifying the gap between raw sensor data and intelligent on-device prediction. Our experiential memory wearable concept (Section 9.5) fills this gap with VSA-based similarity-preserving compression — encoding physiological signals as MBAT-bound vectors searchable via Hamming distance on a $1.50 ARM Cortex-M0.
 
 ---
 
@@ -392,3 +418,15 @@ All components run on a single AMD RX 6750 XT (12GB) via grilly's Vulkan compute
 [30] Moulder, R. et al. "Transition Matrices for Measuring Emotion Regulation Strategy Diversity." CU Boulder, 2026. Demonstrates that transition matrix stability/spread metrics predict emotion regulation flexibility in humans — the same mathematical structure used in our HMM ensemble divergence for Expected Free Energy computation.
 [31] Hartmann, M., Lenggenhager, B., & Stocker, K. "Happiness feels light, sadness feels heavy: Introducing valence-related bodily sensation maps of emotions." Preprint, 2021. Demonstrates that emotions encode along two independent bodily dimensions — activation and valence-as-weight (lightness/heaviness). Both required for accurate emotion classification. Grounds our affective alpha modulation in empirical neuroscience: cortisol→heaviness→high alpha (consolidation) parallels bodily heaviness in negative emotions; dopamine→lightness→low alpha (exploration) parallels bodily lightness in positive emotions.
 [32] Gallant, S. I. "Orthogonal Matrices for MBAT Vector Symbolic Architectures, and a 'Soft' VSA Representation for JSON." arXiv:2202.04771, 2022. Proves orthogonal binding matrices fix magnitude instability in deeply nested structures (||MV|| = ||V||). Demonstrates JSON-to-VSA encoding via MBAT with thermometer coding for numerical similarity preservation. Grounds our experiential encoder's structured binding and JSON-to-vector future work.
+[33] "Brain Inspired Probabilistic Occupancy Grid Mapping with Vector Symbolic Architectures." Nature npj Unconventional Computing, March 2026. VSA-based OGM for real-time robotics — hypervector encoding of spatial occupancy with energy efficiency orders of magnitude below GPU alternatives.
+[34] Cumbo, F. et al. "Designing Vector-Symbolic Architectures for Biomedical Applications: Ten Tips and Common Pitfalls." PeerJ Computer Science, March 2026. Practical guide for VSA in healthcare covering encoding strategies, similarity search, and high-dimensional clinical feature spaces.
+[35] McMenemy, R. "OpenMem: Building a Persistent Neuro-Symbolic Memory Layer for LLM Agents with Hyperdimensional Computing." Medium, March 2026. HDC/VSA persistent memory for LLM agents addressing context window limitations.
+[36] Bhatt, D. et al. "Noradrenaline Causes a Spread of Association in the Hippocampal Cognitive Map." Nature Communications, March 2026. Demonstrates noradrenaline broadens pattern completion in hippocampus — validates our affective alpha: high dopamine → low alpha → broader neighbor influence.
+[37] Bhagat, A. et al. "Acetylcholine Demixes Heterogeneous Dopamine Signals for Learning and Moving." Nature Neuroscience, March 2026. ACh separates dopamine's dual role in learning vs. action — suggests 5th hormone for CubeMind's ODE system.
+[38] Huang, F. "Reasoning Topology Matters: Network-of-Thought for Complex Reasoning Tasks." arXiv:2603.20730, March 2026. Proves graph topology determines reasoning quality; different topologies outperform chains on different tasks. HD-GoT implements this natively via spike diffusion.
+[39] "Graph-Theoretic Agreement Framework for Multi-agent LLM Systems." UBOS, March 2026. Formal graph-centrality framework for multi-agent consensus — same structure as HD-GoT but requiring LLM API calls instead of VSA operations.
+[40] "Graph-Native Cognitive Memory for AI Agents: Formal Belief Revision Semantics for Versioned Memory Architectures." alphaXiv:2603.17244, March 2026. Graph-structured versioned memory with belief revision — implementable via our MBAT temporal binding + VS-Graph.
+[41] "DeepSpeed Mixture-of-Quantization (MoQ)." DeepSpeed, 2026. Temporal precision scheduling during QAT — contrast with our spatial routing approach (per-token precision via entropy-gated Gumbel-Softmax).
+[42] "Limbic-Cortex Hybrid Architecture: Where Biological Neuroscience Meets Deep Reinforcement Learning." HackerNoon, March 2026. Separates emotional (limbic) from rational (cortex) processing — CubeMind already implements this with 4-hormone ODE + Thalamus/BasalGanglia.
+[43] Namjoshi, S. V. "Fundamentals of Active Inference: Principles, Algorithms, and Applications." 2026. First comprehensive textbook on active inference — reference for our VSA-HMM EFE implementation.
+[44] "Recent Advances in Intelligent Wearable Systems: From Multiscale Biomechanical Features Towards Human Motion Intent Prediction." Nature npj AI, March 2026. Identifies gap between sensor data and intelligent prediction that our MBAT experiential encoder fills.
