@@ -310,28 +310,28 @@ def fig3_affective_alpha():
     print("  Fig 3b: Bear scenario snapshots...")
     scenarios = [
         {
-            "name": "Bear in Bushes\n(Sudden Encounter)",
-            "desc": "t=5s: close-up, novelty + mild startle",
-            "D": 0.75, "C": 0.40, "S": 0.40, "O": 0.25,
+            "name": "Bear vs Wolves\n(1:43 Yellowstone)",
+            "desc": "Wolves approach bear's prey — tense standoff",
+            "D": 0.55, "C": 0.70, "S": 0.30, "O": 0.15,
+            "border": COLORS["consolidate"],
+        },
+        {
+            "name": "Bear Catches Salmon\n(7:30 River)",
+            "desc": "Skillful fishing — focused and rewarded",
+            "D": 0.75, "C": 0.20, "S": 0.55, "O": 0.30,
             "border": COLORS["explore"],
         },
         {
-            "name": "Bison Herd\n(Calm Landscape)",
-            "desc": "t=30s: wide shot, peaceful observation",
-            "D": 0.45, "C": 0.15, "S": 0.65, "O": 0.40,
-            "border": COLORS["serotonin"],
-        },
-        {
-            "name": "Bison Close-Up\n(Gentle Creature)",
-            "desc": "t=180s: intimate face, empathy",
-            "D": 0.50, "C": 0.10, "S": 0.60, "O": 0.70,
+            "name": "Mother + Cubs\n(8:50 Stream)",
+            "desc": "Bear shares catch with two cubs",
+            "D": 0.55, "C": 0.15, "S": 0.65, "O": 0.80,
             "border": COLORS["oxytocin"],
         },
         {
-            "name": "Bear in Snow\n(New Scene)",
-            "desc": "t=300s: scene change, re-engagement",
-            "D": 0.70, "C": 0.30, "S": 0.50, "O": 0.35,
-            "border": COLORS["explore"],
+            "name": "Bear Chases Elk\n(10:30 Plains)",
+            "desc": "High-speed pursuit across grasslands",
+            "D": 0.80, "C": 0.60, "S": 0.25, "O": 0.10,
+            "border": COLORS["highlight"],
         },
     ]
 
@@ -381,7 +381,7 @@ def fig3_affective_alpha():
         ax.spines["left"].set_color(sc["border"])
         ax.spines["left"].set_linewidth(3)
 
-    fig.suptitle("Wildlife Documentary: Neurochemical Response to Scene Changes",
+    fig.suptitle("Wildlife Documentary: Neurochemical Response Across Scenes",
                  fontsize=11)
     plt.tight_layout()
     save_fig("fig3b_bear_scenarios")
