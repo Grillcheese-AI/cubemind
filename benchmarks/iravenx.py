@@ -128,6 +128,7 @@ def generate_iravenx_data(
     maxval: int = 50,
     n_problems: int = 1000,
     seed: int = 1234,
+    n_confounders: int = 0,
     save_dir: str | Path | None = None,
 ) -> dict:
     """Generate I-RAVEN-X problems in-process using the IBM generation code.
@@ -159,8 +160,8 @@ def generate_iravenx_data(
         )
 
     logger.info(
-        "Generating %d I-RAVEN-X problems (n=%d, maxval=%d, seed=%d)",
-        n_problems, n, maxval, seed,
+        "Generating %d I-RAVEN-X problems (n=%d, maxval=%d, seed=%d, confounders=%d)",
+        n_problems, n, maxval, seed, n_confounders,
     )
 
     iravenx_task.set_seeds(seed)
@@ -168,9 +169,13 @@ def generate_iravenx_data(
     t0 = time.perf_counter()
     samples = {}
     for i in range(n_problems):
-        samples[str(i)] = iravenx_task.get_sample(
+        sample = iravenx_task.get_sample(
             n, maxval, rule="", arithmetic_strategy="shuffle"
         )
+        # Add confounders (random noise attributes) if requested
+        if n_confounders > 0:
+            sample = iravenx_task.add_confounder(sample, n, maxval, n_confounders)
+        samples[str(i)] = sample
     elapsed = time.perf_counter() - t0
 
     logger.info("Generated %d problems in %.1fs", n_problems, elapsed)
@@ -398,6 +403,7 @@ def run_iravenx_benchmark(
     data_dir: str | Path | None = None,
     save_dir: str | Path | None = None,
     seed: int = 1234,
+    n_confounders: int = 0,
 ) -> dict:
     """Run the I-RAVEN-X benchmark across difficulty levels.
 
@@ -411,6 +417,7 @@ def run_iravenx_benchmark(
         data_dir: Directory with pre-generated JSON files (skips generation).
         save_dir: Directory to save generated data (only if generating).
         seed: Random seed.
+        n_confounders: Number of confounder attributes (0=none, 10=max).
 
     Returns:
         Dict with overall results and per-configuration breakdowns.
@@ -454,6 +461,7 @@ def run_iravenx_benchmark(
                     maxval=maxval,
                     n_problems=n_problems,
                     seed=seed,
+                    n_confounders=n_confounders,
                     save_dir=save_dir,
                 )
                 data_source = "generated"
@@ -678,6 +686,12 @@ examples:
         help="Random seed (default: 1234)",
     )
     parser.add_argument(
+        "--confounders",
+        type=int,
+        default=0,
+        help="Number of confounder attributes (0=none, 10=max difficulty)",
+    )
+    parser.add_argument(
         "--json-output",
         type=str,
         default=None,
@@ -702,6 +716,7 @@ examples:
         data_dir=args.data_dir,
         save_dir=args.save_dir,
         seed=args.seed,
+        n_confounders=args.confounders,
     )
 
     print_results(results)
