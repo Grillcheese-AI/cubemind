@@ -27,3 +27,5 @@ vcpkg-configuration.json
 vcpkg.json
 ihl_expert_chunks.json
 ihl_purified_chunks.json
+/docs/papers
+docs/Medium_Article.md
