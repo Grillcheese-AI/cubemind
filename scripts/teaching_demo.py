@@ -42,6 +42,7 @@ from cubemind.ops.vsa_bridge import (
 )
 from cubemind.experimental.affective_graph import affective_alpha
 from cubemind.perception.experiential import ExperientialEncoder
+from cubemind.perception.bio_vision import BioVisionEncoder
 
 # Optional: microphone + audio encoder
 _HAS_MIC = False
@@ -90,8 +91,12 @@ class TeachingMind:
         self.d_vsa = d_vsa
         self.bc = BlockCodes(k=8, l=64)
 
+        # Biological vision (starts as baby brain)
+        self.bio_vision = BioVisionEncoder(
+            grid_h=8, grid_w=13, n_directions=8, maturity=0.2)
+
         self.snn = SNNEncoder(
-            d_input=104, n_neurons=128, d_vsa=d_vsa,
+            d_input=self.bio_vision.d_features, n_neurons=128, d_vsa=d_vsa,
             neuron_type="lif", tau=15.0, v_threshold=0.08, seed=seed)
         self.snn.stdp_lr_potentiate = 0.0002
 
@@ -177,26 +182,36 @@ class TeachingMind:
                 result["audio_bound"] = False
         return result
 
-    def _frame_features(self, frame: np.ndarray) -> np.ndarray:
-        """Extract features from a frame."""
-        small = cv2.resize(frame, (13, 8))
-        if small.ndim == 3:
-            gray = np.mean(small.astype(np.float32), axis=2) / 255.0
-        else:
-            gray = small.astype(np.float32) / 255.0
-        grid = gray.ravel()
-        features = np.zeros(104, dtype=np.float32)
-        features[:len(grid)] = grid[:104]
-        return features
-
     def perceive(self, frame: np.ndarray) -> dict:
-        """Run perception pipeline on a frame."""
-        features = self._frame_features(frame)
-        snn_result = self.snn.encode_temporal(features)
-        nc = self.snn.neurochemistry
+        """Run biological vision + SNN perception pipeline."""
+        # Bio vision: opponent-color + motion + luminance
+        features = self.bio_vision.process(frame)
+        feat_norm = features / (np.std(features) + 1e-6) * 0.3
 
+        # SNN spikes
+        spikes = self.snn.step(feat_norm)
+        nc = self.snn.neurochemistry
+        spike_rate = float(np.mean(spikes))
+
+        # Color-driven neurochemistry (Roy et al. 2021)
+        from tests.test_color_perception import (
+            extract_color_stats, color_to_neurochemistry)
+        color_stats = extract_color_stats(frame)
+        color_drive = color_to_neurochemistry(color_stats)
+        nc.update(
+            novelty=max(spike_rate, color_drive["novelty"]),
+            threat=color_drive["threat"],
+            focus=color_drive["focus"],
+            valence=color_drive["valence"],
+        )
+
+        # Developmental growth
+        self.bio_vision.grow(delta=0.0005)
+
+        # Thalamus routing
         embed = np.zeros(self.d_model, dtype=np.float32)
-        embed[:min(104, self.d_model)] = features[:min(104, self.d_model)]
+        n_copy = min(len(features), self.d_model)
+        embed[:n_copy] = features[:n_copy]
 
         route = self.thalamus.route(embed, arousal=nc.arousal,
                                      valence=getattr(nc, 'valence', 0.0))
@@ -205,11 +220,13 @@ class TeachingMind:
         return {
             "features": features,
             "embed": embed,
-            "spikes": snn_result["spikes"],
-            "spike_rate": float(np.mean(snn_result["spikes"])),
+            "spikes": spikes,
+            "spike_rate": spike_rate,
             "nc": nc,
             "route": route,
             "alpha": alpha,
+            "maturity": self.bio_vision.maturity,
+            "color": color_stats,
         }
 
     def teach(self, frame: np.ndarray, label: str) -> dict:
@@ -449,6 +466,9 @@ def main():
         mode_color = (50, 255, 50) if alpha < 0.45 else (50, 100, 255) if alpha > 0.55 else (180, 180, 180)
         draw_text(dash, px + 180, 70, f"a={alpha:.2f} {mode}", mode_color, 0.35)
         draw_text(dash, px + 180, 90, f"Route: {perc['route']['primary_route']}", (180, 180, 180), 0.35)
+        mat = perc.get('maturity', 0.2)
+        mat_color = (int(50 + 200 * mat), int(255 * mat), int(50 + 100 * mat))
+        draw_text(dash, px + 180, 110, f"Brain: {mat*100:.0f}% mature", mat_color, 0.35)
 
         # Memory status
         draw_box(dash, px, 140, W - px - 10, 80, "MEMORY")

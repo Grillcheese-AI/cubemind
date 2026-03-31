@@ -41,6 +41,7 @@ from cubemind.ops.vsa_bridge import (
 )
 from cubemind.experimental.affective_graph import affective_alpha
 from cubemind.perception.experiential import ExperientialEncoder
+from cubemind.perception.bio_vision import BioVisionEncoder
 
 
 # ── SRT Parser ───────────────────────────────────────────────────────
@@ -156,13 +157,17 @@ def run_srt_teacher(
     if verbose:
         print(f"Video: {video_path} ({duration:.1f}s, {fps:.1f}fps)")
 
-    # Init CubeMind
+    # Init CubeMind with biological vision
     d_model = 256
     d_vsa = 2048
     bc = BlockCodes(k=8, l=64)
 
+    bio_vision = BioVisionEncoder(grid_h=8, grid_w=13, n_directions=8,
+                                   maturity=0.2)  # Start as baby brain
+    d_input = bio_vision.d_features
+
     snn = SNNEncoder(
-        d_input=104, n_neurons=128, d_vsa=d_vsa,
+        d_input=d_input, n_neurons=128, d_vsa=d_vsa,
         neuron_type="lif", tau=15.0, v_threshold=0.08, seed=42)
     snn.stdp_lr_potentiate = 0.0002
 
@@ -199,21 +204,16 @@ def run_srt_teacher(
         if not ret:
             continue
 
-        # Extract visual features
-        small = cv2.resize(frame, (13, 8))
-        gray = np.mean(small.astype(np.float32), axis=2) / 255.0
-        grid = gray.ravel()
-        features = np.zeros(104, dtype=np.float32)
-        features[:len(grid)] = grid[:104]
-
-        # SNN perception — neurochemistry reacts naturally
+        # Biological vision: opponent-color + motion + luminance
+        features = bio_vision.process(frame)
         feat_norm = features / (np.std(features) + 1e-6) * 0.3
+
+        # SNN perception — neurochemistry reacts to bio vision features
         spikes = snn.step(feat_norm)
         nc = snn.neurochemistry
         spike_rate = float(np.mean(spikes))
 
         # Color perception — wavelength modulates neurochemistry
-        # (Roy et al., Cognitive Neurodynamics 2021)
         from tests.test_color_perception import extract_color_stats, color_to_neurochemistry
         color_stats = extract_color_stats(frame)
         color_drive = color_to_neurochemistry(color_stats)
@@ -226,9 +226,13 @@ def run_srt_teacher(
             valence=color_drive["valence"],
         )
 
+        # Developmental growth: STDP pruning sharpens tuning over time
+        bio_vision.grow(delta=0.001)
+
         # Thalamus routing
         embed = np.zeros(d_model, dtype=np.float32)
-        embed[:min(104, d_model)] = features[:min(104, d_model)]
+        n_copy = min(len(features), d_model)
+        embed[:n_copy] = features[:n_copy]
         route = thalamus.route(embed, arousal=nc.arousal,
                                valence=getattr(nc, "valence", 0.0))
 
@@ -297,6 +301,7 @@ def run_srt_teacher(
             "color_saturation": color_stats["saturation"],
             "color_brightness": color_stats["brightness"],
             "dominant_hue": color_stats["dominant_hue"],
+            "maturity": float(bio_vision.maturity),
         }
         log["timeline"].append(timeline_entry)
         log["entries_processed"] += 1
