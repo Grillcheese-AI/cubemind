@@ -222,15 +222,29 @@ def run_srt_teacher(
         nc = snn.neurochemistry
         spike_rate = float(np.mean(spikes))
 
-        # 4. Neurochemistry: fuse ALL signals simultaneously
+        # 4. Novel concept detection: first-seen keywords spike dopamine
+        novel_concepts = [kw for kw in keywords if kw not in log["concepts_learned"]]
+        concept_novelty = min(1.0, len(novel_concepts) * 0.3) if novel_concepts else 0.0
+
+        # 5. Neurochemistry: fuse ALL signals simultaneously
+        fused_novelty = max(spike_rate, color_drive["novelty"], concept_novelty)
+
+        # Serotonin-curiosity coupling: high serotonin + novel input = explore boost
+        # (calm state + surprise = heightened receptivity, not suppression)
+        if nc.serotonin > 0.6 and fused_novelty > 0.2:
+            fused_novelty = min(1.0, fused_novelty + nc.serotonin * 0.15)
+
         nc.update(
-            novelty=max(spike_rate, color_drive["novelty"]),
+            novelty=fused_novelty,
             threat=color_drive["threat"],
             focus=color_drive["focus"],
             valence=color_drive["valence"],
         )
 
-        # 5. Developmental growth: STDP pruning sharpens tuning
+        # Dopamine floor: prevent total habituation (biological minimum)
+        nc.dopamine = max(nc.dopamine, 0.15)
+
+        # 6. Developmental growth: STDP pruning sharpens tuning
         bio_vision.grow(delta=0.001)
 
         # Thalamus routing
@@ -306,6 +320,8 @@ def run_srt_teacher(
             "color_brightness": color_stats["brightness"],
             "dominant_hue": color_stats["dominant_hue"],
             "maturity": float(bio_vision.maturity),
+            "novel_concepts": novel_concepts,
+            "concept_novelty": concept_novelty,
         }
         log["timeline"].append(timeline_entry)
         log["entries_processed"] += 1
