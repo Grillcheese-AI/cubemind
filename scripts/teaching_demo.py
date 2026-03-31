@@ -194,7 +194,7 @@ class TeachingMind:
         spike_rate = float(np.mean(spikes))
 
         # Color-driven neurochemistry (Roy et al. 2021)
-        from tests.test_color_perception import (
+        from cubemind.perception.color import (
             extract_color_stats, color_to_neurochemistry)
         color_stats = extract_color_stats(frame)
         color_drive = color_to_neurochemistry(color_stats)
