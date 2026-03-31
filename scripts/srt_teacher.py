@@ -237,9 +237,10 @@ def run_srt_teacher(
         nc = snn.neurochemistry
         spike_rate = float(np.mean(spikes))
 
-        # 4. Novel concept detection: first-seen keywords spike dopamine
-        novel_concepts = [kw for kw in keywords if kw not in log["concepts_learned"]]
-        concept_novelty = min(1.0, len(novel_concepts) * 0.3) if novel_concepts else 0.0
+        # 4. Novel utterance detection: first-heard subtitle spikes dopamine
+        utterance = entry.text.strip().lower()
+        is_novel_utterance = utterance not in log["concepts_learned"]
+        concept_novelty = 0.5 if is_novel_utterance else 0.0
 
         # 5. Neurochemistry: fuse ALL signals simultaneously
         fused_novelty = max(spike_rate, color_drive["novelty"], concept_novelty)
@@ -289,38 +290,39 @@ def run_srt_teacher(
             hour=now.hour, day_of_week=now.weekday(),
             season=seasons[now.month - 1], neurochemistry=nc)
 
-        # Familiarity detection: repeated concepts boost oxytocin, reduce novelty
-        familiar_concepts = [kw for kw in keywords if kw in log["concepts_learned"]]
-        if familiar_concepts:
-            familiarity = min(1.0, len(familiar_concepts) * 0.15)
-            nc.oxytocin = min(1.0, nc.oxytocin + familiarity * 0.1)  # Recognition warmth
-            nc.dopamine = max(nc.dopamine - familiarity * 0.05, 0.15)  # Less surprising
+        # Familiarity detection: heard this before → oxytocin, less novelty
+        if not is_novel_utterance:
+            nc.oxytocin = min(1.0, nc.oxytocin + 0.1)   # Recognition warmth
+            nc.dopamine = max(nc.dopamine - 0.03, 0.15)  # Less surprising
 
-        # Teach each keyword — bind visual + text + emotion
-        for keyword in keywords:
-            vis_feat = embed[:lsh.d_input]
-            if len(vis_feat) < lsh.d_input:
-                vis_feat = np.pad(vis_feat, (0, lsh.d_input - len(vis_feat)))
+        # Bind experience holistically: visual + full utterance + emotion
+        # No keyword parsing — the whole subtitle is ONE audio memory,
+        # bound with what the system sees and feels at that moment.
+        # Like a baby hearing speech: the sound pattern IS the label.
+        vis_feat = embed[:lsh.d_input]
+        if len(vis_feat) < lsh.d_input:
+            vis_feat = np.pad(vis_feat, (0, lsh.d_input - len(vis_feat)))
 
-            rng = np.random.default_rng(hash(keyword) % (2**31))
-            text_feat = rng.standard_normal(lsh.d_input).astype(np.float32) * 0.1
+        rng = np.random.default_rng(hash(utterance) % (2**31))
+        audio_feat = rng.standard_normal(lsh.d_input).astype(np.float32) * 0.1
 
-            vis_packed = binarize_and_pack(lsh.project(vis_feat))
-            text_packed = binarize_and_pack(lsh.project(text_feat))
-            concept = np.bitwise_xor(vis_packed, text_packed)
+        vis_packed = binarize_and_pack(lsh.project(vis_feat))
+        audio_packed = binarize_and_pack(lsh.project(audio_feat))
+        experience = np.bitwise_xor(vis_packed, audio_packed)
 
-            semantic_memory.learn(concept, label=keyword)
-            episodic_memory.learn(vis_packed, label=f"vision:{keyword}")
+        # Store in both memories — one experience, not parsed fragments
+        semantic_memory.learn(experience, label=utterance)
+        episodic_memory.learn(vis_packed, label=f"saw:{utterance[:40]}")
 
-            if keyword not in log["concepts_learned"]:
-                log["concepts_learned"][keyword] = {
-                    "count": 0,
-                    "first_seen": mid_time,
-                    "emotions": [],
-                }
-            log["concepts_learned"][keyword]["count"] += 1
-            log["concepts_learned"][keyword]["emotions"].append(
-                nc.dominant_emotion)
+        if utterance not in log["concepts_learned"]:
+            log["concepts_learned"][utterance] = {
+                "count": 0,
+                "first_heard": mid_time,
+                "emotions": [],
+            }
+        log["concepts_learned"][utterance]["count"] += 1
+        log["concepts_learned"][utterance]["emotions"].append(
+            nc.dominant_emotion)
 
         # Record timeline entry
         timeline_entry = {
@@ -342,17 +344,19 @@ def run_srt_teacher(
             "color_brightness": color_stats["brightness"],
             "dominant_hue": color_stats["dominant_hue"],
             "maturity": float(bio_vision.maturity),
-            "novel_concepts": novel_concepts,
+            "utterance": utterance,
+            "is_novel": is_novel_utterance,
             "concept_novelty": concept_novelty,
         }
         log["timeline"].append(timeline_entry)
         log["entries_processed"] += 1
 
         if verbose and (i + 1) % 10 == 0:
+            novel_tag = " NEW" if is_novel_utterance else ""
             print(f"  [{i+1:>4}/{len(entries)}] t={mid_time:>6.1f}s "
                   f"| {nc.dominant_emotion:<8} | a={alpha:.2f} "
                   f"| D={nc.dopamine:.2f} C={nc.cortisol:.2f} "
-                  f"| {', '.join(keywords[:3])}")
+                  f"| \"{utterance[:35]}\"{novel_tag}")
 
     cap.release()
     elapsed = time.time() - t0
@@ -375,17 +379,18 @@ def run_srt_teacher(
         print(f"  Time:      {elapsed:.1f}s")
         print()
 
-        # Top concepts by frequency
-        sorted_concepts = sorted(
+        # Top experiences by frequency
+        sorted_exp = sorted(
             log["concepts_learned"].items(),
-            key=lambda x: -x[1]["count"])[:15]
-        print("  Top concepts learned:")
-        for concept, info in sorted_concepts:
-            # Most common emotion for this concept
+            key=lambda x: -x[1]["count"])[:10]
+        print("  Top experiences learned:")
+        for utterance, info in sorted_exp:
             emotions = info["emotions"]
             dominant = max(set(emotions), key=emotions.count) if emotions else "?"
-            print(f"    {concept:<20} x{info['count']:<3} "
-                  f"({dominant}, first at {info['first_seen']:.0f}s)")
+            first = info.get("first_heard", info.get("first_seen", 0))
+            display = utterance[:50] + "..." if len(utterance) > 50 else utterance
+            print(f"    \"{display}\" x{info['count']} "
+                  f"({dominant}, first at {first:.0f}s)")
 
         # Emotion distribution
         all_emotions = [t["emotion"] for t in log["timeline"]]
