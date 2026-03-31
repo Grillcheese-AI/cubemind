@@ -188,6 +188,21 @@ def run_srt_teacher(
         "timeline": [],
     }
 
+    # Load previous memory if exists (repeated experience)
+    memory_path = (save_path.replace(".json", "_memory.npz")
+                   if save_path else None)
+    if memory_path and os.path.exists(memory_path):
+        prev_mem = np.load(memory_path, allow_pickle=True)
+        bio_vision.maturity = float(prev_mem["maturity"])
+        bio_vision.motion.set_maturity(bio_vision.maturity)
+        snn.W_in[:] = prev_mem["snn_W_in"]
+        prev_concepts = json.loads(str(prev_mem["concepts"]))
+        log["concepts_learned"] = prev_concepts
+        if verbose:
+            print(f"  Loaded previous memory: maturity={bio_vision.maturity:.1%}, "
+                  f"{len(prev_concepts)} concepts known")
+            print(f"  System will recognize familiar concepts with oxytocin boost")
+
     t0 = time.time()
     prev_color_stats = None
 
@@ -273,6 +288,13 @@ def run_srt_teacher(
             bc.random_discrete(seed=frame_num),
             hour=now.hour, day_of_week=now.weekday(),
             season=seasons[now.month - 1], neurochemistry=nc)
+
+        # Familiarity detection: repeated concepts boost oxytocin, reduce novelty
+        familiar_concepts = [kw for kw in keywords if kw in log["concepts_learned"]]
+        if familiar_concepts:
+            familiarity = min(1.0, len(familiar_concepts) * 0.15)
+            nc.oxytocin = min(1.0, nc.oxytocin + familiarity * 0.1)  # Recognition warmth
+            nc.dopamine = max(nc.dopamine - familiarity * 0.05, 0.15)  # Less surprising
 
         # Teach each keyword — bind visual + text + emotion
         for keyword in keywords:
@@ -376,12 +398,25 @@ def run_srt_teacher(
                 bar = "#" * int(pct / 2)
                 print(f"    {emo:<10} {count:>4} ({pct:>5.1f}%) {bar}")
 
-    # Save
+    # Save log
     if save_path:
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         with open(save_path, "w") as f:
             json.dump(log, f, indent=2, default=str)
         print(f"\n  Log saved to {save_path}")
+
+    # Save memory state for repeated experience (watch again → recognize)
+    memory_path = (save_path.replace(".json", "_memory.npz")
+                   if save_path else None)
+    if memory_path:
+        np.savez_compressed(
+            memory_path,
+            maturity=np.float32(bio_vision.maturity),
+            snn_W_in=snn.W_in,
+            concepts=json.dumps(log["concepts_learned"]),
+        )
+        print(f"  Memory saved to {memory_path}")
+        print(f"  (Re-run with same video to see familiarity recognition)")
 
     return log
 
