@@ -207,9 +207,18 @@ def run_srt_teacher(
         features[:len(grid)] = grid[:104]
 
         # SNN perception — neurochemistry reacts naturally
-        snn_result = snn.encode_temporal(features)
+        feat_norm = features / (np.std(features) + 1e-6) * 0.3
+        spikes = snn.step(feat_norm)
         nc = snn.neurochemistry
-        spike_rate = float(np.mean(snn_result["spikes"]))
+        spike_rate = float(np.mean(spikes))
+
+        # Update neurochemistry from visual content
+        nc.update(
+            novelty=spike_rate,
+            threat=float(np.clip(np.std(features) * 2 - 0.3, 0, 0.8)),
+            focus=0.3,
+            valence=float(np.clip(np.mean(features) - 0.4, -0.5, 0.5)),
+        )
 
         # Thalamus routing
         embed = np.zeros(d_model, dtype=np.float32)
