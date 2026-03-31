@@ -237,10 +237,19 @@ def run_srt_teacher(
         nc = snn.neurochemistry
         spike_rate = float(np.mean(spikes))
 
-        # 4. Novel utterance detection: first-heard subtitle spikes dopamine
+        # 4. Recency-weighted novelty: not binary, gradient based on time
         utterance = entry.text.strip().lower()
         is_novel_utterance = utterance not in log["concepts_learned"]
-        concept_novelty = 0.5 if is_novel_utterance else 0.0
+        if is_novel_utterance:
+            concept_novelty = 0.6  # Never heard before
+        else:
+            # Seen before: novelty decays with repetition but recovers with time
+            info = log["concepts_learned"][utterance]
+            count = info["count"]
+            first_heard = info.get("first_heard", info.get("first_seen", 0))
+            time_since = max(0.1, mid_time - first_heard)
+            # Recency: 1/(1+count) * sqrt(time_gap) — familiar but not fresh
+            concept_novelty = min(0.4, (1.0 / (1.0 + count)) * min(1.0, time_since / 60.0))
 
         # 5. Neurochemistry: fuse ALL signals simultaneously
         fused_novelty = max(spike_rate, color_drive["novelty"], concept_novelty)
@@ -270,6 +279,15 @@ def run_srt_teacher(
         route = thalamus.route(embed, arousal=nc.arousal,
                                valence=getattr(nc, "valence", 0.0))
 
+        # Active inference: override route when uncertainty is high
+        uncertainty = (concept_novelty * 0.4 + nc.cortisol * 0.3
+                       + (1.0 - nc.dopamine) * 0.3)
+        explore_threshold = 0.4 - nc.serotonin * 0.1
+        if uncertainty > explore_threshold:
+            route["primary_route"] = "reasoning"
+            route["routes"]["reasoning"] = max(
+                route["routes"].get("reasoning", 0), 0.6)
+
         # Basal ganglia
         bg = basal_ganglia.select_strategy(
             route["routes"], valence=getattr(nc, "valence", 0.0),
@@ -290,10 +308,13 @@ def run_srt_teacher(
             hour=now.hour, day_of_week=now.weekday(),
             season=seasons[now.month - 1], neurochemistry=nc)
 
+        # Natural oxytocin decay (prevents saturation at 1.0)
+        nc.oxytocin = max(0.0, nc.oxytocin * 0.97 - 0.005)
+
         # Familiarity detection: heard this before → oxytocin, less novelty
         if not is_novel_utterance:
-            nc.oxytocin = min(1.0, nc.oxytocin + 0.1)   # Recognition warmth
-            nc.dopamine = max(nc.dopamine - 0.03, 0.15)  # Less surprising
+            nc.oxytocin = min(0.9, nc.oxytocin + 0.08)  # Recognition warmth (capped <1)
+            nc.dopamine = max(nc.dopamine - 0.02, 0.15)  # Slightly less surprising
 
         # Bind experience holistically: visual + full utterance + emotion
         # No keyword parsing — the whole subtitle is ONE audio memory,
