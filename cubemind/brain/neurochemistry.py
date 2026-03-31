@@ -238,25 +238,47 @@ class Neurochemistry:
         self.dominant_emotion = self._classify_emotion(novelty, valence)
 
     def _classify_emotion(self, novelty: float, valence: float) -> str:
-        """Determine dominant emotion from hormone landscape."""
-        scores = {
-            "anxious": self.cortisol * 0.6 + (1 - self.serotonin) * 0.2
-                       + self.noradrenaline * 0.2,
-            "joy": self.dopamine * 0.4 + max(0, valence) * 0.3
-                   + self.serotonin * 0.3,
-            "curious": self.dopamine * 0.3 + novelty * 0.4
-                       + self.noradrenaline * 0.3,
-            "warm": self.oxytocin * 0.5 + self.serotonin * 0.3
-                    + max(0, valence) * 0.2,
-            "sad": (1 - self.dopamine) * 0.3 + max(0, -valence) * 0.4
-                   + (1 - self.serotonin) * 0.3,
-            "alert": self.noradrenaline * 0.5 + self.cortisol * 0.2
-                     + novelty * 0.3,
-            "calm": self.serotonin * 0.4 + (1 - self.cortisol) * 0.3
-                    + (1 - self.noradrenaline) * 0.3,
-            "neutral": 0.3,
+        """Classify emotion via Lövheim Cube (2012).
+
+        Maps (serotonin, dopamine, noradrenaline) to the nearest corner
+        of the monoamine cube. 8 corners = 8 Tomkins basic emotions.
+
+        Also uses Plutchik circumplex for intensity (distance from center).
+        """
+        # Lövheim Cube corners: (5-HT, DA, NE) → emotion
+        corners = {
+            "joy":       (1, 1, 1),   # High all three
+            "warm":      (1, 1, 0),   # High 5-HT+DA, low NE (trust/content)
+            "surprise":  (1, 0, 1),   # High 5-HT+NE, low DA (distress)
+            "shame":     (1, 0, 0),   # High 5-HT only (humiliation)
+            "angry":     (0, 1, 1),   # Low 5-HT, high DA+NE (rage)
+            "contempt":  (0, 1, 0),   # Low 5-HT+NE, high DA (disgust)
+            "anxious":   (0, 0, 1),   # Low 5-HT+DA, high NE (fear)
+            "sad":       (0, 0, 0),   # Low all three (despair)
         }
-        return max(scores, key=scores.get)
+
+        # Normalize to [0, 1] for cube positioning
+        pos = np.array([self.serotonin, self.dopamine, self.noradrenaline])
+
+        # Find nearest corner
+        best_emotion = "neutral"
+        best_dist = float("inf")
+        for emotion, corner in corners.items():
+            dist = np.linalg.norm(pos - np.array(corner))
+            if dist < best_dist:
+                best_dist = dist
+                best_emotion = emotion
+
+        # Intensity: distance from center (0.5, 0.5, 0.5)
+        intensity = float(np.linalg.norm(pos - 0.5))
+
+        # Override with specific context signals
+        if novelty > 0.5 and self.noradrenaline > 0.3:
+            best_emotion = "curious"
+        elif intensity < 0.15:
+            best_emotion = "neutral"  # Too close to center
+
+        return best_emotion
 
     # ── SNN modulation (same interface as NeurochemicalState) ────────
 
