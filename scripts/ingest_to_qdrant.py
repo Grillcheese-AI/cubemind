@@ -69,10 +69,30 @@ CATEGORY_PATTERNS = {
 _compiled_patterns = {cat: re.compile(pat, re.IGNORECASE) for cat, pat in CATEGORY_PATTERNS.items()}
 
 
-def categorize_text(text: str) -> str:
-    """Fast regex categorization — returns best-matching category."""
+def categorize_text(text: str, categorizer=None) -> dict:
+    """Categorize text using taxonomy categorizer or simple regex fallback.
+
+    Returns dict with domain, subdomain, realm, quality_score.
+    """
+    if categorizer is not None:
+        result = categorizer.categorize(text, return_all=False)
+        subdomain = result["subdomain"]
+        confidence = result["confidence"]
+
+        # Map subdomain → domain using realm hierarchy
+        domain = _subdomain_to_domain.get(subdomain, "general")
+
+        return {
+            "domain": domain,
+            "subdomain": subdomain,
+            "realm": f"{domain}/{subdomain}" if domain != subdomain else domain,
+            "quality_score": confidence,
+        }
+
+    # Fallback: simple regex
     if not text or len(text) < 10:
-        return "general"
+        return {"domain": "general", "subdomain": "general",
+                "realm": "general", "quality_score": 0.0}
 
     scores = {}
     text_lower = text.lower()
@@ -82,9 +102,45 @@ def categorize_text(text: str) -> str:
             scores[cat] = len(matches)
 
     if not scores:
-        return "general"
+        return {"domain": "general", "subdomain": "general",
+                "realm": "general", "quality_score": 0.0}
 
-    return max(scores, key=scores.get)
+    best = max(scores, key=scores.get)
+    return {"domain": best, "subdomain": best,
+            "realm": best, "quality_score": min(1.0, scores[best] / 10.0)}
+
+
+# Subdomain → domain mapping (built from realm hierarchy)
+_subdomain_to_domain = {
+    "physics": "science", "chemistry": "science", "biology": "science",
+    "astronomy": "science", "geology": "science", "ecology": "science",
+    "genetics": "science", "medicine": "science", "neuroscience": "science",
+    "biochemistry": "science", "anatomy": "science", "virology": "science",
+    "immunology": "science", "paleontology": "science", "cosmology": "science",
+    "meteorology": "science", "oceanography": "science", "climate": "science",
+    "earth_science": "science", "environmental": "science",
+    "ai": "technology", "programming": "technology", "software": "technology",
+    "computing": "technology", "robotics": "technology", "blockchain": "technology",
+    "cybersecurity": "technology", "data_science": "technology", "iot": "technology",
+    "quantum_computing": "technology", "aerospace": "technology",
+    "electronics": "technology", "engineering": "technology", "webdev": "technology",
+    "art": "culture", "music": "culture", "film": "culture", "dance": "culture",
+    "literature": "culture", "fashion": "culture", "design": "culture",
+    "folklore": "culture", "mythology": "culture", "food": "culture",
+    "performing_arts": "culture", "animation": "culture", "television": "culture",
+    "architecture": "culture", "sports": "culture",
+    "finance": "economics", "markets": "economics", "investing": "economics",
+    "banking": "economics", "accounting": "economics", "cryptocurrency": "economics",
+    "macroeconomics": "economics", "microeconomics": "economics",
+    "ancient": "history", "medieval": "history", "modern": "history",
+    "european": "history", "american": "history", "ancient_rome": "history",
+    "ancient_greece": "history", "ancient_egypt": "history", "renaissance": "history",
+    "empire": "history", "colonialism": "history", "coldwar": "history",
+    "linguistics": "humanities", "philosophy": "humanities", "religion": "humanities",
+    "sociology": "humanities", "political_science": "humanities",
+    "psychology": "humanities",
+    "geography": "world", "navigation": "world",
+}
 
 
 # ── Embedder ─────────────────────────────────────────────────────────────────
@@ -132,6 +188,16 @@ def ingest(
     if client is None:
         return
 
+    # Load taxonomy categorizer
+    categorizer = None
+    try:
+        from cubemind.perception.categorizer import Categorizer
+        categorizer = Categorizer()
+        print(f"Categorizer loaded: {categorizer.n_subdomains} subdomains, "
+              f"{categorizer.n_patterns:,} patterns")
+    except Exception as e:
+        print(f"Categorizer unavailable ({e}), using regex fallback")
+
     # Check collection exists
     try:
         info = client.get_collection(collection)
@@ -148,9 +214,9 @@ def ingest(
     total = 0
     skipped = 0
     batch_texts = []
-    batch_categories = []
+    batch_meta = []
     batch_ids = []
-    cat_counts = {}
+    domain_counts = {}
 
     with open(input_path, "r", encoding="utf-8", errors="ignore") as f:
         for line_num, line in enumerate(f):
@@ -174,33 +240,32 @@ def ingest(
                 skipped += 1
                 continue
 
-            # Truncate very long texts for embedding
             text_for_embed = text[:512]
-            category = categorize_text(text_for_embed)
+            meta = categorize_text(text_for_embed, categorizer)
+            meta["source"] = obj.get("source_path", obj.get("source", ""))
+            meta["chunk_index"] = obj.get("chunk_index", 0)
 
             batch_texts.append(text_for_embed)
-            batch_categories.append(category)
+            batch_meta.append(meta)
             batch_ids.append(str(uuid.uuid4()))
-            cat_counts[category] = cat_counts.get(category, 0) + 1
+            domain_counts[meta["realm"]] = domain_counts.get(meta["realm"], 0) + 1
             total += 1
 
-            # Process batch
             if len(batch_texts) >= batch_size:
                 _push_batch(client, embedder, collection,
-                           batch_texts, batch_categories, batch_ids)
+                           batch_texts, batch_meta, batch_ids)
                 elapsed = time.time() - t0
                 rate = total / elapsed
+                top3 = sorted(domain_counts.items(), key=lambda x: -x[1])[:3]
                 print(f"  [{total:,}] {rate:.0f} rec/s | "
-                      f"skip={skipped} | "
-                      f"top: {sorted(cat_counts.items(), key=lambda x:-x[1])[:3]}")
+                      f"skip={skipped} | top: {top3}")
                 batch_texts.clear()
-                batch_categories.clear()
+                batch_meta.clear()
                 batch_ids.clear()
 
-    # Final batch
     if batch_texts:
         _push_batch(client, embedder, collection,
-                   batch_texts, batch_categories, batch_ids)
+                   batch_texts, batch_meta, batch_ids)
 
     elapsed = time.time() - t0
     print(f"\nDone: {total:,} records in {elapsed:.0f}s ({total/elapsed:.0f} rec/s)")
@@ -210,8 +275,8 @@ def ingest(
         print(f"  {cat}: {count:,}")
 
 
-def _push_batch(client, embedder, collection, texts, categories, ids):
-    """Embed and push a batch to Qdrant."""
+def _push_batch(client, embedder, collection, texts, meta_list, ids):
+    """Embed and push a batch to Qdrant with full realm hierarchy."""
     from qdrant_client.models import PointStruct
 
     embeddings = embedder.encode(
@@ -223,9 +288,18 @@ def _push_batch(client, embedder, collection, texts, categories, ids):
         PointStruct(
             id=uid,
             vector=emb.tolist(),
-            payload={"text": text, "category": cat},
+            payload={
+                "text": text,
+                "domain": meta["domain"],
+                "subdomain": meta["subdomain"],
+                "realm": meta["realm"],
+                "quality_score": meta["quality_score"],
+                "source": meta.get("source", ""),
+                "chunk_index": meta.get("chunk_index", 0),
+                "tokens": len(text.split()),
+            },
         )
-        for uid, emb, text, cat in zip(ids, embeddings, texts, categories)
+        for uid, emb, text, meta in zip(ids, embeddings, texts, meta_list)
     ]
 
     client.upsert(collection_name=collection, points=points)
