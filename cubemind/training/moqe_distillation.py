@@ -240,7 +240,7 @@ class OfflineDistillationLoader:
                     # Full vocab: (seq, vocab_size) where vocab_size > 1000
                     # MoE routing: (n_layers, seq, n_experts) where n_experts < 100
                     if logits.ndim == 2 and logits.shape[-1] > 1000:
-                        logits = logits[:max_seq_len].astype(np.float32)
+                        logits = logits[:max_seq_len].astype(np.float16)
                         chunk.append((tokens[:-1], tokens[1:], logits[:-1]))
                     elif "moe_patterns" in data:
                         # MoE data — store routing patterns for router supervision
@@ -254,7 +254,7 @@ class OfflineDistillationLoader:
                     # Top-k compressed format
                     seq_len = len(tokens) - 1
                     indices = data["top_k_indices"][:seq_len].astype(np.int32)
-                    logprobs = data["top_k_logprobs"][:seq_len].astype(np.float32)
+                    logprobs = data["top_k_logprobs"][:seq_len].astype(np.float16)
                     teacher_data = {
                         "top_k_indices": indices,
                         "top_k_logprobs": logprobs,
@@ -346,13 +346,16 @@ def _kl_divergence_with_grad(
     KL(teacher || student) at given temperature.
     Returns (loss, d_loss/d_student_logits).
     """
-    soft_teacher = _softmax(teacher_logits / temperature)
+    soft_teacher = _softmax(teacher_logits.astype(np.float32) / temperature)
     soft_student = _softmax(student_logits / temperature)
 
     # KL = sum(P * (log P - log Q))
-    log_teacher = np.log(soft_teacher + 1e-8)
-    log_student = np.log(soft_student + 1e-8)
+    soft_teacher = np.clip(soft_teacher, 1e-7, 1.0)
+    soft_student = np.clip(soft_student, 1e-7, 1.0)
+    log_teacher = np.log(soft_teacher)
+    log_student = np.log(soft_student)
     kl = soft_teacher * (log_teacher - log_student)
+    kl = np.nan_to_num(kl, nan=0.0, posinf=0.0, neginf=0.0)
     loss = float(np.mean(np.sum(kl, axis=-1))) * (temperature ** 2)
 
     # Gradient w.r.t. student logits:
@@ -406,8 +409,9 @@ def _sparse_kl_divergence_with_grad(
     s_log_at_topk = s_log_softmax[row_idx, top_k_indices]  # (seq, k)
 
     # KL = sum_k teacher_p[k] * (log teacher_p[k] - log student_p[k])
-    teacher_log = np.log(teacher_probs_topk + 1e-8)
+    teacher_log = np.log(np.clip(teacher_probs_topk, 1e-7, 1.0))
     kl_per_token = np.sum(teacher_probs_topk * (teacher_log - s_log_at_topk), axis=-1)
+    kl_per_token = np.nan_to_num(kl_per_token, nan=0.0, posinf=0.0, neginf=0.0)
     loss = float(np.mean(kl_per_token)) * (temperature ** 2)
 
     # Gradient: scatter teacher probs into full-vocab gradient
@@ -436,21 +440,26 @@ except Exception:
     pass
 
 
-def _dequant_weights(w_int: np.ndarray, scales: np.ndarray, block_size: int) -> np.ndarray:
-    """Dequantize INT4/INT8 weights back to FP32. Fully vectorized."""
+def _dequant_weights(
+    w_int: np.ndarray, scales: np.ndarray, block_size: int,
+    dtype: np.dtype = np.float32,
+) -> np.ndarray:
+    """Dequantize INT4/INT8 weights. Fully vectorized.
+
+    Args:
+        dtype: Output dtype. Use np.float16 to halve RAM usage.
+    """
     d_out, d_in = w_int.shape
     num_blocks = scales.shape[1]
-    # Reshape to (d_out, num_blocks, block_size), broadcast multiply, reshape back
     padded = d_in + (block_size - d_in % block_size) % block_size
     if padded == d_in:
-        w_blocked = w_int.reshape(d_out, num_blocks, block_size).astype(np.float32)
+        w_blocked = w_int.reshape(d_out, num_blocks, block_size).astype(dtype)
     else:
-        # Pad last block
         w_padded = np.zeros((d_out, padded), dtype=w_int.dtype)
         w_padded[:, :d_in] = w_int
-        w_blocked = w_padded.reshape(d_out, num_blocks, block_size).astype(np.float32)
-    # scales: (d_out, num_blocks) → (d_out, num_blocks, 1) for broadcast
-    w_fp = (w_blocked * scales[:, :, np.newaxis]).reshape(d_out, -1)[:, :d_in]
+        w_blocked = w_padded.reshape(d_out, num_blocks, block_size).astype(dtype)
+    scales_cast = scales.astype(dtype)
+    w_fp = (w_blocked * scales_cast[:, :, np.newaxis]).reshape(d_out, -1)[:, :d_in]
     return np.ascontiguousarray(w_fp)
 
 
@@ -565,9 +574,11 @@ def moqe_backward(
             temperature,
         )
         # For entropy-gated routing, estimate teacher entropy from top-k
-        teacher_probs_topk = _softmax(teacher_logits["top_k_logprobs"])
+        lp = teacher_logits["top_k_logprobs"].astype(np.float32)
+        teacher_probs_topk = _softmax(lp)
+        teacher_probs_topk = np.clip(teacher_probs_topk, 1e-7, 1.0)
         teacher_entropy = -np.sum(
-            teacher_probs_topk * np.log(teacher_probs_topk + 1e-8), axis=-1)
+            teacher_probs_topk * np.log(teacher_probs_topk), axis=-1)
         t_logits = None
     else:
         # Full vocab logits — truncate to match
@@ -598,9 +609,11 @@ def moqe_backward(
     # Low H  → peaked distribution → teacher is confident → 4-bit is fine
     if teacher_entropy is None:
         # Full-vocab path: compute entropy from t_logits
-        teacher_probs = _softmax(t_logits)
+        teacher_probs = _softmax(t_logits.astype(np.float32))
+        teacher_probs = np.clip(teacher_probs, 1e-7, 1.0)
         teacher_entropy = -np.sum(
-            teacher_probs * np.log(teacher_probs + 1e-8), axis=-1)  # (seq,)
+            teacher_probs * np.log(teacher_probs), axis=-1)  # (seq,)
+        teacher_entropy = np.nan_to_num(teacher_entropy, nan=1.5)
 
     # Entropy threshold: tokens above this get relaxed 8-bit allowance
     # Use median entropy as adaptive threshold (robust to distribution shift)
@@ -623,8 +636,7 @@ def moqe_backward(
     conflict_frac = float(np.mean(is_conflict))
 
     # Combined gradient w.r.t. output logits
-    grad_logits = np.zeros_like(student_logits)
-    grad_logits[:, :min_vocab] = 0.3 * grad_ce + 0.6 * grad_kd
+    grad_logits = 0.3 * grad_ce + 0.6 * grad_kd
 
     total_loss = 0.3 * loss_ce + 0.6 * loss_kd + 0.1 * loss_router
 
@@ -761,6 +773,8 @@ def run_offline_distillation(
     lr: float = 3e-4,
     save_dir: str | None = None,
     save_every: int = 200,
+    chunk_gb: float = 10.0,
+    optimizer_type: str = "auto",
 ) -> list[dict]:
     """Run offline MoQE distillation with full backprop.
 
@@ -788,17 +802,20 @@ def run_offline_distillation(
         _quantize_weights_int8,
     )
 
-    # Import optimizer (prefer auto-hypergradient if available)
-    try:
-        from grilly.optim.hypergradient import AutoHypergradientAdamW
-        OptimizerClass = AutoHypergradientAdamW
-        optim_kwargs = dict(
-            lr=lr, hyper_lr=0.005, warmup_steps=20,
-            lr_max=lr * 3,  # Don't let lr run away beyond 3x initial
-            track_surprise=True, surprise_gamma=0.95,
-        )
-        log.info("Using AutoHypergradientAdamW with surprise tracking")
-    except ImportError:
+    # Import optimizer
+    OptimizerClass = None
+    optim_kwargs = {}
+
+    if optimizer_type == "sgd":
+        # SGD: zero optimizer state, minimal RAM
+        try:
+            from grilly.optim.sgd import SGD
+            OptimizerClass = SGD
+            optim_kwargs = dict(lr=lr, momentum=0.0)
+            log.info("Using SGD (no momentum — RAM-optimized)")
+        except ImportError:
+            OptimizerClass = None
+    elif optimizer_type == "adamw":
         try:
             from grilly.optim.adamw import AdamW
             OptimizerClass = AdamW
@@ -806,8 +823,27 @@ def run_offline_distillation(
             log.info("Using AdamW")
         except ImportError:
             OptimizerClass = None
+    else:  # "auto" — prefer hypergradient, fall back
+        try:
+            from grilly.optim.hypergradient import AutoHypergradientAdamW
+            OptimizerClass = AutoHypergradientAdamW
+            optim_kwargs = dict(
+                lr=lr, hyper_lr=0.005, warmup_steps=20,
+                lr_max=lr * 3,
+                track_surprise=True, surprise_gamma=0.95,
+            )
+            log.info("Using AutoHypergradientAdamW with surprise tracking")
+        except ImportError:
+            try:
+                from grilly.optim.adamw import AdamW
+                OptimizerClass = AdamW
+                optim_kwargs = dict(lr=lr)
+                log.info("Using AdamW")
+            except ImportError:
+                OptimizerClass = None
 
-    loader = OfflineDistillationLoader(data_dir, max_seq_len=max_seq_len)
+    loader = OfflineDistillationLoader(data_dir, max_seq_len=max_seq_len,
+                                       chunk_gb=chunk_gb)
 
     # ── Initialize FP32 shadow weights for STE training ───────────────
     # Expert weights live as INT4/INT8 for inference, but we maintain
@@ -823,9 +859,15 @@ def run_offline_distillation(
 
     gpu_weight_list = []  # For GPU upload: [w0_L0, w1_L0, w0_L1, ...]
 
+    # Shadow weights stay float32 for optimizer precision
+    # (float16 updates round to zero at small lr)
+    _train_dtype = np.float32
+
     for layer in model.layers:
-        w0_fp = _dequant_weights(layer.w0_int, layer.s0, layer.block_size)
-        w1_fp = _dequant_weights(layer.w1_int, layer.s1, layer.block_size)
+        w0_fp = _dequant_weights(layer.w0_int, layer.s0, layer.block_size,
+                                 dtype=_train_dtype)
+        w1_fp = _dequant_weights(layer.w1_int, layer.s1, layer.block_size,
+                                 dtype=_train_dtype)
         shadow_weights[id(layer) * 10 + 0] = w0_fp
         shadow_weights[id(layer) * 10 + 1] = w1_fp
         gpu_weight_list.append(w0_fp)
@@ -916,7 +958,29 @@ def run_offline_distillation(
                     opt_grads[id(b_arr)] = grads.get(id(layer.router.b),
                         np.zeros(1, dtype=np.float32))
 
-                optimizer.step(gradients=opt_grads)
+                # Apply gradients
+                try:
+                    optimizer.step(gradients=opt_grads)
+                except TypeError:
+                    # Manual SGD with gradient clipping (in-place updates)
+                    _lr = optimizer.defaults.get("lr", lr) if optimizer else lr
+
+                    # Global gradient norm clipping
+                    all_grads = [g for g in opt_grads.values() if g is not None]
+                    if all_grads:
+                        global_norm = np.sqrt(sum(
+                            float(np.sum(g.astype(np.float32) ** 2))
+                            for g in all_grads))
+                        clip_coef = min(1.0, 1.0 / (global_norm + 1e-6))
+                    else:
+                        clip_coef = 1.0
+
+                    for p in all_params:
+                        g = opt_grads.get(id(p))
+                        if g is not None:
+                            # In-place: np.subtract(p, step, out=p)
+                            step = (_lr * clip_coef * g).astype(p.dtype)
+                            np.subtract(p, step, out=p)
 
                 # Re-quantize shadow weights back to INT4/INT8
                 for li, layer in enumerate(model.layers):
