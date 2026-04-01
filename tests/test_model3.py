@@ -164,3 +164,48 @@ def test_multi_step_sequence(brain: CubeMindV3):
         result = brain.forward(text=f"step {i}")
     assert brain.hippocampus.memory_count >= 10
     assert brain.neurogenesis.neuron_count >= brain.neurogenesis.stats()["neuron_count"]
+
+
+# ── Training step ────────────────────────────────────────────────────────────
+
+def test_train_step(brain: CubeMindV3, bc: BlockCodes):
+    target = bc.random_discrete(seed=500)
+    result = brain.train_step(text="train me", target_hv=target)
+    assert "loss" in result
+    assert "similarity" in result
+    assert 0 <= result["loss"] <= 2.0
+
+
+def test_train_step_no_target(brain: CubeMindV3):
+    result = brain.train_step(text="no target")
+    assert result["loss"] == 0.0
+
+
+def test_train_step_extract_logits(brain: CubeMindV3):
+    """Without LLM attached, teacher_logits should be None."""
+    result = brain.train_step(text="logit test", extract_logits=True)
+    assert result["teacher_logits"] is None
+
+
+# ── LLM interface ────────────────────────────────────────────────────────────
+
+def test_attach_llm_no_model(brain: CubeMindV3):
+    """Attaching with no model path should create interface in 'none' mode."""
+    brain.attach_llm(model_path=None)
+    assert brain._llm is not None
+    assert not brain._llm.available
+
+
+def test_think_without_llm(brain: CubeMindV3):
+    result = brain.think("What do you see?")
+    assert "response" in result
+    # Without LLM, response is empty
+    assert result["response"] == ""
+
+
+# ── Spike bridge ─────────────────────────────────────────────────────────────
+
+def test_spike_bridge_exists(brain: CubeMindV3):
+    assert brain.spike_bridge is not None
+    assert brain.spike_bridge.k == K
+    assert brain.spike_bridge.l == L

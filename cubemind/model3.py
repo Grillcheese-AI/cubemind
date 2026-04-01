@@ -171,6 +171,13 @@ class CubeMindV3:
             seed=seed,
         )
 
+        # ── LLM Interface ────────────────────────────────────────────────
+        self._llm = None
+
+        # ── Spike↔VSA Bridge ────────────────────────────────────────────
+        from cubemind.brain.spike_vsa_bridge import SpikeVSABridge
+        self.spike_bridge = SpikeVSABridge(k=k, l=l, seed=seed)
+
         # ── State ────────────────────────────────────────────────────────
         self._step_count = 0
         self._last_output = None
@@ -312,6 +319,129 @@ class CubeMindV3:
             if len(h) == self.d_vsa:
                 h = (self._proj_in @ h).astype(np.float32)
         return self.hippocampus.retrieve_similar_memories(h, k=k)
+
+    def attach_llm(
+        self,
+        model_path: str | None = None,
+        api_url: str | None = None,
+        api_key: str | None = None,
+        **kwargs,
+    ) -> None:
+        """Attach an LLM for language generation.
+
+        Args:
+            model_path: Path to GGUF model file.
+            api_url: OpenAI-compatible API URL.
+            api_key: API key.
+            **kwargs: Additional args for LLMInterface.
+        """
+        from cubemind.brain.llm_interface import LLMInterface
+        self._llm = LLMInterface(
+            model_path=model_path, api_url=api_url,
+            api_key=api_key, **kwargs,
+        )
+
+    def think(
+        self,
+        prompt: str,
+        text: str | None = None,
+        image: np.ndarray | None = None,
+        audio: np.ndarray | None = None,
+        location: np.ndarray | None = None,
+    ) -> Dict[str, Any]:
+        """Full cognitive cycle: perceive → reason → remember → speak.
+
+        Runs forward() for perception/memory, then generates language via LLM.
+
+        Args:
+            prompt: What to think about / respond to.
+            text: Additional text context.
+            image: Visual input.
+            audio: Audio input.
+            location: Spatial location.
+
+        Returns:
+            Dict with: response (str), plus all forward() outputs.
+        """
+        # Perceive and process
+        result = self.forward(
+            text=text or prompt, image=image,
+            audio=audio, location=location,
+        )
+
+        # Generate language response
+        response = ""
+        if self._llm is not None and self._llm.available:
+            # Retrieve memory summaries
+            memories = self.recall(prompt, k=3)
+            mem_strs = [f"Memory {mid} (score={s:.2f})" for mid, s in memories]
+
+            response = self._llm.generate(
+                prompt=prompt,
+                context=result,
+                memories=mem_strs,
+                neurochemistry=result.get("neurochemistry"),
+            )
+
+            # Store the response as a memory too
+            if response:
+                resp_hv = self.text_encoder.encode(response)
+                resp_flat = self.bc.to_flat(resp_hv)
+                h = (self._proj_in @ resp_flat).astype(np.float32)
+                self.hippocampus.create_episodic_memory(features=h)
+
+        result["response"] = response
+        return result
+
+    def train_step(
+        self,
+        text: str | None = None,
+        image: np.ndarray | None = None,
+        audio: np.ndarray | None = None,
+        target_hv: np.ndarray | None = None,
+        location: np.ndarray | None = None,
+        extract_logits: bool = False,
+    ) -> Dict[str, Any]:
+        """One training step — forward + STDP + neurogenesis + memory + logits.
+
+        The whole system trains together:
+        - Perception encodes input to VSA (all modalities in parallel)
+        - SNN processes with STDP (if enabled)
+        - Neurogenesis grows/prunes based on residual
+        - Hippocampus stores episode
+        - If target_hv provided, compute VSA similarity loss
+        - If extract_logits and LLM attached, extract teacher logits on the fly
+
+        Args:
+            text: Text input.
+            image: Visual input.
+            audio: Audio input.
+            target_hv: Target VSA block-code for supervision.
+            location: Spatial location.
+            extract_logits: Extract LLM logits for MoQE distillation.
+
+        Returns:
+            Dict with: loss, similarity, neurogenesis info, teacher_logits, etc.
+        """
+        result = self.forward(
+            text=text, image=image, audio=audio, location=location,
+        )
+
+        loss = 0.0
+        similarity = 0.0
+        if target_hv is not None:
+            similarity = float(self.bc.similarity(result["output_hv"], target_hv))
+            loss = 1.0 - similarity
+
+        # Extract LLM teacher logits for live distillation
+        teacher_logits = None
+        if extract_logits and text and self._llm is not None:
+            teacher_logits = self._llm.get_logits(text)
+
+        result["loss"] = loss
+        result["similarity"] = similarity
+        result["teacher_logits"] = teacher_logits
+        return result
 
     def stats(self) -> Dict[str, Any]:
         return {
