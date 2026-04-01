@@ -51,29 +51,44 @@ def unpack_18bit_be(raw_uint8, n_indices=128):
 def decode_distillkit_row(row, max_seq_len=512):
     """Decode a single DistillKit row into (input_tokens, top_k_indices, top_k_logprobs).
 
+    Auto-detects k from the actual byte sizes:
+      logprobs bytes / 2 = k (bfloat16)
+      indices bytes * 8 / 18 = k (18-bit packed)
+
     Returns arrays truncated to max_seq_len.
     """
     input_ids = np.array(row['input_ids'], dtype=np.int32)
-    n_tokens = min(len(input_ids) - 1, max_seq_len)  # logits are for next-token
+    n_tokens = min(len(input_ids) - 1, max_seq_len)
 
     compressed_lp = row['compressed_logprobs']
     bytepacked_idx = row['bytepacked_indices']
 
-    all_indices = np.zeros((n_tokens, TOP_K), dtype=np.int32)
-    all_logprobs = np.zeros((n_tokens, TOP_K), dtype=np.float32)
+    if n_tokens < 1:
+        return input_ids[:1], np.zeros((0, 1), dtype=np.int32), np.zeros((0, 1), dtype=np.float32)
+
+    # Auto-detect k from first token's byte sizes
+    lp_bytes = len(np.array(compressed_lp[0], dtype=np.uint8))
+    idx_bytes = len(np.array(bytepacked_idx[0], dtype=np.uint8))
+    k = lp_bytes // 2  # bfloat16 = 2 bytes each
+
+    all_indices = np.zeros((n_tokens, k), dtype=np.int32)
+    all_logprobs = np.zeros((n_tokens, k), dtype=np.float32)
 
     for t in range(n_tokens):
         lp_raw = np.array(compressed_lp[t], dtype=np.uint8)
         idx_raw = np.array(bytepacked_idx[t], dtype=np.uint8)
 
-        all_logprobs[t] = decode_bf16_logprobs(lp_raw)
-        all_indices[t] = unpack_18bit_be(idx_raw)
+        lp = decode_bf16_logprobs(lp_raw)
+        idx = unpack_18bit_be(idx_raw, n_indices=k)
+
+        all_logprobs[t, :len(lp)] = lp[:k]
+        all_indices[t, :len(idx)] = idx[:k]
 
     return input_ids[:n_tokens + 1], all_indices, all_logprobs
 
 
 def save_sequence_topk(out_dir, idx, input_tokens, top_k_indices, top_k_logprobs):
-    """Save in CubeMind top-k format."""
+    """Save in CubeMind top-k format. Handles variable k across teachers."""
     path = out_dir / f"sequence_{idx:06d}.npz"
     if path.exists():
         return False
@@ -82,6 +97,7 @@ def save_sequence_topk(out_dir, idx, input_tokens, top_k_indices, top_k_logprobs
         input_tokens=input_tokens.astype(np.int32),
         top_k_indices=top_k_indices.astype(np.int32),
         top_k_logprobs=top_k_logprobs.astype(np.float16),
+        k=np.array([top_k_indices.shape[1]], dtype=np.int32),
         identity_len=np.array([len(input_tokens)], dtype=np.int32),
     )
     return True
@@ -289,41 +305,40 @@ for row in tqdm(ds, desc="Qwen3-30B-MoE"):
     if count == 0:
         print(f"  Columns: {list(row.keys())}")
 
-    if 'compressed_logprobs' in row and 'bytepacked_indices' in row:
-        input_ids, indices, logprobs = decode_distillkit_row(row, MAX_SEQ_LEN)
-        n = len(indices)
-        for start in range(0, n - 10, MAX_SEQ_LEN):
-            if count >= MAX_SEQS_PER_TEACHER:
-                break
-            end = min(start + MAX_SEQ_LEN, n)
-            if end - start < 10:
-                continue
-            save_sequence_topk(out_dir, count,
-                               input_ids[start:end + 1],
-                               indices[start:end],
-                               logprobs[start:end])
-            count += 1
-    else:
-        # Might have raw logits or other format
-        tokens = row.get("input_ids", row.get("tokens", None))
-        if tokens is None:
-            if count == 0:
-                print(f"  Available: {list(row.keys())}")
+    # Qwen3-30B MoE format: decode_ids + decode_pattern_logits + decode_pattern
+    tokens = row.get('decode_ids', row.get('input_ids', None))
+    logits = row.get('decode_pattern_logits', row.get('logits', None))
+    moe_patterns = row.get('decode_pattern', row.get('moe_patterns', None))
+
+    if tokens is None:
+        if count == 0:
+            print(f"  No tokens found: {list(row.keys())}")
+        break
+
+    tokens = np.array(tokens, dtype=np.int32)
+    total_len = len(tokens)
+    if total_len < 10:
+        continue
+
+    for start in range(0, total_len - 10, MAX_SEQ_LEN):
+        if count >= MAX_SEQS_PER_TEACHER:
             break
-        tokens = np.array(tokens, dtype=np.int32)
-        logits = row.get("logits", row.get("teacher_logits", None))
+        end = min(start + MAX_SEQ_LEN, total_len)
+        if end - start < 10:
+            continue
+
+        save_dict = {
+            "input_tokens": tokens[start:end].astype(np.int32),
+        }
         if logits is not None:
-            logits = np.array(logits, dtype=np.float16)
-            for start in range(0, len(tokens) - 10, MAX_SEQ_LEN):
-                if count >= MAX_SEQS_PER_TEACHER:
-                    break
-                end = min(start + MAX_SEQ_LEN, len(tokens))
-                save_sequence_full(out_dir, count, tokens[start:end], logits[start:end])
-                count += 1
-        else:
-            if count == 0:
-                print(f"  No logits found: {list(row.keys())}")
-            break
+            save_dict["logits"] = np.array(logits)[start:end].astype(np.float16)
+        if moe_patterns is not None:
+            save_dict["moe_patterns"] = np.array(moe_patterns)[start:end]
+
+        path = out_dir / f"sequence_{count:06d}.npz"
+        if not path.exists():
+            np.savez_compressed(path, **save_dict)
+        count += 1
 
 print(f"Qwen3-30B-MoE: {count} sequences saved to {out_dir}")
 

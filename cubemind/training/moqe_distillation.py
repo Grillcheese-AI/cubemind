@@ -154,39 +154,62 @@ def merge_ensemble_logits(
 class OfflineDistillationLoader:
     """Double-buffered prefetch loader for teacher logits.
 
+    Supports multiple teacher directories and two logit formats:
+      - Full vocab: logits shape (seq, vocab_size) — standard KD
+      - Top-k compressed: top_k_indices (seq, k) + top_k_logprobs (seq, k) — sparse KD
+
     Loads files in chunks into RAM (default ~10GB). A background thread
     pre-loads the next chunk while the current chunk is being trained on.
-    Result: near-zero I/O wait after the first chunk.
 
-    Memory layout:
-      [chunk A in RAM] ← training reads from here
-      [chunk B loading] ← background thread fills this
-      When A is exhausted, swap A↔B and start loading the next chunk.
+    Multi-teacher: pass a list of directories or a parent directory
+    containing subdirectories. Sequences from all teachers are shuffled
+    together so the router sees diverse distributions each batch.
     """
 
     def __init__(
         self,
-        data_dir: str,
+        data_dir: str | list[str],
         max_seq_len: int = 1024,
         shuffle: bool = True,
         chunk_gb: float = 10.0,
     ) -> None:
-        self.data_dir = data_dir
         self.max_seq_len = max_seq_len
         self.shuffle = shuffle
         self.chunk_gb = chunk_gb
-        self.file_list = sorted(glob.glob(os.path.join(data_dir, "*.npz")))
+
+        # Collect files from one or more directories
+        self.file_list = []
+        if isinstance(data_dir, list):
+            dirs = data_dir
+        elif os.path.isdir(data_dir):
+            # Check if data_dir contains subdirectories (multi-teacher parent)
+            subdirs = [os.path.join(data_dir, d) for d in os.listdir(data_dir)
+                       if os.path.isdir(os.path.join(data_dir, d))]
+            if subdirs and any(glob.glob(os.path.join(d, "*.npz")) for d in subdirs):
+                dirs = subdirs
+            else:
+                dirs = [data_dir]
+        else:
+            dirs = [data_dir]
+
+        for d in dirs:
+            files = sorted(glob.glob(os.path.join(d, "*.npz")))
+            teacher_name = os.path.basename(d)
+            if files:
+                log.info("Teacher %s: %d sequences", teacher_name, len(files))
+            self.file_list.extend(files)
+
         if not self.file_list:
             raise FileNotFoundError(f"No .npz files in {data_dir}")
 
         # Estimate files per chunk from first file
         sample_size = os.path.getsize(self.file_list[0])
-        # In-memory size is ~2x disk (float16→float32 + tokens)
         mem_per_file = sample_size * 2
         self.chunk_size = max(1, int(chunk_gb * 1e9 / max(mem_per_file, 1)))
         self.chunk_size = min(self.chunk_size, len(self.file_list))
 
-        print(f"OfflineDistillationLoader: {len(self.file_list)} sequences, "
+        print(f"OfflineDistillationLoader: {len(self.file_list)} sequences "
+              f"from {len(dirs)} teacher(s), "
               f"chunk={self.chunk_size} files (~{chunk_gb:.0f}GB RAM)")
 
     def __len__(self) -> int:
@@ -194,15 +217,52 @@ class OfflineDistillationLoader:
 
     @staticmethod
     def _load_chunk(file_paths: list[str], max_seq_len: int) -> list[tuple]:
-        """Load a chunk of files into RAM. Runs in background thread."""
+        """Load a chunk of files into RAM. Handles both formats.
+
+        Returns list of (input_ids, labels, teacher_data) where teacher_data
+        is either:
+          - np.ndarray of shape (seq, vocab) for full-vocab logits
+          - dict {"top_k_indices": (seq, k), "top_k_logprobs": (seq, k)}
+            for compressed top-k format
+        """
         chunk = []
         for path in file_paths:
             try:
                 data = np.load(path)
                 tokens = data["input_tokens"][:max_seq_len].astype(np.int32)
-                logits = data["logits"][:max_seq_len].astype(np.float32)
-                if len(tokens) >= 2:
-                    chunk.append((tokens[:-1], tokens[1:], logits[:-1]))
+                if len(tokens) < 2:
+                    continue
+
+                # Detect format
+                if "logits" in data:
+                    logits = data["logits"]
+                    # Check if this is full-vocab logits or MoE routing patterns
+                    # Full vocab: (seq, vocab_size) where vocab_size > 1000
+                    # MoE routing: (n_layers, seq, n_experts) where n_experts < 100
+                    if logits.ndim == 2 and logits.shape[-1] > 1000:
+                        logits = logits[:max_seq_len].astype(np.float32)
+                        chunk.append((tokens[:-1], tokens[1:], logits[:-1]))
+                    elif "moe_patterns" in data:
+                        # MoE data — store routing patterns for router supervision
+                        moe = data["moe_patterns"][:max_seq_len]
+                        teacher_data = {"moe_patterns": moe.astype(np.float32)}
+                        chunk.append((tokens[:-1], tokens[1:], teacher_data))
+                    else:
+                        # Unknown logit shape — skip
+                        pass
+                elif "top_k_indices" in data and "top_k_logprobs" in data:
+                    # Top-k compressed format
+                    seq_len = len(tokens) - 1
+                    indices = data["top_k_indices"][:seq_len].astype(np.int32)
+                    logprobs = data["top_k_logprobs"][:seq_len].astype(np.float32)
+                    teacher_data = {
+                        "top_k_indices": indices,
+                        "top_k_logprobs": logprobs,
+                    }
+                    chunk.append((tokens[:-1], tokens[1:], teacher_data))
+                else:
+                    # Skip files without any logit data
+                    pass
             except Exception:
                 pass
         return chunk
@@ -214,30 +274,24 @@ class OfflineDistillationLoader:
         if self.shuffle:
             np.random.shuffle(files)
 
-        # Split into chunks
         chunks = [files[i:i + self.chunk_size]
                   for i in range(0, len(files), self.chunk_size)]
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            # Kick off first chunk load
             future = pool.submit(self._load_chunk, chunks[0], self.max_seq_len)
 
             for ci in range(len(chunks)):
-                # Wait for current chunk
                 current_data = future.result()
 
-                # Start loading next chunk in background
                 if ci + 1 < len(chunks):
                     future = pool.submit(
                         self._load_chunk, chunks[ci + 1], self.max_seq_len)
 
-                # Yield from current chunk (all in RAM, zero I/O)
                 if self.shuffle:
                     np.random.shuffle(current_data)
                 for input_ids, labels, teacher_logits in current_data:
                     yield input_ids, labels, teacher_logits
 
-                # Free RAM before next chunk arrives
                 del current_data
 
 
@@ -307,6 +361,67 @@ def _kl_divergence_with_grad(
     grad *= (temperature ** 2) / max(student_logits.shape[0], 1)
 
     return loss, grad
+
+
+def _sparse_kl_divergence_with_grad(
+    student_logits: np.ndarray,
+    top_k_indices: np.ndarray,
+    top_k_logprobs: np.ndarray,
+    temperature: float,
+) -> tuple[float, np.ndarray]:
+    """KL divergence for top-k compressed teacher logits.
+
+    Instead of full-vocab KL, compute KD loss only on the teacher's
+    top-k indices. The teacher distribution is reconstructed from
+    top-k logprobs with a uniform residual for non-top-k tokens.
+
+    Args:
+        student_logits: (seq, vocab) student output logits.
+        top_k_indices: (seq, k) teacher's top-k token indices.
+        top_k_logprobs: (seq, k) teacher's top-k log-probabilities.
+        temperature: KD temperature.
+
+    Returns:
+        (loss, gradient) where gradient is (seq, vocab).
+    """
+    seq_len, vocab_size = student_logits.shape
+    k = top_k_indices.shape[1]
+
+    # Teacher distribution: softmax over top-k logprobs
+    teacher_lp = top_k_logprobs / temperature
+    teacher_lp_max = np.max(teacher_lp, axis=-1, keepdims=True)
+    teacher_probs_topk = np.exp(teacher_lp - teacher_lp_max)
+    teacher_probs_topk /= teacher_probs_topk.sum(axis=-1, keepdims=True) + 1e-8
+
+    # Student log-softmax at temperature
+    s_scaled = student_logits / temperature
+    s_max = np.max(s_scaled, axis=-1, keepdims=True)
+    s_exp = np.exp(s_scaled - s_max)
+    s_sum = s_exp.sum(axis=-1, keepdims=True)
+    s_log_softmax = s_scaled - s_max - np.log(s_sum + 1e-8)
+
+    # Gather student log-probs at teacher's top-k positions
+    # s_log_at_topk[i, j] = s_log_softmax[i, top_k_indices[i, j]]
+    row_idx = np.arange(seq_len)[:, None]  # (seq, 1)
+    s_log_at_topk = s_log_softmax[row_idx, top_k_indices]  # (seq, k)
+
+    # KL = sum_k teacher_p[k] * (log teacher_p[k] - log student_p[k])
+    teacher_log = np.log(teacher_probs_topk + 1e-8)
+    kl_per_token = np.sum(teacher_probs_topk * (teacher_log - s_log_at_topk), axis=-1)
+    loss = float(np.mean(kl_per_token)) * (temperature ** 2)
+
+    # Gradient: scatter teacher probs into full-vocab gradient
+    # d_KL/d_z_student = (softmax(z/T) - teacher_target) * T
+    s_softmax = s_exp / (s_sum + 1e-8)
+    grad = s_softmax.copy()  # start with student softmax
+
+    # Subtract teacher probs at top-k positions
+    for i in range(seq_len):
+        grad[i, top_k_indices[i]] -= teacher_probs_topk[i]
+
+    grad *= temperature * (temperature ** 2) / max(seq_len, 1)
+
+    return loss, grad.astype(np.float32)
 
 
 # ── Phase 2: Full Backprop Through MoQE ──────────────────────────────────
@@ -423,13 +538,51 @@ def moqe_backward(
     student_logits = (x @ model.out_proj.T).astype(np.float32)
 
     # ── Loss computation ──────────────────────────────────────────────
-    # Truncate to teacher vocab size if needed
-    min_vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
-    s_logits = student_logits[:, :min_vocab]
-    t_logits = teacher_logits[:, :min_vocab]
+    loss_ce, grad_ce = _cross_entropy_with_grad(student_logits, labels)
 
-    loss_ce, grad_ce = _cross_entropy_with_grad(s_logits, labels)
-    loss_kd, grad_kd = _kl_divergence_with_grad(s_logits, t_logits, temperature)
+    # Dispatch KD loss based on teacher format
+    if isinstance(teacher_logits, dict) and "moe_patterns" in teacher_logits:
+        # MoE routing patterns only — no KD, just CE + router supervision
+        loss_kd = 0.0
+        grad_kd = np.zeros_like(student_logits)
+        # Use MoE expert entropy as router supervision signal
+        moe = teacher_logits["moe_patterns"]  # (n_layers, seq, n_experts)
+        if moe.ndim == 3 and moe.shape[1] >= student_logits.shape[0]:
+            moe_probs = _softmax(moe[:, :student_logits.shape[0], :], axis=-1)
+            # Average expert entropy across teacher layers
+            moe_entropy = -np.sum(
+                moe_probs * np.log(moe_probs + 1e-8), axis=-1)  # (n_layers, seq)
+            teacher_entropy = moe_entropy.mean(axis=0)  # (seq,)
+        else:
+            teacher_entropy = np.ones(student_logits.shape[0]) * 1.5
+        t_logits = None
+    elif isinstance(teacher_logits, dict) and "top_k_indices" in teacher_logits:
+        # Sparse top-k format from compressed teacher
+        loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
+            student_logits,
+            teacher_logits["top_k_indices"],
+            teacher_logits["top_k_logprobs"],
+            temperature,
+        )
+        # For entropy-gated routing, estimate teacher entropy from top-k
+        teacher_probs_topk = _softmax(teacher_logits["top_k_logprobs"])
+        teacher_entropy = -np.sum(
+            teacher_probs_topk * np.log(teacher_probs_topk + 1e-8), axis=-1)
+        t_logits = None
+    else:
+        # Full vocab logits — truncate to match
+        min_vocab = min(student_logits.shape[-1], teacher_logits.shape[-1])
+        s_logits = student_logits[:, :min_vocab]
+        t_logits = teacher_logits[:, :min_vocab]
+        loss_kd, grad_kd = _kl_divergence_with_grad(
+            s_logits, t_logits, temperature)
+        # Pad grad_kd back to full student vocab if truncated
+        if min_vocab < student_logits.shape[-1]:
+            pad = np.zeros((grad_kd.shape[0],
+                            student_logits.shape[-1] - min_vocab),
+                           dtype=np.float32)
+            grad_kd = np.concatenate([grad_kd, pad], axis=-1)
+        teacher_entropy = None  # compute below from t_logits
 
     all_probs = np.stack(router_probs_per_layer)
     actual_8bit = float(np.mean(all_probs > 0.5))
@@ -443,9 +596,11 @@ def moqe_backward(
     # Shannon entropy of teacher distribution: H = -sum(p * log(p))
     # High H → flat distribution → teacher is uncertain → needs 8-bit
     # Low H  → peaked distribution → teacher is confident → 4-bit is fine
-    teacher_probs = _softmax(t_logits)
-    teacher_entropy = -np.sum(
-        teacher_probs * np.log(teacher_probs + 1e-8), axis=-1)  # (seq,)
+    if teacher_entropy is None:
+        # Full-vocab path: compute entropy from t_logits
+        teacher_probs = _softmax(t_logits)
+        teacher_entropy = -np.sum(
+            teacher_probs * np.log(teacher_probs + 1e-8), axis=-1)  # (seq,)
 
     # Entropy threshold: tokens above this get relaxed 8-bit allowance
     # Use median entropy as adaptive threshold (robust to distribution shift)
