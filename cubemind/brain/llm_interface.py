@@ -64,6 +64,7 @@ class LLMInterface:
 
         self._llm = None
         self._mode = "none"
+        self._injector = None
 
         # Try llama-cpp-python first
         if model_path is not None:
@@ -84,6 +85,14 @@ class LLMInterface:
         # Fallback to API
         if self._llm is None and api_url is not None:
             self._mode = "api"
+
+    def attach_injector(self, injector) -> None:
+        """Attach a LLMInjector for brain-state layer injection.
+
+        Args:
+            injector: LLMInjector instance.
+        """
+        self._injector = injector
 
     @property
     def available(self) -> bool:

@@ -325,14 +325,20 @@ class CubeMindV3:
         model_path: str | None = None,
         api_url: str | None = None,
         api_key: str | None = None,
+        inject_layers: bool = True,
+        injection_strength: float = 0.1,
+        use_mindforge: bool = False,
         **kwargs,
     ) -> None:
-        """Attach an LLM for language generation.
+        """Attach an LLM for language generation with brain-state injection.
 
         Args:
             model_path: Path to GGUF model file.
             api_url: OpenAI-compatible API URL.
             api_key: API key.
+            inject_layers: Enable brain-state injection into LLM layers.
+            injection_strength: How much brain state influences LLM.
+            use_mindforge: Use MindForge LoRA adapters for injection.
             **kwargs: Additional args for LLMInterface.
         """
         from cubemind.brain.llm_interface import LLMInterface
@@ -340,6 +346,21 @@ class CubeMindV3:
             model_path=model_path, api_url=api_url,
             api_key=api_key, **kwargs,
         )
+
+        if inject_layers:
+            from cubemind.brain.llm_injector import LLMInjector
+            self._injector = LLMInjector(
+                brain=self,
+                n_layers=32,  # Llama3.3-8B = 32 layers
+                d_model=4096,  # Llama3.3-8B = 4096 hidden
+                d_brain=self.d_hidden,
+                injection_strength=injection_strength,
+                use_mindforge=use_mindforge,
+                k=self.k, l=self.l,
+            )
+            self._llm.attach_injector(self._injector)
+        else:
+            self._injector = None
 
     def think(
         self,
@@ -368,6 +389,14 @@ class CubeMindV3:
             text=text or prompt, image=image,
             audio=audio, location=location,
         )
+
+        # Update injector with current brain state
+        if hasattr(self, '_injector') and self._injector is not None:
+            self._injector.update_brain_state(
+                brain_hidden=result.get("hidden"),
+                brain_hv=result.get("input_hv"),
+                neurochemistry=result.get("neurochemistry"),
+            )
 
         # Generate language response
         response = ""
