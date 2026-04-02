@@ -154,3 +154,59 @@ This is more physically realistic (screening) and numerically stable.
 **Observations:** System is stable for 1000 steps with spawning, charge flipping,
 consolidation, and sleep. No NaN/Inf. Ready for staging.
 **Decision:** ALL HYPOTHESES CONFIRMED. Proceed to staging.
+
+---
+
+## [2026-04-02 05:00] Staging: Integration Tests
+
+**Status:** PASS (19/19)
+**Tests:** grilly F.* ops, BlockCodes, HippocampalFormation, GIFNeuron,
+SNNFFN, Identity, NeurogenesisController, CubeMind v3 model3.
+**Decision:** Integration gate passed.
+
+---
+
+## [2026-04-02 05:10] Staging: Stress Tests
+
+**Status:** PASS (14/14)
+**Tests:** hypothesis fuzzing (200 random inputs), adversarial (zero, 1e6, 1e-10),
+10K-step stability, domain shift, memory bounded.
+**Performance:** forward 0.037ms (26K/sec), train 0.167ms (6K/sec)
+**Decision:** Stress gate passed.
+
+---
+
+## [2026-04-02 05:20] Staging: Ablation Study
+
+**Status:** PARTIAL — concept stable but doesn't beat baselines on loss.
+
+**Ablation Table (clustered function approximation, d=16, 500 steps):**
+
+| Method | Final Loss | Time (ms) | Steps/s | Experts |
+|---|---|---|---|---|
+| MLP baseline | **0.47** | 8.6 | 58,142 | — |
+| Softmax MoE | **0.62** | 25.2 | 19,823 | 4 |
+| **HE-MoE (full)** | 13.83 | 74.1 | 6,751 | 8 |
+| − no charge | 12.91 | 73.3 | 6,821 | 8 |
+| − no force | 12.96 | 72.5 | 6,897 | 8 |
+| − no consolidation | 14.85 | 70.3 | 7,114 | 8 |
+| − no sleep | 12.92 | 70.2 | 7,123 | 8 |
+| − no spawn | 14.58 | 54.3 | 9,208 | 4 |
+
+**Findings:**
+1. Consolidation helps (+7% loss when removed) ✅
+2. Spawning helps (+5% loss when removed) ✅
+3. Charges and forces DON'T help on this task — removing them improves loss
+4. HE-MoE is ~30x slower and ~30x worse loss than MLP on function approx
+
+**Root cause:** Oja's rule does PCA (finds principal components), not regression
+(minimizes prediction error). The experts capture variance directions but not
+the mapping from input to target. Need a proper error-driven update rule.
+
+**Next steps to fix:**
+- Replace pure Oja with error-driven Oja: w += η * error * x (delta rule)
+- Keep Coulomb routing for exploration, but add gradient-free error signal
+- The architecture (routing + consolidation + sleep) is proven;
+  the learning rule needs upgrading
+
+**Decision:** DO NOT promote to production yet. Fix expert learning rule first.
