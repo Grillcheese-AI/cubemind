@@ -57,15 +57,22 @@ PROPOSE → HYPOTHESIZE → IMPLEMENT → TEST → LOG → STAGE → PROMOTE
   - Parameter configuration used
 
 ### 2.6 STAGE
+- **Staging code MUST use grilly ops, not numpy.** This is the bridge to production.
+  If it works with numpy in sandbox but breaks with grilly, we catch it here.
+- Staging imports from both `grl_lib/` (experiment logic) and `grilly`/`cubemind` (real backend).
 - Create `staging/integration.py`:
-  - Wire concept into real CubeMind components (BlockCodes, HippocampalFormation, etc.)
+  - Reimplement core classes using grilly ops (VulkanTensor, _bridge.linear, etc.)
+  - Wire into real CubeMind components (BlockCodes, HippocampalFormation, etc.)
   - Test that existing modules still work when combined with the new concept.
 - Create `staging/stress_test.py`:
-  - 10K+ step runs
+  - 10K+ step runs on grilly backend
   - Adversarial inputs (NaN, Inf, huge values, zero vectors)
   - Domain shift scenarios
   - Memory leak checks (does memory grow unbounded?)
   - Performance benchmarks (tokens/sec, memory usage)
+- Create `staging/ablation.py`:
+  - Baseline vs proposed vs ablated comparisons on grilly
+  - Energy/FLOP measurements using grilly's energy meter
 - Log staging results to `results.md`.
 
 ### 2.7 PROMOTE
@@ -159,7 +166,149 @@ Default Parameters:
 
 ---
 
-## 8. Archival
+## 8. Energy-Efficiency & Performance Standard
+
+Every experiment must justify itself on two axes:
+
+### 8.1 Energy Efficiency
+- **Measure FLOPs/MACs** for the new method vs baseline on the same task.
+- **Report energy per operation** (pJ if available, else relative compute).
+- **No unnecessary computation**: inactive components must cost zero.
+- **Goal**: prove the method does MORE with LESS, not just differently.
+
+### 8.2 Performance Ablation
+- Every new concept must include an **ablation study**:
+  - **Baseline**: existing method (e.g., standard MLP, softmax routing)
+  - **Proposed**: the new method (e.g., HE-MoE, LiquidMoE)
+  - **Ablated**: proposed with each component removed one at a time
+- Metrics to report:
+  - Task accuracy/loss (is it better?)
+  - Compute cost (FLOPs, wall-clock time)
+  - Memory footprint (peak RAM/VRAM)
+  - Parameter count (effective vs total)
+- **The new method must beat baseline on at least ONE of**: accuracy, speed, memory.
+- If it doesn't beat baseline on anything measurable, **do not promote to production**.
+
+### 8.3 Reusable Functions
+- Functions that are general-purpose and reusable across experiments belong in
+  a separate `grl-experiments` module, **NOT in `cubemind/`**.
+- This keeps the core clean — only proven, promoted code enters production.
+- Structure:
+  ```
+  sandbox/
+  ├── grl_lib/              ← reusable functions shared across experiments
+  │   ├── __init__.py
+  │   ├── kernels.py        ← RBF, Matern, RFF, etc.
+  │   ├── routing.py        ← bandit, UCB, force-based routing
+  │   ├── traces.py         ← eligibility traces, consolidation rules
+  │   ├── memory.py         ← capsule stores, replay mechanisms
+  │   └── metrics.py        ← ablation helpers, FLOP counters, timers
+  └── <experiment>/
+      └── experiment.py     ← imports from grl_lib, NOT from cubemind core
+  ```
+- **Rule**: if you write a function that two experiments need, move it to `grl_lib/`.
+- **Rule**: `grl_lib/` NEVER imports from `cubemind/`. It is fully independent. numpy only.
+- **Rule**: `staging/` MUST use grilly ops, not raw numpy. Import from grilly backend.
+- **Exception**: sandbox `experiment.py` can use numpy for rapid prototyping — that's the point.
+- **Staging is the grilly migration layer**: if the concept can't work on grilly, it can't ship.
+
+### 8.4 Ablation Template
+
+Every staging must include `staging/ablation.py` with this structure:
+
+```python
+class AblationStudy:
+    """Compare proposed method vs baseline on a standard task."""
+
+    def test_baseline(self):
+        """Standard method (e.g., MLP + softmax routing)."""
+        # Record: loss, time_ms, flops, memory_mb
+
+    def test_proposed(self):
+        """Full proposed method."""
+        # Record: loss, time_ms, flops, memory_mb
+
+    def test_ablate_<component>(self):
+        """Proposed with <component> removed."""
+        # Record: loss, time_ms, flops, memory_mb
+        # Compare: does removing this component hurt?
+
+    def test_summary(self):
+        """Print ablation table. Proposed must win on ≥1 metric."""
+```
+
+---
+
+## 9. Engineering Standards
+
+### 9.1 File Size
+- **Max 500-1000 lines per file.** If a file exceeds this, split by domain.
+- One class per file when the class is substantial (>100 lines).
+- Test files mirror source files: `routing.py` → `test_routing.py`.
+
+### 9.2 DRY
+- Within an experiment: shared code goes into experiment-local modules.
+- Across experiments: shared code goes into `grl_lib/`.
+- Never copy-paste between experiments. Import.
+
+### 9.3 Domain-Based Structure
+```
+sandbox/<experiment>/
+├── core/                 ← domain classes (one per file)
+│   ├── expert.py         ← Expert class
+│   ├── router.py         ← Router class
+│   └── memory.py         ← Memory / capsule store
+├── tests/                ← hypothesis tests (one class per hypothesis)
+│   ├── test_h01_kernel.py
+│   ├── test_h02_rff.py
+│   └── ...
+├── staging/
+│   ├── integration.py
+│   ├── stress_test.py
+│   └── ablation.py
+├── HYPOTHESES.md
+└── results.md
+```
+
+### 9.4 Design Patterns (GoF where applicable)
+- **Strategy**: swap routing algorithms (bandit, force-based, softmax) via interface.
+- **Observer**: trace updates notify consolidation system.
+- **Factory**: expert creation (spawn) via factory method, not inline `__init__`.
+- **Template Method**: base `Expert` class with hooks for `forward()`, `update()`, `consolidate()`.
+- **Composite**: MoE as composite of experts with uniform `forward()` interface.
+
+### 9.5 Class Design
+- Every class has a single responsibility.
+- Constructor takes all config as parameters with defaults.
+- Public methods are documented with Args/Returns.
+- No god classes. If a class does routing AND learning AND memory, split it.
+
+### 9.6 Logging
+- Use `loguru` everywhere. No `print()` for operational output.
+- No `import logging` — only `from loguru import logger`.
+- Log levels:
+  - `logger.debug()` — internal state, trace-level detail
+  - `logger.info()` — milestones, configuration, progress
+  - `logger.warning()` — recoverable issues, fallbacks triggered
+  - `logger.error()` — failures that need attention
+  - `logger.success()` — hypothesis passed, benchmark complete
+- Every experiment step logs: `logger.info("H{n} | step={s} loss={l:.4f}")`
+- Staging logs energy/perf: `logger.info("ablation | method={m} flops={f} time={t:.1f}ms")`
+- Configure sink in experiment entry point, not inside library classes.
+
+### 9.7 CubeMind Class Refactor Guidelines
+When promoting experiments or refactoring existing cubemind classes:
+- **Max 300 lines per class.** Split into base + mixins or strategy pattern.
+- **No circular imports.** Use dependency injection, not hard imports.
+- **Config objects over kwargs.** Use `dataclass` for >5 constructor params.
+- **Interface segregation.** Brain modules expose `forward()`, `update()`, `stats()`. 
+  Not every module needs every method.
+- **Composition over inheritance.** Prefer `self.router = Router()` over `class MyModel(Router)`.
+- **Immutable after init where possible.** Config params set once, state updated via methods.
+
+---
+
+## 10. Archival
 
 Experiments that fail or are superseded are NOT deleted. They are moved to
 `sandbox/_archive/<name>/` with a note in results.md explaining why.
