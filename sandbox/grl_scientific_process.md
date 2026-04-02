@@ -316,4 +316,53 @@ Failed experiments are valuable — they document what doesn't work.
 
 ---
 
+## 11. Toolchain
+
+| Tool | Purpose | Package |
+|---|---|---|
+| **grilly** | GPU compute (Vulkan shaders) | `grilly` (local editable) |
+| **logfire** | Structured logging + tracing + metrics (OpenTelemetry) | `logfire` |
+| **loguru** | Fallback logging | `loguru` |
+| **dependency-injector** | DI containers, providers, wiring | `dependency-injector` |
+| **hypothesis** | Property-based testing (fuzz edge cases) | `hypothesis` |
+| **click** | CLI framework | `click` |
+| **pytest** | Test runner | `pytest` |
+| **qdrant-client** | Vector search (semantic memory) | `qdrant-client` |
+| **llama-cpp-python** | Local LLM inference (GGUF + Vulkan) | `llama-cpp-python` |
+| **sentence-transformers** | Embedding models (Harrier-OSS) | `sentence-transformers` |
+
+### 11.1 Hypothesis Property-Based Testing
+
+Use in `staging/stress_test.py` to find edge cases hand-written tests miss:
+
+```python
+from hypothesis import given, strategies as st
+
+@given(st.lists(st.floats(-10, 10, allow_nan=False), min_size=8, max_size=8))
+def test_kernel_self_similarity(values):
+    x = np.array(values, dtype=np.float32)
+    assert F.rbf_kernel(x, x) > 0.99
+
+@given(st.integers(1, 16), st.integers(1, 16))
+def test_expert_output_shape(d_in, d_out):
+    e = SimpleExpert(ExpertConfig(d_input=d_in, d_output=d_out))
+    x = np.random.randn(d_in).astype(np.float32)
+    assert e.forward(x).shape == (d_out,)
+```
+
+### 11.2 Click CLI
+
+All scripts use click for consistent CLI:
+
+```python
+@click.command()
+@click.option("--webcam", default=0, help="Camera index")
+@click.option("--llm", default=None, help="GGUF model path")
+def run(webcam, llm):
+    brain = CubeMindV3(...)
+    ...
+```
+
+---
+
 *This process is a living document. Update it when we learn better ways to experiment.*
