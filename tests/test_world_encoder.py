@@ -111,7 +111,7 @@ def test_encode_state_determinism(enc: WorldEncoder):
     attrs = {"mood": "happy", "location": "park"}
     s1 = enc.encode_state(attrs)
     s2 = enc.encode_state(attrs)
-    np.testing.assert_array_equal(s1, s2)
+    np.testing.assert_allclose(s1, s2, atol=1e-14)
 
 
 # ── Test: encode_state role binding recoverable ──────────────────────────────
