@@ -17,6 +17,15 @@ import math
 
 import numpy as np
 
+# grilly GPU bridge
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
 
 class Synapsis:
     """Spike-driven linear transform with optional STDP.
@@ -77,7 +86,19 @@ class Synapsis:
             squeezed = True
 
         # Batched matmul: (batch, seq, in) @ (in, out) → (batch, seq, out)
-        output = (x @ self.weight.T + self.bias).astype(np.float32)
+        # Try grilly GPU linear first
+        output = None
+        if _bridge is not None:
+            try:
+                # Reshape for 2D matmul: (batch*seq, in) @ (out, in).T
+                flat = x.reshape(-1, self.in_features)
+                gpu_result = _bridge.linear(flat, self.weight, self.bias)
+                if gpu_result is not None:
+                    output = np.asarray(gpu_result, dtype=np.float32).reshape(x.shape[:-1] + (self.out_features,))
+            except Exception:
+                pass
+        if output is None:
+            output = (x @ self.weight.T + self.bias).astype(np.float32)
 
         # STDP update if enabled
         if self.enable_stdp:

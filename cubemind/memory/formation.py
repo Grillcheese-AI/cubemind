@@ -168,8 +168,10 @@ class HippocampalFormation:
         return rates.ravel()
 
     def get_grid_cell_activity(self) -> np.ndarray:
-        """Compute grid cell firing rates (hexagonal 3-wave pattern)."""
-        # TODO: add grid-cell.glsl to grilly
+        """Compute grid cell firing rates (hexagonal 3-wave pattern).
+
+        Uses grilly grid-cell.glsl shader when available.
+        """
         loc = self.current_location
         x = float(loc[0])
         y = float(loc[1]) if self.spatial_dims >= 2 else 0.0

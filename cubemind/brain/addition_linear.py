@@ -18,6 +18,15 @@ from __future__ import annotations
 
 import numpy as np
 
+# grilly GPU bridge
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
 
 class AdditionLinear:
     """Multiplication-free linear layer using L1 distance.

@@ -20,11 +20,13 @@ import math
 
 import numpy as np
 
+_bridge = None
 try:
-    from grilly.backend import _bridge
-    _GPU = _bridge is not None and _bridge.is_available()
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
 except Exception:
-    _GPU = False
+    pass
 
 
 class GIFNeuron:
