@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -261,8 +262,8 @@ class OfflineDistillationLoader:
                     }
                     chunk.append((tokens[:-1], tokens[1:], teacher_data))
                 else:
-                    # Skip files without any logit data
-                    pass
+                    # CE-only: tokens present but no teacher logits
+                    chunk.append((tokens[:-1], tokens[1:], None))
             except Exception:
                 pass
         return chunk
@@ -469,17 +470,18 @@ def moqe_backward(
     labels: np.ndarray,
     teacher_logits: np.ndarray,
     temperature: float = 2.0,
-    target_8bit: float = 0.15,
+    target_fractions: np.ndarray | None = None,
     max_grad_norm: float = 1.0,
 ) -> tuple[dict, dict]:
-    """Full forward + backward pass through MoQE with gradient computation.
+    """Full forward + backward pass through N-expert MoQE.
 
     Uses Straight-Through Estimator (STE) for quantization:
     gradients flow through the dequantized weights as if quantization
-    were identity. This is the standard approach for QAT.
+    were identity. Supports N experts per layer with Gumbel-Softmax.
 
-    Gradient clipping: all gradients are globally norm-clipped to
-    max_grad_norm to prevent loss explosions from outlier sequences.
+    Args:
+        target_fractions: Per-expert routing targets. If None, uses
+            expert_specs defaults. Shape: (n_experts,).
 
     Returns:
         (gradients, stats): gradients maps id(param) → grad array,
@@ -490,67 +492,61 @@ def moqe_backward(
 
     # ── Forward pass (store activations for backward) ─────────────────
     x = model.embedding[input_ids].copy()  # (seq, d_model)
-    activations = [x.copy()]  # activation before each layer
-    router_choices_per_layer = []
-    router_probs_per_layer = []
-    dequant_cache = []  # Cache dequantized weights per layer (avoid re-dequant)
+    # Add position embeddings if available
+    if hasattr(model, 'pos_embed') and model.pos_embed is not None:
+        x = x + model.pos_embed[:seq_len]
+    activations = [x.copy()]
+    dequant_cache = []          # list of lists: dequant_cache[l][e] = w_fp
+    router_weights_per_layer = []  # (seq, n_experts) soft weights per layer
+    expert_outs_per_layer = []     # (n_experts, seq, d) cached for router grad
 
-    # Get GPU training handle if available
-    gpu_handle = getattr(model, '_gpu_train_handle', None)
-    gpu_device = getattr(model, '_gpu_train_device', None)
-
-    # Temperature annealing for Gumbel-Softmax routing
-    # Start at 1.0 (soft), anneal toward 0.1 over training
     gumbel_temp = getattr(model, '_gumbel_temperature', 1.0)
-    router_weights_per_layer = []  # (batch, 2) soft weights
 
     for l_idx, layer in enumerate(model.layers):
-        # Gumbel-Softmax soft routing: both experts get gradient
-        weights, logits_2 = layer.router.forward_gumbel(x, temperature=gumbel_temp)
-        router_weights_per_layer.append(weights)
-        router_probs_per_layer.append(weights[:, 1])  # prob of expert 1
+        n_exp = layer.n_experts
 
-        # Hard choices for GPU dispatch (which expert gets each token)
-        choices = (weights[:, 1] > 0.5).astype(np.int32)
-        router_choices_per_layer.append(choices)
+        # Gumbel-Softmax: all experts get gradient
+        weights, raw_logits = layer.router.forward_gumbel(x, temperature=gumbel_temp)
+        router_weights_per_layer.append(weights)  # (seq, n_experts)
 
-        w0_fp = _dequant_weights(layer.w0_int, layer.s0, layer.block_size)
-        w1_fp = _dequant_weights(layer.w1_int, layer.s1, layer.block_size)
-        dequant_cache.append((w0_fp, w1_fp))
+        # Dequantize all experts
+        layer_dequant = []
+        for e in range(n_exp):
+            w_fp = _dequant_weights(layer.expert_w_int[e], layer.expert_scales[e],
+                                     layer.block_size)
+            layer_dequant.append(w_fp)
+        dequant_cache.append(layer_dequant)
 
-        # Soft blending: out = w0_weight * expert0(x) + w1_weight * expert1(x)
-        # Both experts process ALL tokens, weighted by Gumbel-Softmax
-        e0_out = (x @ w0_fp.T).astype(np.float32)  # (seq, d)
-        e1_out = (x @ w1_fp.T).astype(np.float32)  # (seq, d)
+        # All experts process all tokens, soft-blended
+        expert_outs = []
+        out = np.zeros_like(x)
+        for e in range(n_exp):
+            e_out = (x @ layer_dequant[e].T).astype(np.float32)
+            expert_outs.append(e_out)
+            out += weights[:, e:e+1] * e_out
 
-        # GPU path for expert matmuls
-        if gpu_handle is not None and _moqe_gpu is not None:
-            try:
-                # Both experts process all tokens (Gumbel-Softmax blending)
-                x_c = np.ascontiguousarray(x)
-                e0_out_gpu, e1_out_gpu = _moqe_gpu.moqe_layer_forward(
-                    gpu_device, gpu_handle, l_idx, x_c, x_c)
-                e0_out = np.asarray(e0_out_gpu, dtype=np.float32)
-                e1_out = np.asarray(e1_out_gpu, dtype=np.float32)
-            except Exception:
-                pass  # CPU fallback already computed above
-
-        # Soft blend: weight each expert's output
-        w0 = weights[:, 0:1]  # (seq, 1)
-        w1 = weights[:, 1:2]  # (seq, 1)
-        out = w0 * e0_out + w1 * e1_out
-
+        expert_outs_per_layer.append(expert_outs)
         x = x + out
         activations.append(x.copy())
 
-    # Output logits: CPU BLAS (vocab too big for PCIe)
     student_logits = (x @ model.out_proj.T).astype(np.float32)
 
     # ── Loss computation ──────────────────────────────────────────────
     loss_ce, grad_ce = _cross_entropy_with_grad(student_logits, labels)
 
     # Dispatch KD loss based on teacher format
-    if isinstance(teacher_logits, dict) and "moe_patterns" in teacher_logits:
+    if teacher_logits is None:
+        # CE-only mode: no teacher, no KD loss
+        loss_kd = 0.0
+        grad_kd = np.zeros_like(student_logits)
+        # Use student's own entropy for router guidance
+        student_probs = _softmax(student_logits)
+        student_probs = np.clip(student_probs, 1e-7, 1.0)
+        teacher_entropy = -np.sum(
+            student_probs * np.log(student_probs), axis=-1)
+        teacher_entropy = np.nan_to_num(teacher_entropy, nan=1.5)
+        t_logits = None
+    elif isinstance(teacher_logits, dict) and "moe_patterns" in teacher_logits:
         # MoE routing patterns only — no KD, just CE + router supervision
         loss_kd = 0.0
         grad_kd = np.zeros_like(student_logits)
@@ -595,8 +591,10 @@ def moqe_backward(
             grad_kd = np.concatenate([grad_kd, pad], axis=-1)
         teacher_entropy = None  # compute below from t_logits
 
-    all_probs = np.stack(router_probs_per_layer)
-    actual_8bit = float(np.mean(all_probs > 0.5))
+    # Compute routing stats from N-expert soft weights
+    # For backward compat: "8bit fraction" = fraction NOT routed to expert 0
+    all_weights = router_weights_per_layer  # list of (seq, n_experts)
+    actual_8bit = 1.0 - float(np.mean([w[:, 0].mean() for w in all_weights]))
 
     # ── Entropy-Gated Router Loss (Society of Thought) ───────────────
     # Instead of static balance penalty, use teacher entropy to identify
@@ -620,25 +618,31 @@ def moqe_backward(
     entropy_threshold = float(np.median(teacher_entropy)) + 0.5
     is_conflict = teacher_entropy > entropy_threshold  # (seq,) bool
 
-    # Dynamic per-token target: conflict tokens get 8b_target up to 0.8,
-    # normal tokens get base_target (0.15)
-    dynamic_8b_target = np.where(
-        is_conflict,
-        np.clip(target_8bit + 0.5 * (teacher_entropy - entropy_threshold), 0, 0.8),
-        target_8bit,
-    ).astype(np.float32)  # (seq,)
+    # Router balance loss: per-expert fraction MSE across all layers
+    # Use target_fractions from first layer's expert specs (shared across layers)
+    layer0 = model.layers[0]
+    n_exp = layer0.n_experts
+    tfrac = np.array([s.target_fraction for s in layer0.expert_specs], dtype=np.float32)
+    if tfrac.sum() < 1e-6:
+        tfrac = np.ones(n_exp, dtype=np.float32) / n_exp
+    else:
+        tfrac /= tfrac.sum()
 
-    # Router loss: per-token MSE between actual routing and dynamic target
-    # Averaged across all layers' routing decisions
-    mean_router_8b = np.mean(all_probs, axis=0)  # (seq,) avg 8-bit prob across layers
-    loss_router = float(np.mean((mean_router_8b - dynamic_8b_target) ** 2))
+    # Average expert fractions across layers
+    avg_fracs = np.mean([w.mean(axis=0) for w in all_weights], axis=0)  # (n_experts,)
+    loss_router = float(np.mean((avg_fracs - tfrac) ** 2))
     mean_entropy = float(np.mean(teacher_entropy))
     conflict_frac = float(np.mean(is_conflict))
 
     # Combined gradient w.r.t. output logits
-    grad_logits = 0.3 * grad_ce + 0.6 * grad_kd
-
-    total_loss = 0.3 * loss_ce + 0.6 * loss_kd + 0.1 * loss_router
+    has_teacher = loss_kd > 0 or np.any(grad_kd != 0)
+    if has_teacher:
+        grad_logits = 0.3 * grad_ce + 0.6 * grad_kd
+        total_loss = 0.3 * loss_ce + 0.6 * loss_kd + 0.1 * loss_router
+    else:
+        # CE-only mode: full weight on cross-entropy
+        grad_logits = 0.9 * grad_ce
+        total_loss = 0.9 * loss_ce + 0.1 * loss_router
 
     # ── Backward: output projection (CPU BLAS — vocab too large for PCIe) ──
     # logits = x @ out_proj.T
@@ -649,82 +653,85 @@ def moqe_backward(
 
     dx = (grad_logits @ model.out_proj).astype(np.float32)
 
-    # ── Backward: MoQE layers (reverse order) ────────────────────────
+    # ── Backward: MoQE layers (reverse order, N-expert) ────────────────
+    gpu_handle = getattr(model, '_gpu_train_handle', None)
+    gpu_device = getattr(model, '_gpu_train_device', None)
+
     for l_idx in range(model.n_layers - 1, -1, -1):
         layer = model.layers[l_idx]
-        choices = router_choices_per_layer[l_idx]
-        probs = router_probs_per_layer[l_idx]
+        n_exp = layer.n_experts
         x_in = activations[l_idx]
-        w0_fp, w1_fp = dequant_cache[l_idx]  # Cached from forward pass
+        expert_fps = dequant_cache[l_idx]  # list of w_fp per expert
+        weights = router_weights_per_layer[l_idx]  # (seq, n_experts)
 
-        # Residual: x_out = x_in + expert(x_in)
-        d_expert_out = dx.copy()
+        d_out = dx.copy()
 
-        # ── Expert backward with Gumbel-Softmax soft gradient flow ────────
-        # Forward was: out = w0 * expert0(x) + w1 * expert1(x)
-        # d_out flows to both experts proportional to their Gumbel weights.
-        weights = router_weights_per_layer[l_idx]
-        w0_weight = weights[:, 0:1]  # (seq, 1)
-        w1_weight = weights[:, 1:2]  # (seq, 1)
+        # ── Per-expert gradient (Gumbel-Softmax: all experts get gradient) ──
+        dx_expert = np.zeros_like(x_in)
+        for e in range(n_exp):
+            w_e = weights[:, e:e+1]  # (seq, 1)
+            d_e = d_out * w_e        # gradient to this expert
+            grad_we = (d_e.T @ x_in).astype(np.float32)
+            gradients[id(layer) * 10 + e] = grad_we
 
-        # d_expert0 = d_out * w0_weight, d_expert1 = d_out * w1_weight
-        d_e0 = d_expert_out * w0_weight  # (seq, d) — gradient to expert 0
-        d_e1 = d_expert_out * w1_weight  # (seq, d) — gradient to expert 1
+            # dx through expert: GPU for first pair, CPU for rest
+            if e < 2 and gpu_handle is not None and _moqe_gpu is not None:
+                pass  # Accumulated below via GPU batch
+            else:
+                dx_expert += (d_e @ expert_fps[e]).astype(np.float32)
 
-        # grad_W for each expert: full batch (not masked — Gumbel gives all tokens)
-        grad_w0 = (d_e0.T @ x_in).astype(np.float32)
-        grad_w1 = (d_e1.T @ x_in).astype(np.float32)
-
-        # dx through experts: dx = w0 * (d_out @ W0) + w1 * (d_out @ W1)
-        if gpu_handle is not None and _moqe_gpu is not None:
+        # GPU backward for first expert pair (0, 1)
+        if n_exp >= 2 and gpu_handle is not None and _moqe_gpu is not None:
             try:
+                d_e0 = d_out * weights[:, 0:1]
+                d_e1 = d_out * weights[:, 1:2]
                 d_e0_c = np.ascontiguousarray(d_e0)
                 d_e1_c = np.ascontiguousarray(d_e1)
                 dx0_gpu, dx1_gpu = _moqe_gpu.moqe_layer_backward_dx(
                     gpu_device, gpu_handle, l_idx, d_e0_c, d_e1_c)
-                dx_expert = np.asarray(dx0_gpu, dtype=np.float32) + np.asarray(dx1_gpu, dtype=np.float32)
+                dx_expert += np.asarray(dx0_gpu, dtype=np.float32)
+                dx_expert += np.asarray(dx1_gpu, dtype=np.float32)
             except Exception:
-                dx_expert = (d_e0 @ w0_fp + d_e1 @ w1_fp).astype(np.float32)
+                # CPU fallback for first pair
+                dx_expert += (d_out * weights[:, 0:1] @ expert_fps[0]).astype(np.float32)
+                if n_exp > 1:
+                    dx_expert += (d_out * weights[:, 1:2] @ expert_fps[1]).astype(np.float32)
+
+        # ── Router gradient via N-way Gumbel-Softmax Jacobian ──
+        # Reconstruct expert outputs from dequant cache
+        d_scalars = np.zeros((seq_len, n_exp), dtype=np.float32)
+        for e in range(n_exp):
+            e_out = (x_in @ expert_fps[e].T).astype(np.float32)
+            d_scalars[:, e] = np.sum(d_out * e_out, axis=-1)
+
+        # Softmax Jacobian: d_logit = w * (d_scalar - sum(w * d_scalar)) / T
+        weighted_sum = np.sum(weights * d_scalars, axis=-1, keepdims=True)
+        d_logits_router = weights * (d_scalars - weighted_sum) / max(gumbel_temp, 1e-6)
+
+        # Balance gradient: push fractions toward targets
+        target_frac = np.array([s.target_fraction for s in layer.expert_specs], dtype=np.float32)
+        if target_frac.sum() < 1e-6:
+            target_frac = np.ones(n_exp, dtype=np.float32) / n_exp
         else:
-            dx_expert = (d_e0 @ w0_fp + d_e1 @ w1_fp).astype(np.float32)
+            target_frac /= target_frac.sum()
+        actual_frac = weights.mean(axis=0)
+        balance_grad = 0.1 * 2.0 * (actual_frac - target_frac) / seq_len
 
-        # Gradient to router weights: d_loss/d_weights
-        # out = w0 * e0_out + w1 * e1_out
-        # Need e0_out and e1_out from forward — reconstruct from dequant cache
-        e0_out = (x_in @ w0_fp.T).astype(np.float32)
-        e1_out = (x_in @ w1_fp.T).astype(np.float32)
-        # d_loss/d_w0 = sum(d_out * e0_out), d_loss/d_w1 = sum(d_out * e1_out)
-        d_w0_scalar = np.sum(d_expert_out * e0_out, axis=-1)  # (seq,)
-        d_w1_scalar = np.sum(d_expert_out * e1_out, axis=-1)  # (seq,)
-        # Gumbel-Softmax gradient: d_weights/d_logits (Jacobian of softmax)
-        # For 2-class: d_softmax/d_logit = w0*w1 (both directions)
-        gs_deriv = w0_weight.ravel() * w1_weight.ravel() / max(gumbel_temp, 1e-6)
-        d_logit_1 = (d_w1_scalar - d_w0_scalar) * gs_deriv  # (seq,)
+        total_d_logits = d_logits_router + balance_grad[None, :]  # (seq, n_experts)
 
-        # Store expert weight gradients (STE: applied to FP32 shadow weights)
-        gradients[id(layer) * 10 + 0] = grad_w0  # Expert 0
-        gradients[id(layer) * 10 + 1] = grad_w1  # Expert 1
+        # Router: W is (n_experts, d_model), b is (n_experts,)
+        grad_router_W = (total_d_logits.T @ x_in).astype(np.float32)
+        grad_router_b = total_d_logits.sum(axis=0).astype(np.float32)
+        gradients[id(layer.router.W)] = grad_router_W
+        gradients[id(layer.router.b)] = grad_router_b
 
-        # ── Router gradient (entropy-gated Gumbel-Softmax) ─────────────
-        # d_loss/d_logit flows through the Gumbel-Softmax weights.
-        # d_logit_1 was computed above from expert output gradients.
-        # Balance gradient is now per-token based on teacher entropy.
-        probs = router_probs_per_layer[l_idx]
-        # Per-token balance gradient: 2 * (actual_prob - dynamic_target)
-        per_token_balance_grad = 2.0 * (probs - dynamic_8b_target)  # (seq,)
-        balance_d_logit = 0.1 * per_token_balance_grad * gs_deriv / seq_len
-
-        total_d_logit = d_logit_1 + balance_d_logit  # (seq,)
-
-        # d_logit/d_w = x_in, d_logit/d_b = 1
-        d_router_w = (total_d_logit[:, np.newaxis] * x_in).sum(axis=0).astype(np.float32)
-        d_router_b = np.atleast_1d(np.float32(total_d_logit.sum()))
-
-        gradients[id(layer.router.w)] = d_router_w
-        gradients[id(layer.router.b)] = d_router_b
-
-        # Propagate gradient through residual: dx += dx_expert
         dx = dx + dx_expert
+
+    # ── Backward: position embeddings ──────────────────────────────
+    if hasattr(model, 'pos_embed') and model.pos_embed is not None:
+        grad_pos = np.zeros_like(model.pos_embed)
+        grad_pos[:seq_len] = dx
+        gradients[id(model.pos_embed)] = grad_pos
 
     # ── Backward: embedding ──────────────────────────────────────────
     # x = embedding[input_ids] → scatter-add dx into embedding gradient
@@ -864,18 +871,18 @@ def run_offline_distillation(
     _train_dtype = np.float32
 
     for layer in model.layers:
-        w0_fp = _dequant_weights(layer.w0_int, layer.s0, layer.block_size,
-                                 dtype=_train_dtype)
-        w1_fp = _dequant_weights(layer.w1_int, layer.s1, layer.block_size,
-                                 dtype=_train_dtype)
-        shadow_weights[id(layer) * 10 + 0] = w0_fp
-        shadow_weights[id(layer) * 10 + 1] = w1_fp
-        gpu_weight_list.append(w0_fp)
-        gpu_weight_list.append(w1_fp)
-        all_params.append(w0_fp)
-        all_params.append(w1_fp)
-        all_params.append(layer.router.w)
+        for e in range(layer.n_experts):
+            w_fp = _dequant_weights(layer.expert_w_int[e], layer.expert_scales[e],
+                                     layer.block_size, dtype=_train_dtype)
+            shadow_weights[id(layer) * 10 + e] = w_fp
+            gpu_weight_list.append(w_fp)
+            all_params.append(w_fp)
+        all_params.append(layer.router.W)
         all_params.append(np.atleast_1d(layer.router.b))
+
+    # Position embeddings: trainable if present
+    if hasattr(model, 'pos_embed') and model.pos_embed is not None:
+        all_params.append(model.pos_embed)
 
     # Embedding + out_proj frozen (not in optimizer)
 
@@ -901,9 +908,10 @@ def run_offline_distillation(
                 model.d_model, model.n_layers, max_seq_len)
             model._gpu_train_handle = gpu_handle
             model._gpu_train_device = gpu_device
-            vram_mb = model.n_layers * 2 * 2 * model.d_model**2 * 4 / 1e6
+            n_total_experts = len(gpu_weight_list)
+            vram_mb = n_total_experts * 2 * model.d_model**2 * 4 / 1e6
             log.info("MoQE GPU training: %d experts on GPU (%.0fMB VRAM)",
-                     model.n_layers * 2, vram_mb)
+                     n_total_experts, vram_mb)
         except Exception as e:
             log.warning("GPU training init failed: %s — using CPU", e)
             model._gpu_train_handle = None
@@ -933,7 +941,7 @@ def run_offline_distillation(
             # Forward + backward
             grads, stats = moqe_backward(
                 model, input_ids, labels, teacher_logits,
-                temperature=temperature, target_8bit=target_8bit,
+                temperature=temperature,
             )
 
             total_loss += stats["total_loss"]
@@ -948,15 +956,14 @@ def run_offline_distillation(
                 # (embedding + out_proj frozen — not in optimizer)
                 opt_grads = {}
                 for layer in model.layers:
-                    sw0 = shadow_weights[id(layer) * 10 + 0]
-                    sw1 = shadow_weights[id(layer) * 10 + 1]
-                    opt_grads[id(sw0)] = grads.get(id(layer) * 10 + 0, np.zeros_like(sw0))
-                    opt_grads[id(sw1)] = grads.get(id(layer) * 10 + 1, np.zeros_like(sw1))
-                    opt_grads[id(layer.router.w)] = grads.get(id(layer.router.w),
-                        np.zeros(layer.d_model, dtype=np.float32))
+                    for e in range(layer.n_experts):
+                        sw = shadow_weights[id(layer) * 10 + e]
+                        opt_grads[id(sw)] = grads.get(id(layer) * 10 + e, np.zeros_like(sw))
+                    opt_grads[id(layer.router.W)] = grads.get(id(layer.router.W),
+                        np.zeros_like(layer.router.W))
                     b_arr = np.atleast_1d(layer.router.b)
                     opt_grads[id(b_arr)] = grads.get(id(layer.router.b),
-                        np.zeros(1, dtype=np.float32))
+                        np.zeros_like(layer.router.b))
 
                 # Apply gradients
                 try:
@@ -982,30 +989,33 @@ def run_offline_distillation(
                             step = (_lr * clip_coef * g).astype(p.dtype)
                             np.subtract(p, step, out=p)
 
-                # Re-quantize shadow weights back to INT4/INT8
+                # Re-quantize shadow weights (STE: quantize for forward, keep FP32 shadow for grad)
+                from cubemind.execution.moqe import _quantize_symmetric
                 for li, layer in enumerate(model.layers):
-                    sw0 = shadow_weights[id(layer) * 10 + 0]
-                    sw1 = shadow_weights[id(layer) * 10 + 1]
-
-                    layer.w0_int, s0_flat = _quantize_weights_int4(sw0, layer.block_size)
-                    layer.w1_int, s1_flat = _quantize_weights_int8(sw1, layer.block_size)
-
                     num_blocks = (layer.d_model + layer.block_size - 1) // layer.block_size
-                    layer.s0 = s0_flat[:num_blocks * layer.d_out].reshape(layer.d_out, num_blocks)
-                    layer.s1 = s1_flat[:num_blocks * layer.d_out].reshape(layer.d_out, num_blocks)
+                    for e in range(layer.n_experts):
+                        sw = shadow_weights[id(layer) * 10 + e]
+                        bits = layer.expert_specs[e].bits
+                        # Quantize a COPY — shadow stays FP32 for gradient accumulation
+                        layer.expert_w_int[e], s_flat = _quantize_symmetric(
+                            sw, bits, layer.block_size)
+                        layer.expert_scales[e] = s_flat[:num_blocks * layer.d_out].reshape(
+                            layer.d_out, num_blocks)
 
-                    # Re-upload updated weights to GPU (persistent W + W^T)
-                    if model._gpu_train_handle is not None and _moqe_gpu is not None:
-                        _moqe_gpu.moqe_train_update_expert(
-                            model._gpu_train_device, model._gpu_train_handle,
-                            li, 0, sw0)
-                        _moqe_gpu.moqe_train_update_expert(
-                            model._gpu_train_device, model._gpu_train_handle,
-                            li, 1, sw1)
+                        # Re-upload to GPU
+                        if model._gpu_train_handle is not None and _moqe_gpu is not None:
+                            try:
+                                _moqe_gpu.moqe_train_update_expert(
+                                    model._gpu_train_device, model._gpu_train_handle,
+                                    li, e, sw)
+                            except Exception:
+                                pass
 
             if n_batches % 1 == 0:
                 avg_loss = total_loss / n_batches
+                avg_ce = total_ce / n_batches
                 avg_8bit = total_8bit / n_batches * 100
+                ppl = math.exp(min(avg_ce, 20))
                 extra = ""
                 if hasattr(optimizer, 'current_lr'):
                     extra += f" | lr={optimizer.current_lr:.6f}"
@@ -1016,6 +1026,7 @@ def run_offline_distillation(
                 extra += f" | H={stats.get('entropy', 0):.1f}"
                 extra += f" | cfl={stats.get('conflict_frac', 0)*100:.0f}%"
                 print(f"  E{epoch+1} B{n_batches:>4} | L={avg_loss:.4f} "
+                      f"| CE={avg_ce:.3f} | PPL={ppl:.1f} "
                       f"| 8b={avg_8bit:.1f}%{extra}")
 
             if save_dir and n_batches % save_every == 0:
@@ -1057,8 +1068,8 @@ def _save_checkpoint(model, shadow_weights, optimizer, epoch, batch, save_dir):
         save_dict[f"layer{i}_s0"] = layer.s0
         save_dict[f"layer{i}_w1_int"] = layer.w1_int
         save_dict[f"layer{i}_s1"] = layer.s1
-        save_dict[f"layer{i}_router_w"] = layer.router.w
-        save_dict[f"layer{i}_router_b"] = np.array([layer.router.b])
+        save_dict[f"layer{i}_router_w"] = layer.router.W
+        save_dict[f"layer{i}_router_b"] = np.asarray(layer.router.b)
         sw_key_0 = id(layer) * 10 + 0
         sw_key_1 = id(layer) * 10 + 1
         if sw_key_0 in shadow_weights:
@@ -1086,8 +1097,8 @@ def load_checkpoint(model, path: str) -> dict:
         layer.s0 = data[f"layer{i}_s0"]
         layer.w1_int = data[f"layer{i}_w1_int"]
         layer.s1 = data[f"layer{i}_s1"]
-        layer.router.w = data[f"layer{i}_router_w"]
-        layer.router.b = np.float32(data[f"layer{i}_router_b"][0])
+        layer.router.W = data[f"layer{i}_router_w"]
+        layer.router.b = data[f"layer{i}_router_b"].astype(np.float32)
 
     info = {}
     if "lr_history" in data:

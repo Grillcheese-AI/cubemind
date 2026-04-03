@@ -8,7 +8,7 @@ from cubemind.execution.moqe import MoQEModel
 from cubemind.training.moqe_distillation import run_offline_distillation, load_checkpoint
 
 model = MoQEModel(vocab_size=151936, d_model=2048, n_layers=12)
-load_checkpoint(model, "data/checkpoints/checkpoint_e0_b1000.npz")
+load_checkpoint(model, "data/checkpoints/checkpoint_e1_b0.npz")
 
 # Convert frozen weights to float16 to save ~2.4GB RAM
 model.embedding = model.embedding.astype(np.float16)
@@ -17,12 +17,12 @@ print("Starting E2 multi-teacher training (float16 + SGD)...", flush=True)
 
 run_offline_distillation(
     model,
-    data_dir="data/logits_512",  # Qwen-vocab, same data as E1 (proven stable)
+    data_dir="data/teacher/",  # Qwen-vocab, same data as E1 (proven stable)
     epochs=1,
-    max_seq_len=512,
+    max_seq_len=1024,
     temperature=2.0,
     target_8bit=0.15,
-    lr=0.00005,
+    lr=0.00009,
     save_dir="data/checkpoints",
     save_every=50,
     chunk_gb=1.0,

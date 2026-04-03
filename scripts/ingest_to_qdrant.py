@@ -79,7 +79,7 @@ def categorize_text(text: str, categorizer=None) -> dict:
         subdomain = result["subdomain"]
         confidence = result["confidence"]
 
-        # Map subdomain → domain using realm hierarchy
+        # Map subdomain -> domain using realm hierarchy
         domain = _subdomain_to_domain.get(subdomain, "general")
 
         return {
@@ -110,7 +110,7 @@ def categorize_text(text: str, categorizer=None) -> dict:
             "realm": best, "quality_score": min(1.0, scores[best] / 10.0)}
 
 
-# Subdomain → domain mapping (built from realm hierarchy)
+# Subdomain -> domain mapping (built from realm hierarchy)
 _subdomain_to_domain = {
     "physics": "science", "chemistry": "science", "biology": "science",
     "astronomy": "science", "geology": "science", "ecology": "science",
@@ -145,13 +145,49 @@ _subdomain_to_domain = {
 
 # ── Embedder ─────────────────────────────────────────────────────────────────
 
+class GGUFEmbedder:
+    """GGUF-based embedder using llama-cpp-python. Much faster than sentence-transformers on GPU."""
+
+    def __init__(self, model_path: str, n_gpu_layers: int = -1):
+        from llama_cpp import Llama
+        self._model = Llama(
+            model_path=model_path, embedding=True,
+            n_ctx=512, n_gpu_layers=n_gpu_layers, verbose=False,
+        )
+
+    def encode(self, texts, show_progress_bar=False, normalize_embeddings=True, batch_size=64):
+        import numpy as np
+        embeddings = []
+        for text in texts:
+            emb = self._model.embed(text)
+            vec = np.array(emb, dtype=np.float32)
+            if normalize_embeddings:
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec /= norm
+            embeddings.append(vec)
+        return np.stack(embeddings)
+
+
 def get_embedder(model_name: str = "microsoft/harrier-oss-v1-0.6b"):
-    """Load sentence-transformers embedder."""
+    """Load embedder — GGUF first, then sentence-transformers fallback."""
+    # Try GGUF path first
+    gguf_path = "data/external_llms/harrier-oss-v1-0.6b.Q8_0.gguf"
+    try:
+        from pathlib import Path
+        if Path(gguf_path).exists():
+            print(f"Using GGUF embedder: {gguf_path}")
+            return GGUFEmbedder(gguf_path)
+    except Exception as e:
+        print(f"GGUF embedder failed: {e}")
+
+    # Fallback to sentence-transformers
     try:
         from sentence_transformers import SentenceTransformer
+        print(f"Using sentence-transformers: {model_name}")
         return SentenceTransformer(model_name, trust_remote_code=True)
     except ImportError:
-        print("pip install sentence-transformers")
+        print("pip install sentence-transformers OR llama-cpp-python")
         return None
 
 
@@ -178,7 +214,7 @@ def ingest(
     embedder_name: str = "microsoft/harrier-oss-v1-0.6b",
     skip_existing: int = 0,
 ):
-    print(f"Ingesting {input_path} → Qdrant {collection}")
+    print(f"Ingesting {input_path} -> Qdrant {collection}")
 
     embedder = get_embedder(embedder_name)
     if embedder is None:
@@ -271,8 +307,8 @@ def ingest(
     print(f"\nDone: {total:,} records in {elapsed:.0f}s ({total/elapsed:.0f} rec/s)")
     print(f"Skipped: {skipped:,}")
     print(f"Categories:")
-    for cat, count in sorted(cat_counts.items(), key=lambda x: -x[1]):
-        print(f"  {cat}: {count:,}")
+    for realm, count in sorted(domain_counts.items(), key=lambda x: -x[1]):
+        print(f"  {realm}: {count:,}")
 
 
 def _push_batch(client, embedder, collection, texts, meta_list, ids):

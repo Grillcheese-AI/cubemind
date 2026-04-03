@@ -22,3 +22,6 @@ vcpkg-configuration.json
 vcpkg.json
 docs/Medium_Article.md
 docs/distil_to_moqe.ipynb
+/.hypothesis
+checkllama.py
+/cloned
