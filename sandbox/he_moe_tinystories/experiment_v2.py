@@ -28,7 +28,7 @@ from loguru import logger
 class Config:
     seq_len: int = 64
     hidden_dim: int = 128
-    n_experts: int = 8
+    n_experts: int = 32
     top_k: int = 2
     fast_lr: float = 0.01
     slow_lr: float = 0.005
@@ -39,12 +39,16 @@ class Config:
     fast_ratio: float = 0.7
     train_steps: int = 10000
     warmup_steps: int = 500
-    val_every: int = 500
+    val_every: int = 50
     batch_size: int = 32
     max_stories: int = 5000
     device: str = "cpu"
     vocab_size: int = 0  # Set by tokenizer
     use_addition_only: bool = False  # Use L1 distance instead of matmul
+    use_eggroll: bool = True  # EGGROLL perturbation-based global update
+    eggroll_sigma: float = 0.005  # Perturbation scale
+    eggroll_every: int = 5  # Apply EGGROLL every N steps
+    eggroll_lr: float = 0.01  # EGGROLL learning rate
 
 
 # ── Data with BPE ────────────────────────────────────────────────────────────
@@ -332,6 +336,91 @@ class HEMoEv2(nn.Module):
 
         return loss
 
+    @torch.no_grad()
+    def eggroll_step(self, x, y):
+        """EGGROLL: rank-1 perturbation-based global update.
+
+        1. Compute baseline loss
+        2. Generate rank-1 perturbation for each expert weight
+        3. Apply perturbation, compute perturbed loss
+        4. If loss improved → keep. If not → revert + try negative.
+        5. Scale by merit (how much each expert contributed).
+
+        Cost: 2 forward passes (baseline + perturbed). No backward.
+        """
+        B, S = x.shape
+        y_flat = y.view(-1)
+
+        # Baseline loss
+        logits_base = self.forward(x)
+        loss_base = TF.cross_entropy(logits_base.view(-1, logits_base.shape[-1]), y_flat).item()
+
+        sigma = self.cfg.eggroll_sigma
+        lr = self.cfg.eggroll_lr
+        rng = torch.Generator()
+
+        # Perturb expert weights (rank-1: u @ v.T)
+        for idx in range(self.cfg.n_experts):
+            d_out, d_in = self.expert_w[idx].shape
+            u = torch.randn(d_out, generator=rng) * sigma
+            v = torch.randn(d_in, generator=rng) * sigma
+            perturbation = torch.outer(u, v)
+
+            # Try positive perturbation
+            self.expert_w.data[idx] += perturbation
+            logits_pos = self.forward(x)
+            loss_pos = TF.cross_entropy(logits_pos.view(-1, logits_pos.shape[-1]), y_flat).item()
+
+            if loss_pos < loss_base:
+                # Positive helped — keep it, scale by improvement
+                improvement = loss_base - loss_pos
+                self.expert_w.data[idx] += lr * improvement * perturbation
+                loss_base = loss_pos  # Update baseline
+            else:
+                # Revert positive, try negative
+                self.expert_w.data[idx] -= perturbation
+                self.expert_w.data[idx] -= perturbation  # negative direction
+                logits_neg = self.forward(x)
+                loss_neg = TF.cross_entropy(logits_neg.view(-1, logits_neg.shape[-1]), y_flat).item()
+
+                if loss_neg < loss_base:
+                    # Negative helped
+                    improvement = loss_base - loss_neg
+                    self.expert_w.data[idx] -= lr * improvement * perturbation
+                    loss_base = loss_neg
+                else:
+                    # Neither helped — revert
+                    self.expert_w.data[idx] += perturbation
+
+        # Also perturb expert positions (mu)
+        for idx in range(self.cfg.n_experts):
+            d = self.expert_mu[idx].shape[0]
+            delta_mu = torch.randn(d) * sigma * 0.1
+
+            self.expert_mu.data[idx] += delta_mu
+            logits_p = self.forward(x)
+            loss_p = TF.cross_entropy(logits_p.view(-1, logits_p.shape[-1]), y_flat).item()
+
+            if loss_p < loss_base:
+                loss_base = loss_p
+            else:
+                self.expert_mu.data[idx] -= delta_mu  # revert
+
+        # Also perturb expert gates
+        for idx in range(self.cfg.n_experts):
+            delta_g = torch.randn(1) * sigma * 0.01
+            self.expert_gate.data[idx] += delta_g.item()
+
+            logits_g = self.forward(x)
+            loss_g = TF.cross_entropy(logits_g.view(-1, logits_g.shape[-1]), y_flat).item()
+
+            if loss_g < loss_base:
+                loss_base = loss_g
+            else:
+                self.expert_gate.data[idx] -= delta_g.item()
+
+        return loss_base
+
 
 # ── MLP Baseline ─────────────────────────────────────────────────────────────
 
@@ -405,6 +494,13 @@ def train(cfg: Config):
             # LR schedule
             lr_scale = lr_schedule(step, cfg.warmup_steps, cfg.train_steps)
             loss = model.hebbian_update(x, y, lr_scale=lr_scale)
+
+            # EGGROLL global perturbation step
+            if cfg.use_eggroll and step % cfg.eggroll_every == 0 and step > cfg.warmup_steps:
+                egg_loss = model.eggroll_step(x, y)
+                if step % cfg.val_every == 0:
+                    logger.debug("EGGROLL step={} loss_before={:.3f} loss_after={:.3f}",
+                                 step, loss, egg_loss)
 
             if step % cfg.val_every == 0:
                 val_ppl, val_loss = compute_ppl(model, val_loader, cfg.device)
