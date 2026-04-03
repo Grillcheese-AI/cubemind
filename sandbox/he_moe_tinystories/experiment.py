@@ -34,7 +34,7 @@ class Config:
     temp: float = 1.0
     fast_ratio: float = 0.7
     train_steps: int = 5000
-    val_every: int = 500
+    val_every: int = 50
     batch_size: int = 32
     max_text_chars: int = 2_000_000  # Limit for quick testing
     device: str = "cpu"
@@ -329,6 +329,6 @@ if __name__ == "__main__":
     cfg = Config(
         train_steps=3000,
         max_text_chars=500_000,  # ~500K chars for quick test
-        batch_size=32,
+        batch_size=32
     )
     train_he_moe(cfg)

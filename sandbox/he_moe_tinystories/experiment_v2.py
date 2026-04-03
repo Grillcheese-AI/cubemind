@@ -40,11 +40,11 @@ class Config:
     train_steps: int = 10000
     warmup_steps: int = 500
     val_every: int = 50
-    batch_size: int = 32
+    batch_size: int = 8  # Smaller batch for addition-only (L1 is slower than matmul)
     max_stories: int = 5000
     device: str = "cpu"
     vocab_size: int = 0  # Set by tokenizer
-    use_addition_only: bool = False  # Use L1 distance instead of matmul
+    use_addition_only: bool = True  # Use L1 distance instead of matmul (zero multiplications)
     use_eggroll: bool = True  # EGGROLL perturbation-based global update
     eggroll_sigma: float = 0.005  # Perturbation scale
     eggroll_every: int = 5  # Apply EGGROLL every N steps
@@ -114,48 +114,74 @@ def load_tinystories_bpe(cfg: Config):
 class AdditionLinearTorch(nn.Module):
     """Multiplication-free linear: y = -||W - x||₁ + bias.
 
-    Zero multiplications. Only additions, subtractions, absolute values.
-    Weight rows are templates — output = negative L1 distance to each template.
+    Uses grilly as primary compute backend via cubemind.brain.addition_linear.
+    Wraps in nn.Module for compatibility with the torch training loop.
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = nn.Parameter(torch.randn(out_features, in_features) * 0.1)
-        self.bias = nn.Parameter(torch.zeros(out_features)) if bias else None
+
+        # Use cubemind's grilly-backed AdditionLinear
+        from cubemind.brain.addition_linear import AdditionLinear as GrillyAdditionLinear
+        self._grilly_layer = GrillyAdditionLinear(
+            in_features=in_features, out_features=out_features,
+            bias=bias, seed=42)
+
+        # Keep torch parameters for the Hebbian update loop
+        self.weight = nn.Parameter(
+            torch.from_numpy(self._grilly_layer.weight_patterns.copy()))
+        if bias and self._grilly_layer.bias is not None:
+            self.bias = nn.Parameter(
+                torch.from_numpy(self._grilly_layer.bias.copy()))
+        else:
+            self.bias = None
+
+    def _sync_to_grilly(self):
+        """Push torch params back to grilly layer."""
+        self._grilly_layer.weight_patterns = self.weight.detach().numpy().copy()
+        if self.bias is not None and self._grilly_layer.bias is not None:
+            self._grilly_layer.bias = self.bias.detach().numpy().copy()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (..., in_features) → (..., out_features)
-        # -||W - x||₁ = -sum_j |W[i,j] - x[j]| for each output i
-        diff = x.unsqueeze(-2) - self.weight  # (..., out, in)
-        dist = diff.abs().sum(dim=-1)  # (..., out)
-        out = -dist
-        if self.bias is not None:
-            out = out + self.bias
-        return out
+        batch_shape = x.shape[:-1]
+        x_np = x.detach().numpy().astype(np.float32)
+
+        # Sync torch → grilly (in case Hebbian updated the params)
+        self._sync_to_grilly()
+
+        # Run on grilly (Vulkan GPU if available, numpy fallback)
+        if x_np.ndim == 1:
+            x_np = x_np.reshape(1, -1)
+        out_np = self._grilly_layer.forward(x_np.reshape(-1, self.in_features))
+        return torch.from_numpy(out_np).view(*batch_shape, self.out_features)
 
 
 class SignActivationTorch(nn.Module):
-    """Sign activation: {-1, 0, +1}. No multiplications.
-
-    Uses straight-through estimator for gradient (clamped).
-    """
+    """Sign activation via cubemind.brain.addition_linear (grilly-backed)."""
 
     def __init__(self, threshold: float = 0.0):
         super().__init__()
-        self.threshold = nn.Parameter(torch.tensor(threshold))
+        from cubemind.brain.addition_linear import SignActivation
+        self._grilly_act = SignActivation(threshold=threshold)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        shifted = x - self.threshold
-        # STE: forward = sign, backward = clamp
-        return shifted.sign() + shifted - shifted.detach()
+        out_np = self._grilly_act.forward(x.detach().numpy())
+        return torch.from_numpy(out_np)
 
 
 class AdditiveSigmoidTorch(nn.Module):
-    """Addition-only sigmoid: clamp(0.5 + 0.25 * x, 0, 1). No multiplications."""
+    """Additive sigmoid via cubemind.brain.addition_linear (grilly-backed)."""
+
+    def __init__(self):
+        super().__init__()
+        from cubemind.brain.addition_linear import AdditiveReceptance
+        # Use a simple 1:1 receptance as sigmoid approximation
+        self._use_simple = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # clamp(0.5 + 0.25 * x, 0, 1) — same as cubemind.functional.additive_sigmoid
         return torch.clamp(0.5 + 0.25 * x, 0.0, 1.0)
 
 
@@ -276,29 +302,45 @@ class HEMoEv2(nn.Module):
         h = self.pos_enc(self.embed(x)).view(B * S, d)
         y_flat = y.view(-1)
 
-        # Fast forward
-        h_fast = torch.relu(h @ self.fast_w1.T)
-        logits = h_fast @ self.fast_w2.T
-        probs = TF.softmax(logits / self.cfg.temp, dim=-1)
+        # Fast forward + update (addition-only or matmul)
+        if self.cfg.use_addition_only:
+            h_fast = self.fast_act(self.fast_layer1(h))
+            logits = self.fast_layer2(h_fast)
+            probs = TF.softmax(logits / self.cfg.temp, dim=-1)
+            target = TF.one_hot(y_flat, logits.shape[-1]).float()
+            error = target - probs
+            loss = TF.cross_entropy(logits, y_flat).item()
 
-        # Per-position error
-        target = TF.one_hot(y_flat, logits.shape[-1]).float()
-        error = target - probs
+            # Update addition-only weights (nudge templates toward input patterns)
+            # Layer 2: move templates toward h_fast weighted by error
+            grad_w2 = error.T @ h_fast / (B * S)
+            self.fast_layer2.weight.data += torch.clamp(lr * grad_w2, -0.1, 0.1)
 
-        # Loss for logging
-        loss = TF.cross_entropy(logits, y_flat).item()
+            # Layer 1: propagate error through layer 2
+            error_h = error @ self.fast_layer2.weight
+            grad_w1 = error_h.T @ h / (B * S)
+            self.fast_layer1.weight.data += torch.clamp(lr * 0.5 * grad_w1, -0.1, 0.1)
 
-        # Fast W2 update
-        grad_w2 = error.T @ h_fast / (B * S)
-        self.fast_w2.data += torch.clamp(lr * grad_w2, -0.1, 0.1)
+            # Project error to hidden for slow path
+            error_hidden = (error.mean(dim=0) @ self.fast_layer2.weight).detach()
+        else:
+            h_fast = torch.relu(h @ self.fast_w1.T)
+            logits = h_fast @ self.fast_w2.T
+            probs = TF.softmax(logits / self.cfg.temp, dim=-1)
+            target = TF.one_hot(y_flat, logits.shape[-1]).float()
+            error = target - probs
+            loss = TF.cross_entropy(logits, y_flat).item()
 
-        # Fast W1 update (Hebbian propagation)
-        error_h = (error @ self.fast_w2) * (h_fast > 0).float()
-        grad_w1 = error_h.T @ h / (B * S)
-        self.fast_w1.data += torch.clamp(lr * 0.5 * grad_w1, -0.1, 0.1)
+            # Fast W2 update
+            grad_w2 = error.T @ h_fast / (B * S)
+            self.fast_w2.data += torch.clamp(lr * grad_w2, -0.1, 0.1)
 
-        # Slow path updates
-        error_hidden = (error.mean(dim=0) @ self.fast_w2).detach()
+            # Fast W1 update (Hebbian propagation)
+            error_h = (error @ self.fast_w2) * (h_fast > 0).float()
+            grad_w1 = error_h.T @ h / (B * S)
+            self.fast_w1.data += torch.clamp(lr * 0.5 * grad_w1, -0.1, 0.1)
+
+            error_hidden = (error.mean(dim=0) @ self.fast_w2).detach()
         kernels = self.kernel(h, self.expert_mu)
         scores = kernels * self.expert_charge.unsqueeze(0)
         _, top_idx = scores.mean(dim=0).topk(self.cfg.top_k)
@@ -359,8 +401,13 @@ class HEMoEv2(nn.Module):
         lr = self.cfg.eggroll_lr
         rng = torch.Generator()
 
-        # Perturb expert weights (rank-1: u @ v.T)
-        for idx in range(self.cfg.n_experts):
+        # Only perturb top-k active experts (not all 32 — saves ~10x compute)
+        h_flat = self.pos_enc(self.embed(x)).view(-1, self.cfg.hidden_dim)
+        kernels = self.kernel(h_flat, self.expert_mu)
+        scores = kernels * self.expert_charge.unsqueeze(0)
+        _, active_idx = scores.mean(dim=0).topk(min(self.cfg.top_k * 2, self.cfg.n_experts))
+
+        for idx in active_idx:
             d_out, d_in = self.expert_w[idx].shape
             u = torch.randn(d_out, generator=rng) * sigma
             v = torch.randn(d_in, generator=rng) * sigma
@@ -392,8 +439,8 @@ class HEMoEv2(nn.Module):
                     # Neither helped — revert
                     self.expert_w.data[idx] += perturbation
 
-        # Also perturb expert positions (mu)
-        for idx in range(self.cfg.n_experts):
+        # Perturb positions of active experts only
+        for idx in active_idx:
             d = self.expert_mu[idx].shape[0]
             delta_mu = torch.randn(d) * sigma * 0.1
 
@@ -406,8 +453,8 @@ class HEMoEv2(nn.Module):
             else:
                 self.expert_mu.data[idx] -= delta_mu  # revert
 
-        # Also perturb expert gates
-        for idx in range(self.cfg.n_experts):
+        # Perturb gates of active experts only
+        for idx in active_idx:
             delta_g = torch.randn(1) * sigma * 0.01
             self.expert_gate.data[idx] += delta_g.item()
 
