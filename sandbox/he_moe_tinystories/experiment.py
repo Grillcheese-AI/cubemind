@@ -184,20 +184,22 @@ class HEMoETorch(nn.Module):
         h_mean = h.mean(dim=0)
         error_mean = error.mean(dim=0)
 
+        # Project error from vocab space back to hidden space for expert updates
+        # error_mean is (vocab,), project to (hidden,) via fast_w2.T
+        error_hidden = (error_mean @ self.fast_w2).detach()  # (hidden,)
+
         for idx in top_idx:
             # Coulomb force: move expert toward input centroid
             force = self.expert_charge[idx] * (h_mean - self.expert_mu[idx])
             self.expert_mu.data[idx] += self.cfg.slow_lr * torch.clamp(force, -0.5, 0.5)
 
-            # Expert weight update (error-driven)
-            e_out = h @ self.expert_w[idx].T
-            e_error = error_mean[:self.cfg.hidden_dim] if error_mean.shape[0] > self.cfg.hidden_dim else error_mean
-            grad_ew = torch.outer(e_error[:self.cfg.hidden_dim], h_mean)
+            # Expert weight update (error-driven in hidden space)
+            grad_ew = torch.outer(error_hidden, h_mean)
             self.expert_w.data[idx] += torch.clamp(self.cfg.slow_lr * grad_ew, -0.1, 0.1)
 
             # Traces
             self.a_trace[idx] = 0.9 * self.a_trace[idx] + kernels[:, idx].mean()
-            self.e_trace[idx] = 0.9 * self.e_trace[idx] + e_error[:self.cfg.hidden_dim]
+            self.e_trace[idx] = 0.9 * self.e_trace[idx] + error_hidden
 
         # Consolidate inactive
         for idx in range(self.cfg.n_experts):
@@ -269,8 +271,10 @@ def train_he_moe(cfg: Config):
 
     t0 = time.time()
     best_val_ppl = float("inf")
+    step = 0
 
-    for step, (x, y) in enumerate(train_loader):
+    while step < cfg.train_steps:
+      for x, y in train_loader:
         if step >= cfg.train_steps:
             break
         x, y = x.to(cfg.device), y.to(cfg.device)
@@ -282,6 +286,7 @@ def train_he_moe(cfg: Config):
                         step, loss, val_ppl, val_loss)
             if val_ppl < best_val_ppl:
                 best_val_ppl = val_ppl
+        step += 1
 
     elapsed = time.time() - t0
     test_ppl, test_loss = compute_ppl(model, test_loader, cfg.device)
@@ -292,14 +297,18 @@ def train_he_moe(cfg: Config):
     logger.info("Training MLP baseline (Adam)...")
     mlp = MLPBaseline(vocab_size, cfg.hidden_dim).to(cfg.device)
     opt = torch.optim.Adam(mlp.parameters(), lr=0.001)
-    for step, (x, y) in enumerate(train_loader):
-        if step >= min(cfg.train_steps, 3000):
+    mlp_step = 0
+    mlp_max = min(cfg.train_steps, 3000)
+    while mlp_step < mlp_max:
+      for x, y in train_loader:
+        if mlp_step >= mlp_max:
             break
         x, y = x.to(cfg.device), y.to(cfg.device)
         opt.zero_grad()
         loss = TF.cross_entropy(mlp(x), y.view(-1))
         loss.backward()
         opt.step()
+        mlp_step += 1
 
     mlp_ppl, _ = compute_ppl(mlp, test_loader, cfg.device)
     logger.success("MLP (Adam): test_ppl={:.2f}", mlp_ppl)
