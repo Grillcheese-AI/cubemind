@@ -75,25 +75,37 @@ class ChargedExpert:
     def update_position(self, x, eta=0.01):
         self.mu = (self.mu + eta * self.coulomb_force(x)).astype(np.float32)
 
-    def oja_update(self, x, eta=0.01):
-        y = self.w @ x
-        y_sq = float(np.dot(y, y))
-        if y_sq > 1e-12:
-            self.w += eta * np.outer(y, x - y_sq * x) / (y_sq + 1e-8)
-            norms = np.linalg.norm(self.w, axis=1, keepdims=True)
-            self.w /= np.maximum(norms, 1e-8)
+    def error_update(self, x, error, eta=0.01):
+        """Error-driven delta rule + Oja normalization.
+
+        Delta rule: w += η * error ⊗ x (minimizes prediction error)
+        Oja norm: renormalize rows to prevent weight explosion
+        """
+        # Delta rule: outer product of error and input
+        update = np.clip(eta * np.outer(error, x), -0.1, 0.1)
+        self.w += update
+        # Oja-style row normalization for stability
+        norms = np.linalg.norm(self.w, axis=1, keepdims=True)
+        self.w /= np.maximum(norms, 1e-8)
 
     def update_traces(self, activation, error):
         self.a_trace = self.gamma_a * self.a_trace + activation
         self.e_trace = self.gamma_e * self.e_trace + np.clip(error, -10, 10)
 
     def consolidate(self, eta=0.001):
+        """Offline: replay stored error trace as a delta update.
+
+        Uses eligibility: Δw = η * a_trace * outer(e_trace, last_input_direction)
+        where last_input_direction ≈ mu (expert's position = centroid of inputs).
+        """
         if self.a_trace < 0.01:
             return
         e_norm = np.linalg.norm(self.e_trace)
-        if e_norm > 1e-8:
-            direction = self.e_trace / e_norm
-            update = np.clip(eta * self.a_trace * np.outer(direction, self.mu), -0.1, 0.1)
+        mu_norm = np.linalg.norm(self.mu)
+        if e_norm > 1e-8 and mu_norm > 1e-8:
+            # Delta-style: nudge weights to reduce stored error along input direction
+            input_dir = self.mu / mu_norm
+            update = np.clip(eta * self.a_trace * np.outer(self.e_trace, input_dir), -0.1, 0.1)
             self.w += update
             norms = np.linalg.norm(self.w, axis=1, keepdims=True)
             self.w /= np.maximum(norms, 1e-8)
@@ -146,7 +158,7 @@ class HEMoE:
         for idx in indices:
             e = self.experts[idx]
             e.update_position(x, self.eta_force)
-            e.oja_update(x, self.eta_oja)
+            e.error_update(x, error, self.eta_oja)  # delta rule, not PCA
             e.update_traces(float(np.abs(e.attraction_score(x, self.sigma))), error)
             e.n_uses += 1
             e.cumulative_error_sign += float(np.mean(error))
@@ -286,7 +298,9 @@ class TestH7_OjaNorm:
         e = ChargedExpert(16, 8, seed=42)
         rng = np.random.default_rng(42)
         for _ in range(100):
-            e.oja_update(rng.standard_normal(16).astype(np.float32), eta=0.01)
+            x = rng.standard_normal(16).astype(np.float32)
+            error = rng.standard_normal(8).astype(np.float32)
+            e.error_update(x, error, eta=0.01)
         norms = np.linalg.norm(e.w, axis=1)
         assert np.all(norms > 0.5) and np.all(norms < 2.0)
 

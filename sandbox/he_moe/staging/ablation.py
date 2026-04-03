@@ -220,7 +220,7 @@ def run_ablation(model, data: list, n_steps: int = 500,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 D = 16
-N_STEPS = 500
+N_STEPS = 1000
 
 
 @pytest.fixture(scope="module")
@@ -236,26 +236,28 @@ def all_results(data) -> Dict[str, AblationResult]:
         "softmax_moe": lambda: SoftmaxMoE(d=D, n_experts=4, seed=42),
         "he_moe_full": lambda: HEMoE(d_input=D, d_output=D, initial_experts=4,
                                        max_experts=8, top_k=2, sigma=2.0,
-                                       eta_force=0.01, eta_oja=0.01,
-                                       eta_consol=0.001, spawn_threshold=0.3,
-                                       charge_flip_threshold=0.3, seed=42),
+                                       eta_force=0.001, eta_oja=0.05,
+                                       eta_consol=0.005, spawn_threshold=0.3,
+                                       charge_flip_threshold=1.0, seed=42),
         "ablate_no_charge": lambda: HEMoE_NoCharge(d_input=D, d_output=D,
                                     initial_experts=4, max_experts=8, sigma=2.0,
-                                    eta_force=0.01, eta_oja=0.01, seed=42),
+                                    eta_force=0.001, eta_oja=0.05,
+                                    charge_flip_threshold=1.0, seed=42),
         "ablate_no_force": lambda: HEMoE_NoForce(d_input=D, d_output=D,
                                     initial_experts=4, max_experts=8, sigma=2.0,
-                                    eta_oja=0.01, seed=42),
+                                    eta_oja=0.05, charge_flip_threshold=1.0, seed=42),
         "ablate_no_consol": lambda: HEMoE_NoConsolidation(d_input=D, d_output=D,
                                     initial_experts=4, max_experts=8, sigma=2.0,
-                                    eta_force=0.01, eta_oja=0.01, seed=42),
+                                    eta_force=0.001, eta_oja=0.05,
+                                    charge_flip_threshold=1.0, seed=42),
         "ablate_no_sleep": lambda: HEMoE_NoSleep(d_input=D, d_output=D,
                                     initial_experts=4, max_experts=8, sigma=2.0,
-                                    eta_force=0.01, eta_oja=0.01,
-                                    eta_consol=0.001, seed=42),
+                                    eta_force=0.001, eta_oja=0.05,
+                                    eta_consol=0.005, charge_flip_threshold=1.0, seed=42),
         "ablate_no_spawn": lambda: HEMoE_NoSpawn(d_input=D, d_output=D,
                                     initial_experts=4, max_experts=8, sigma=2.0,
-                                    eta_force=0.01, eta_oja=0.01,
-                                    eta_consol=0.001, seed=42),
+                                    eta_force=0.001, eta_oja=0.05,
+                                    eta_consol=0.005, charge_flip_threshold=1.0, seed=42),
     }
     results = {}
     for name, factory in configs.items():
