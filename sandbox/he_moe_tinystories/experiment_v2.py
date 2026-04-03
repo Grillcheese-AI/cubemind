@@ -138,24 +138,19 @@ class AdditionLinearTorch(nn.Module):
         else:
             self.bias = None
 
-    def _sync_to_grilly(self):
-        """Push torch params back to grilly layer."""
-        self._grilly_layer.weight_patterns = self.weight.detach().numpy().copy()
-        if self.bias is not None and self._grilly_layer.bias is not None:
-            self._grilly_layer.bias = self.bias.detach().numpy().copy()
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """L1 distance via vectorized torch — fast on CPU, no copies."""
         batch_shape = x.shape[:-1]
-        x_np = x.detach().numpy().astype(np.float32)
+        x_flat = x.reshape(-1, self.in_features)
 
-        # Sync torch → grilly (in case Hebbian updated the params)
-        self._sync_to_grilly()
+        # Vectorized L1: use torch.cdist with p=1 (Manhattan distance)
+        # This is ~10x faster than the chunked loop
+        dist = torch.cdist(x_flat, self.weight, p=1)  # (n, out)
+        out = -dist
 
-        # Run on grilly (Vulkan GPU if available, numpy fallback)
-        if x_np.ndim == 1:
-            x_np = x_np.reshape(1, -1)
-        out_np = self._grilly_layer.forward(x_np.reshape(-1, self.in_features))
-        return torch.from_numpy(out_np).view(*batch_shape, self.out_features)
+        if self.bias is not None:
+            out = out + self.bias
+        return out.view(*batch_shape, self.out_features)
 
 
 class SignActivationTorch(nn.Module):
