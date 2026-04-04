@@ -19,18 +19,26 @@ from grilly.nn.autograd import (
     Variable, matmul, relu, softmax, cross_entropy, no_grad, mean,
 )
 
+# Chain recorder for batched GPU dispatch
+_fnn_chain = None
+try:
+    from grilly.backend.fnn import VulkanFNN
+    _fnn_chain = VulkanFNN
+except Exception:
+    pass
+
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-D_MODEL = 1024
-N_LAYERS = 12
+D_MODEL = 768
+N_LAYERS = 8
 N_EXPERTS = 4
-SEQ_LEN = 768
+SEQ_LEN = 512
 LR = 3e-4
 LR_MIN = 1e-5
 WARMUP = 1000
 TRAIN_STEPS = 100000
-VAL_EVERY = 10
+VAL_EVERY = 50
 SAVE_EVERY = 5000
 MAX_GRAD_NORM = 1.0
 SEED = 42
@@ -108,6 +116,24 @@ class MoQEAutograd:
             self.routers_b.append(Variable(
                 np.zeros(n_experts, dtype=np.float32), requires_grad=True))
 
+    def upload_to_gpu(self):
+        """Pre-upload all weight matrices to VRAM as VulkanTensors."""
+        try:
+            from grilly import to_vulkan_gpu
+            vram_bytes = 0
+            for l in range(self.n_layers):
+                for e in range(self.n_experts):
+                    v = to_vulkan_gpu(self.experts[l][e].data)
+                    self.experts[l][e].data = np.asarray(v)
+                    vram_bytes += self.experts[l][e].data.nbytes
+            # out_w is the biggest single matrix
+            v = to_vulkan_gpu(self.out_w.data)
+            self.out_w.data = np.asarray(v)
+            vram_bytes += self.out_w.data.nbytes
+            logger.info("Uploaded {:.0f}MB to VRAM", vram_bytes / 1e6)
+        except Exception as ex:
+            logger.warning("GPU upload failed: {} — staying on CPU", ex)
+
     def params(self) -> list[Variable]:
         """All trainable parameters."""
         p = [self.embed, self.pos, self.out_w]
@@ -138,7 +164,7 @@ class MoQEAutograd:
             logits = add(matmul(self.routers_W[l], x_mean), self.routers_b[l])
             weights = softmax(logits, dim=-1)  # (n_experts,)
 
-            # Expert forward: soft-weighted sum through autograd
+            # Expert forward: per-expert matmul (GPU-accelerated via _bridge.linear)
             expert_outs = [matmul(x, self.experts[l][e]) for e in range(self.n_experts)]
 
             # Weighted combination (all through autograd graph)
@@ -156,15 +182,58 @@ class MoQEAutograd:
         logits = matmul(x, out_w_T)
         return logits
 
+    def forward_chained(self, input_ids: np.ndarray, fnn) -> np.ndarray:
+        """GPU-batched forward using FnnChainRecorder + read_multiple.
+
+        Per layer: record N expert matmuls → one submit → read_multiple → blend.
+        No autograd graph — use for inference/validation.
+        """
+        S = len(input_ids)
+        d = self.d
+
+        x = self.embed.data[input_ids] + self.pos.data[:S]
+
+        for l in range(self.n_layers):
+            # Router (CPU — tiny)
+            x_mean = x.mean(axis=0)
+            r_logits = self.routers_W[l].data @ x_mean + self.routers_b[l].data
+            r_logits -= r_logits.max()
+            w = np.exp(r_logits)
+            w /= w.sum() + 1e-8
+
+            # All expert matmuls in ONE GPU submit via chain recorder
+            with fnn.chain_record() as rec:
+                handles = [rec.linear(x, self.experts[l][e].data)
+                           for e in range(self.n_experts)]
+                expert_outs = rec.read_multiple(handles)
+
+            # Blend on CPU (tiny — just weighted sum)
+            out = np.zeros((S, d), dtype=np.float32)
+            for e in range(self.n_experts):
+                out += w[e] * expert_outs[e]
+
+            x = x + out
+
+        # Output projection (single chain)
+        with fnn.chain_record() as rec:
+            h = rec.linear(x, self.out_w.data.T)
+            logits = rec.read(h)
+
+        return logits
+
 
 # ── Eval ─────────────────────────────────────────────────────────────────────
 
-def compute_ppl(model, x_data, y_data, max_samples=200):
+def compute_ppl(model, x_data, y_data, max_samples=200, fnn=None):
     total_loss, n = 0.0, 0
+    use_chain = fnn is not None and hasattr(model, 'forward_chained')
     with no_grad():
         for i in range(min(len(x_data), max_samples)):
-            logits = model.forward(x_data[i])
-            p = logits.data - logits.data.max(axis=-1, keepdims=True)
+            if use_chain:
+                p = model.forward_chained(x_data[i], fnn)
+            else:
+                p = model.forward(x_data[i]).data
+            p = p - p.max(axis=-1, keepdims=True)
             p = np.exp(p)
             p /= p.sum(axis=-1, keepdims=True) + 1e-8
             for t in range(len(y_data[i])):
@@ -182,7 +251,8 @@ def lr_schedule(step):
     return LR_MIN + 0.5 * (LR - LR_MIN) * (1.0 + math.cos(math.pi * t))
 
 
-def save_checkpoint(model, step, best_ppl, path="sandbox/moqe_tinystories/checkpoints"):
+def save_checkpoint(model, step, best_ppl, adam_m=None, adam_v=None,
+                     path="sandbox/moqe_tinystories/checkpoints"):
     os.makedirs(path, exist_ok=True)
     d = {"step": np.array([step]), "best_ppl": np.array([best_ppl]),
          "embed": model.embed.data, "pos": model.pos.data, "out_w": model.out_w.data}
@@ -191,9 +261,41 @@ def save_checkpoint(model, step, best_ppl, path="sandbox/moqe_tinystories/checkp
             d[f"L{l}_E{e}"] = model.experts[l][e].data
         d[f"L{l}_rW"] = model.routers_W[l].data
         d[f"L{l}_rb"] = model.routers_b[l].data
-    f = os.path.join(path, f"moqe_ag_step{step}.npz")
+    # Save optimizer state for resume
+    if adam_m is not None:
+        for i, p in enumerate(model.params()):
+            pid = id(p)
+            if pid in adam_m:
+                d[f"adam_m_{i}"] = adam_m[pid]
+                d[f"adam_v_{i}"] = adam_v[pid]
+    f = os.path.join(path, f"moqe_fnn_step{step}.npz")
     np.savez_compressed(f, **d)
     logger.info("Saved: {} ({:.1f}MB)", f, os.path.getsize(f) / 1e6)
+
+
+def load_checkpoint(model, path, adam_m=None, adam_v=None):
+    """Load model + optimizer state from checkpoint. Returns (step, best_ppl)."""
+    data = np.load(path)
+    model.embed.data[:] = data["embed"]
+    model.pos.data[:] = data["pos"]
+    model.out_w.data[:] = data["out_w"]
+    for l in range(model.n_layers):
+        for e in range(model.n_experts):
+            model.experts[l][e].data[:] = data[f"L{l}_E{e}"]
+        model.routers_W[l].data[:] = data[f"L{l}_rW"]
+        model.routers_b[l].data[:] = data[f"L{l}_rb"]
+    # Restore optimizer state if available
+    if adam_m is not None:
+        for i, p in enumerate(model.params()):
+            pid = id(p)
+            m_key = f"adam_m_{i}"
+            if m_key in data:
+                adam_m[pid] = data[m_key].copy()
+                adam_v[pid] = data[f"adam_v_{i}"].copy()
+    step = int(data["step"][0])
+    best_ppl = float(data["best_ppl"][0])
+    logger.info("Loaded checkpoint: {} (step={}, PPL={:.1f})", path, step, best_ppl)
+    return step, best_ppl
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -217,6 +319,29 @@ def main():
     t0 = time.time()
     best_ppl = float("inf")
     step = 0
+
+    # Initialize FNN chain recorder for GPU-batched inference
+    fnn = None
+    try:
+        from grilly.backend.core import VulkanCore
+        from grilly.backend.fnn import VulkanFNN
+        _core = VulkanCore()
+        _fnn = VulkanFNN(_core)
+        if "fnn-linear" in _fnn.shaders:
+            fnn = _fnn
+            logger.success("FnnChainRecorder ready (batched GPU dispatch)")
+        else:
+            logger.info("fnn-linear shader not loaded — CPU inference")
+    except Exception as e:
+        logger.info("FNN init failed: {} — CPU inference", e)
+
+    # Resume from checkpoint if available
+    import glob as _glob
+    ckpts = sorted(_glob.glob("sandbox/moqe_tinystories/checkpoints/moqe_fnn_step*.npz"))
+    if ckpts:
+        latest = ckpts[-1]
+        step, best_ppl = load_checkpoint(model, latest, adam_m, adam_v)
+        step += 1  # continue from next step
 
     while step < TRAIN_STEPS:
         perm = np.random.permutation(len(train_x))
@@ -258,22 +383,22 @@ def main():
 
             # ── Log ──
             if step % VAL_EVERY == 0:
-                ppl = compute_ppl(model, val_x, val_y)
+                ppl = compute_ppl(model, val_x, val_y, fnn=fnn)
                 el = time.time() - t0
                 sps = (step + 1) / el if el > 0 else 0
                 logger.info("step={:6d} lr={:.5f} | loss={:.3f} gnorm={:.1f} | PPL={:.1f} | {:.1f} stp/s",
                             step, lr, float(loss.data), gnorm, ppl, sps)
                 if ppl < best_ppl:
                     best_ppl = ppl
-                    save_checkpoint(model, step, best_ppl)
+                    save_checkpoint(model, step, best_ppl)  # model-only (small)
 
             if step > 0 and step % SAVE_EVERY == 0:
-                save_checkpoint(model, step, best_ppl)
+                save_checkpoint(model, step, best_ppl, adam_m, adam_v)  # full (for resume)
 
             step += 1
 
-    save_checkpoint(model, step, best_ppl)
-    ppl = compute_ppl(model, val_x, val_y)
+    save_checkpoint(model, step, best_ppl, adam_m, adam_v)
+    ppl = compute_ppl(model, val_x, val_y, fnn=fnn)
     print(f"\n{'='*50}")
     print(f"  MoQE (grilly autograd) — Final PPL: {ppl:.1f}")
     print(f"  Best PPL: {best_ppl:.1f}  |  Steps: {step}")

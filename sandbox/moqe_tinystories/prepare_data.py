@@ -13,7 +13,7 @@ import numpy as np
 from loguru import logger
 
 
-def main(max_stories: int = 300000, vocab_size: int = 4000, max_seq_len: int = 512,
+def main(max_stories: int = 300000, vocab_size: int = 1000, max_seq_len: int = 512,
          output_dir: str = "sandbox/moqe_tinystories/data"):
     from datasets import load_dataset
     import sentencepiece as spm
