@@ -8,7 +8,7 @@ external_validation:
   require_approval_on_issues: true
   validate_plans: true
 frameworks: []
-max_memories: 50000
+max_memories: 200000
 project:
   business_docs_path: docs/business
   framework: grilly
@@ -46,19 +46,13 @@ rss_fetch_full_articles: true
 rss_max_articles_per_feed: 10
 scope_guard: true
 skip_dirs:
-- node_modules
 - .venv
-- dist
-- cloned
-- data
-- __pycache__
-- .git
-- .mypy_cache
-- .pytest_cache
-- htmlcov
-- .ruff_cache
+- external
 - build
-- .eggs
+- __pycache__
+- node_modules
+- .git
+- cloned
 user_profile:
   auto_observe: true
   decay_days: 90

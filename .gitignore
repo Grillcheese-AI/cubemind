@@ -25,3 +25,5 @@ docs/distil_to_moqe.ipynb
 /.hypothesis
 checkllama.py
 /cloned
+.claude/elephant-coder.local.md
+.claude/elephant-coder.local.md
