@@ -63,4 +63,4 @@ def main(max_stories=0, vocab_size=8192, output_dir="sandbox/vsa_lm/data"):
 
 
 if __name__ == "__main__":
-    main(max_stories=50000)  # 50K stories (~25M tokens)
+    main(max_stories=2100000)  # 50K stories (~25M tokens)
