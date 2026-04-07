@@ -109,37 +109,43 @@ LR = 2e-4
 WARM_RESTART_STEPS = 15000
 VAL_EVERY = 200
 GRAD_CLIP = 1.0
-BATCH_SIZE = 4  # small — grilly's current kernel throughput is ~370 GFLOP/s
+# B=16 because: (a) the FFN now uses real ``nn.Linear`` (Vulkan-native, fp32
+# fast path verified at ~19 ms for 4096x384x1152), (b) the prefix scan
+# shader takes the per-(batch, hidden_dim) workgroup count linearly so a
+# bigger batch = more parallel workgroups = better GPU utilization, and
+# (c) the cross_entropy output layer (V=8192) is the dominant cost and
+# benefits from larger batches via amortized dispatch overhead.
+BATCH_SIZE = 16
 CAPSULE_DIM = 32
 
 
 # ── Model ──
-class AdditionLinearCUDA(nn.Module):
-    """Multiplication-free linear: out = -||W - x||_1 + bias, then GELU.
-
-    Despite the name, this runs on grilly's Vulkan path via torch.cdist,
-    not CUDA. Kept the name to match vsa_lm_v3c_warmrestart.py so the
-    two scripts are line-by-line comparable.
-    """
-
-    def __init__(self, d_in, d_out):
-        super().__init__()
-        self.weight = nn.Parameter(torch.empty(d_out, d_in).uniform_(-0.1, 0.1))
-        self.bias = nn.Parameter(torch.zeros(d_out))
-        self.d_in = d_in
-
-    def forward(self, x):
-        orig_shape = x.shape
-        x_flat = x.reshape(-1, orig_shape[-1])
-        dist = torch.cdist(
-            x_flat.unsqueeze(0), self.weight.unsqueeze(0), p=1
-        ).squeeze(0)
-        out = -dist + self.bias
-        return out.reshape(*orig_shape[:-1], -1)
+#
+# Architectural pivot from vsa_lm_v3c_warmrestart.py:
+#
+# The PyTorch v3c used ``AdditionLinearCUDA`` — a multiplication-free FFN
+# implemented as ``out = -||W - x||_1 + bias`` via ``torch.cdist(p=1)``.
+# That's nice in theory but on grilly today ``torch.cdist`` is a CPU-only
+# numpy fallback with no GPU shader and no autograd wiring. So every
+# AdditionLinear call:
+#   1. Took ~50 sec/step on TinyStories shapes (CPU 5D broadcast)
+#   2. Returned a Tensor with ``requires_grad=False``, breaking the
+#      autograd chain at every layer
+#
+# Pivot: use real ``nn.Linear`` for the FFN. We lose the multiplication-free
+# property of the original VSA-LM premise — that's a separate paper/follow-up
+# requiring a real ``cdist-l1.glsl`` + autograd-wired backward. The
+# architectural innovation we're testing TONIGHT is the causal prefix scan
+# (replacing the leaky ``h.mean(dim=1)``), and that's orthogonal to the FFN
+# implementation.
+#
+# Result: ~100x speedup from the cdist swap alone, plus working autograd
+# through the entire chain (Embedding → LayerNorm → CausalSequenceMixer →
+# Linear → GELU → Linear → cross_entropy → loss.backward → AdamW).
 
 
 class VSALayerCUDA(nn.Module):
-    """v3c-grilly: graded FFN + CausalSequenceMixer (strictly causal).
+    """v3c-grilly: standard pre-norm transformer-style block + causal mixer.
 
     Changes from vsa_lm_v3c_warmrestart.py:
       - LiquidCellCUDA + ``h.mean(dim=1)`` sequence pool REMOVED.
@@ -150,22 +156,16 @@ class VSALayerCUDA(nn.Module):
       - Replaced with ``CausalSequenceMixer`` (from grilly.nn.prefix_scan),
         which runs ``h_t = a_t * h_{t-1} + x_t`` via subgroup-parallel
         causal prefix scan. Strictly causal by construction.
-      - Plasticity / consolidation scalars now scale the mixer's output
-        contribution to the residual, instead of modulating a continuous-time
-        LiquidCell's tau/dt.
-
-    FFN path is unchanged — multiplication-free ``AdditionLinear`` (cdist =
-    subtract + abs + sum) with per-layer learnable scales and GELU on the
-    recentered cdist output.
+      - ``AdditionLinearCUDA`` (cdist-based mul-free FFN) → real ``nn.Linear``.
+        See the module-level note above for why.
     """
 
     def __init__(self, d, d_ffn):
         super().__init__()
         self.ln = nn.LayerNorm(d)
-        self.ffn_up = AdditionLinearCUDA(d, d_ffn)
-        self.ffn_down = AdditionLinearCUDA(d_ffn, d)
-        self.up_scale = nn.Parameter(torch.ones(1))
-        self.down_scale = nn.Parameter(torch.ones(1))
+        # Standard 2-layer FFN with GELU. Fast Vulkan ``nn.Linear`` path.
+        self.ffn_up = nn.Linear(d, d_ffn)
+        self.ffn_down = nn.Linear(d_ffn, d)
         # Subgroup-parallel causal RNN mixer. Replaces the
         # causally-leaky ``h.mean(dim=1)`` pooling that was the old
         # LiquidCell entry point.
@@ -180,31 +180,25 @@ class VSALayerCUDA(nn.Module):
         yield from self.mixer.parameters()
 
     def _ffn(self, h):
-        # cdist returns large negative values; rescale then GELU.
-        # NOTE: the PyTorch v3c also recentered (``h - h.mean(dim=-1)``) to
-        # put GELU at its active range. Dropped here because grilly's
-        # mean-over-last-dim plumbing is fragile across Variable / ndarray
-        # / Parameter types — the learnable ``up_scale`` / ``down_scale``
-        # params compensate. Revisit if convergence suffers.
-        h_up = self.ffn_up(h) / math.sqrt(self.ffn_up.d_in)
-        h_up = F.gelu(h_up * self.up_scale)
-        h_ffn = self.ffn_down(h_up) / math.sqrt(self.ffn_down.d_in)
-        return h_ffn * self.down_scale
+        # Standard 2-layer FFN with GELU. ``nn.Linear`` is the fast path.
+        h_up = self.ffn_up(h)
+        h_up = F.gelu(h_up)
+        return self.ffn_down(h_up)
 
     def forward(self, x, plasticity=0.5, consolidation=0.5):
         # x: (B, S, d) — strictly causal path. No sequence-wide mean pool.
+        # NOTE: plasticity / consolidation are now unused (they used to
+        # modulate the LiquidCell tau / dt, which we removed). Kept in the
+        # signature so VSALMModel.forward doesn't have to change.
+        del plasticity, consolidation
         h = self.ln(x)
 
         # Causal Linear-RNN mixer: h_causal[b, t] depends only on h[b, 0..t].
         h_causal = self.mixer(h)  # (B, S, d)
 
-        # FFN on the normalized input (position-wise, already causal).
+        # Standard residual block: x + ffn(h) + mixer(h)
         h_ffn = self._ffn(h)
-
-        # Gate the FFN output with the causal mixer state (per time step).
-        gate = h_causal  # already (B, S, d)
-        y = (0.5 + plasticity) * h_ffn * (1.0 + 0.1 * gate)
-        return x + y
+        return x + h_ffn + h_causal
 
 
 class VSALMModel(nn.Module):
