@@ -360,6 +360,7 @@ dependencies = [
 dev = [
     { name = "httpx" },
     { name = "pytest" },
+    { name = "pytest-timeout" },
     { name = "ruff" },
 ]
 
@@ -367,7 +368,8 @@ dev = [
 requires-dist = [
     { name = "datasets", specifier = ">=4.8.2" },
     { name = "fastapi", specifier = ">=0.135.3" },
-    { name = "grilly", editable = "../grilly" },
+    { name = "grilly", specifier = ">=0.6.1" },
+    { name = "grilly", specifier = ">=1.0.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "huggingface-hub" },
     { name = "llama-cpp-python" },
@@ -377,6 +379,7 @@ requires-dist = [
     { name = "pyarrow" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-timeout", marker = "extra == 'dev'", specifier = ">=2.3" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "safetensors", specifier = ">=0.7.0" },
     { name = "sentencepiece", specifier = ">=0.2.1" },
@@ -634,47 +637,12 @@ http = [
 
 [[package]]
 name = "grilly"
-version = "1.0.0rc1"
-source = { editable = "../grilly" }
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
 ]
-
-[package.metadata]
-requires-dist = [
-    { name = "black", marker = "extra == 'dev'", specifier = ">=23.7.0" },
-    { name = "blake3", marker = "extra == 'full'", specifier = ">=1.0.8" },
-    { name = "grilly", extras = ["dev", "accel"], marker = "extra == 'all'" },
-    { name = "huggingface-hub", marker = "extra == 'dev'", specifier = ">=0.20.0" },
-    { name = "huggingface-hub", marker = "extra == 'tokenizer'", specifier = ">=0.20.0" },
-    { name = "isort", marker = "extra == 'dev'", specifier = ">=5.12.0" },
-    { name = "mkdocs-material", marker = "extra == 'dev'", specifier = ">=9.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.5.0" },
-    { name = "numba", marker = "extra == 'accel'", specifier = ">=0.59.0" },
-    { name = "numba", marker = "extra == 'full'", specifier = ">=0.63.1" },
-    { name = "numpy" },
-    { name = "onnx", marker = "extra == 'full'", specifier = ">=1.15.0" },
-    { name = "onnx", marker = "extra == 'onnx'", specifier = ">=1.15.0" },
-    { name = "protobuf", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=5.2.3" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "sentence-transformers", marker = "extra == 'full'", specifier = ">=5.2.0" },
-    { name = "sentence-transformers", marker = "extra == 'huggingface'", specifier = ">=5.2.0" },
-    { name = "sentencepiece", marker = "extra == 'dev'", specifier = ">=0.2.0" },
-    { name = "spacy", marker = "extra == 'full'", specifier = ">=3.8.11" },
-    { name = "tokenizers", marker = "extra == 'dev'", specifier = ">=0.15.0" },
-    { name = "tokenizers", marker = "extra == 'tokenizer'", specifier = ">=0.15.0" },
-    { name = "torch", marker = "extra == 'full'", specifier = ">=2.10.0" },
-    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.10.0" },
-    { name = "transformers", marker = "extra == 'dev'", specifier = ">=4.57.6" },
-    { name = "transformers", marker = "extra == 'full'", specifier = ">=4.57.6" },
-    { name = "transformers", marker = "extra == 'huggingface'", specifier = ">=4.57.6" },
-    { name = "vulkan", marker = "extra == 'full'", specifier = ">=1.3.0" },
-]
-provides-extras = ["full", "torch", "huggingface", "onnx", "dev", "accel", "tokenizer", "all"]
+sdist = { url = "https://files.pythonhosted.org/packages/26/d6/11ddd3a659a8a9e197909103e0e031e2bda3a24939443f0e51d47fc73bab/grilly-1.0.0.tar.gz", hash = "sha256:9d61bae3dd15b7c6f79dbf09083f86219a1801650d7751792a1575d8ef8fce7c", size = 30003987, upload-time = "2026-04-10T17:08:18.307Z" }
 
 [[package]]
 name = "h11"
@@ -1744,6 +1712,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d1/db/7ef3487e0fb0049ddb5ce41d3a49c235bf9ad299b6a25d5780a89f19230f/pytest-9.0.2.tar.gz", hash = "sha256:75186651a92bd89611d1d9fc20f0b4345fd827c41ccd5c299a868a05d70edf11", size = 1568901, upload-time = "2025-12-06T21:30:51.014Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+]
+
+[[package]]
+name = "pytest-timeout"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ac/82/4c9ecabab13363e72d880f2fb504c5f750433b2b6f16e99f4ec21ada284c/pytest_timeout-2.4.0.tar.gz", hash = "sha256:7e68e90b01f9eff71332b25001f85c75495fc4e3a836701876183c4bcfd0540a", size = 17973, upload-time = "2025-05-05T19:44:34.99Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fa/b6/3127540ecdf1464a00e5a01ee60a1b09175f6913f0644ac748494d9c4b21/pytest_timeout-2.4.0-py3-none-any.whl", hash = "sha256:c42667e5cdadb151aeb5b26d114aff6bdf5a907f176a007a30b940d3d865b5c2", size = 14382, upload-time = "2025-05-05T19:44:33.502Z" },
 ]
 
 [[package]]

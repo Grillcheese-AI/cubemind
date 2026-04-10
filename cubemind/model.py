@@ -6,8 +6,6 @@ Fixed: Reshape ValueError for contexts smaller than bucket_size.
 from __future__ import annotations
 import numpy as np
 import math
-from sklearn.decomposition import PCA
-
 from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.execution.cvl import ContrastiveValueEstimator
 from cubemind.execution.decoder import Decoder
@@ -222,6 +220,7 @@ class CubeMind:
         if len(context_vectors) < 2:
             return
         data = np.stack([c.ravel() for c in context_vectors])
+        from sklearn.decomposition import PCA
         import matplotlib.pyplot as plt
         coords = PCA(n_components=2).fit_transform(data)
         plt.figure(figsize=(10, 6))
