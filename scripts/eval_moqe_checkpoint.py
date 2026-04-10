@@ -264,7 +264,7 @@ def test_generation(
             print("  Install: pip install transformers")
             return
 
-    print(f"\nLoading model for generation...")
+    print("\nLoading model for generation...")
     model = MoQEModel(vocab_size=vocab_size, d_model=d_model, n_layers=n_layers)
     load_checkpoint(model, checkpoint_path)
 

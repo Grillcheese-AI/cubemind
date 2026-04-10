@@ -17,8 +17,6 @@ Then open http://localhost:8765 in your browser.
 from __future__ import annotations
 
 import argparse
-import asyncio
-import json
 import logging
 import time
 from datetime import datetime
@@ -38,7 +36,7 @@ from pathlib import Path
 
 # CubeMind
 from cubemind.ops import BlockCodes
-from cubemind.perception.snn import SNNEncoder, NeurochemicalState
+from cubemind.perception.snn import SNNEncoder
 from cubemind.brain.cortex import Thalamus, BasalGanglia, CircadianCells
 from cubemind.ops.vsa_bridge import (
     ContinuousItemMemory, LSHProjector, binarize_and_pack,

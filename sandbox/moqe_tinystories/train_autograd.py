@@ -16,7 +16,7 @@ import numpy as np
 from loguru import logger
 
 from grilly.nn.autograd import (
-    Variable, matmul, relu, softmax, cross_entropy, no_grad, mean,
+    Variable, matmul, softmax, cross_entropy, no_grad, mean,
 )
 
 # Chain recorder for batched GPU dispatch

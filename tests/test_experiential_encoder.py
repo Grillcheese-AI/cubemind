@@ -384,10 +384,12 @@ class TestExperientialEncoding:
         scene = bc.random_discrete(seed=42)
 
         happy = NeurochemicalState()
-        happy.dopamine = 0.9; happy.cortisol = 0.1
+        happy.dopamine = 0.9
+        happy.cortisol = 0.1
 
         sad = NeurochemicalState()
-        sad.dopamine = 0.1; sad.cortisol = 0.9
+        sad.dopamine = 0.1
+        sad.cortisol = 0.9
 
         exp = enc.encode_experience(scene, hour=14, neurochemistry=happy)
         recovered_affect = enc.query_affect(exp)
@@ -408,9 +410,11 @@ class TestExperientialEncoding:
         scenes = [bc.random_discrete(seed=i) for i in range(5)]
 
         happy = NeurochemicalState()
-        happy.dopamine = 0.9; happy.cortisol = 0.1
+        happy.dopamine = 0.9
+        happy.cortisol = 0.1
         sad = NeurochemicalState()
-        sad.dopamine = 0.1; sad.cortisol = 0.9
+        sad.dopamine = 0.1
+        sad.cortisol = 0.9
 
         # 3 happy experiences, 2 sad
         experiences = []

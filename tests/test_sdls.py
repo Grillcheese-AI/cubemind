@@ -6,7 +6,6 @@ Tests the orthogonal null-space projection used in:
 """
 
 import numpy as np
-import pytest
 
 from cubemind.model import HyperAxialAttention
 from cubemind.perception.semantic_encoder import SemanticEncoder

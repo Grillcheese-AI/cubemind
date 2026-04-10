@@ -171,7 +171,6 @@ class AdditiveSigmoidTorch(nn.Module):
 
     def __init__(self):
         super().__init__()
-        from cubemind.brain.addition_linear import AdditiveReceptance
         # Use a simple 1:1 receptance as sigmoid approximation
         self._use_simple = True
 

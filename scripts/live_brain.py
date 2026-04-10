@@ -212,13 +212,13 @@ def main():
         elif key == ord('r'):
             # Recall mode: query by current visual
             results = brain.recall(brain.bc.to_flat(result["input_hv"]), k=5)
-            print(f"\n  Recall top-5:")
+            print("\n  Recall top-5:")
             for mid, score in results:
                 print(f"    {mid}: {score:.3f}")
 
         elif key == ord('s'):
             stats = brain.stats()
-            print(f"\n  Brain Stats:")
+            print("\n  Brain Stats:")
             for k, v in stats.items():
                 if isinstance(v, dict):
                     print(f"    {k}:")

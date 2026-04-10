@@ -85,7 +85,7 @@ class AdditionLinear:
         elif x.ndim == 1:
             x = x[np.newaxis, :]
 
-        batch_size = x.shape[0]
+        x.shape[0]
         output_parts = []
 
         for i in range(0, self.out_features, self.chunk_size):

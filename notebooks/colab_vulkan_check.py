@@ -1,7 +1,7 @@
 # Colab cell: verify Vulkan / grilly GPU backend status
 # Copy-paste into a notebook cell
 
-import sys, os
+import sys
 print(f"Python: {sys.version}")
 print(f"Platform: {sys.platform}")
 
@@ -17,7 +17,7 @@ except ImportError as e:
 try:
     from grilly.backend import _bridge
     if _bridge.is_available():
-        print(f"✓ Vulkan bridge available")
+        print("✓ Vulkan bridge available")
         info = _bridge.device_info() if hasattr(_bridge, 'device_info') else {}
         if info:
             for k, v in info.items():

@@ -16,10 +16,8 @@ Run: uv run pytest sandbox/he_moe/staging/integration.py -v
 from __future__ import annotations
 
 import sys
-import time
 
 import numpy as np
-import pytest
 
 # Add sandbox + project root to path
 _sandbox = str(__import__("pathlib").Path(__file__).resolve().parent.parent.parent)
@@ -28,14 +26,14 @@ for p in [_sandbox, _root]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from he_moe.experiment import HEMoE, ChargedExpert, rbf_kernel
+from he_moe.experiment import HEMoE, rbf_kernel
 
 # CubeMind production imports (import submodules directly to avoid __init__ chain)
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.memory.formation import HippocampalFormation
 from cubemind.brain.gif_neuron import GIFNeuron
 from cubemind.brain.synapsis import Synapsis
-from cubemind.brain.snn_ffn import SNNFFN, HybridFFN
+from cubemind.brain.snn_ffn import SNNFFN
 from cubemind.brain.neurogenesis import NeurogenesisController
 from cubemind.brain.identity import Identity
 from cubemind.functional import F

@@ -183,7 +183,6 @@ class VisionEncoder:
     def _embed_transformers(self, image: np.ndarray) -> np.ndarray | None:
         try:
             import torch
-            from PIL import Image as PILImage
 
             # Convert numpy to PIL
             img = self._numpy_to_pil(image)
@@ -216,7 +215,6 @@ class VisionEncoder:
     def _embed_open_clip(self, image: np.ndarray) -> np.ndarray | None:
         try:
             import torch
-            from PIL import Image as PILImage
 
             img = self._numpy_to_pil(image)
             img_tensor = self._clip_preprocess(img).unsqueeze(0)

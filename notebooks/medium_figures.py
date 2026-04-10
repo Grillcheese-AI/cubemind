@@ -5,7 +5,6 @@ All figures saved to docs/papers/figures/medium_*.png (300 DPI).
 """
 
 import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
 import numpy as np
 import seaborn as sns
 from pathlib import Path

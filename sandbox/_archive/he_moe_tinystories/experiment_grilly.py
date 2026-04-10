@@ -313,7 +313,7 @@ def main():
     val_ppl, _ = compute_ppl(model, val_x, val_y)
 
     print(f"\n{'='*50}")
-    print(f"  HE-MoE Results (32 experts, BPE)")
+    print("  HE-MoE Results (32 experts, BPE)")
     print(f"{'='*50}")
     print(f"  Final val PPL:  {val_ppl:.2f}")
     print(f"  Best val PPL:   {best_ppl:.2f}")

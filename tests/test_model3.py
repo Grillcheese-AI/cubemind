@@ -161,7 +161,7 @@ def test_same_phi_same_output(bc: BlockCodes):
 def test_multi_step_sequence(brain: CubeMindV3):
     """Multiple forward passes should work and accumulate memories."""
     for i in range(10):
-        result = brain.forward(text=f"step {i}")
+        brain.forward(text=f"step {i}")
     assert brain.hippocampus.memory_count >= 10
     assert brain.neurogenesis.neuron_count >= brain.neurogenesis.stats()["neuron_count"]
 

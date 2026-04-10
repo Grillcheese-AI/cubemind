@@ -21,7 +21,6 @@ import glob
 import logging
 import math
 import os
-from pathlib import Path
 
 import numpy as np
 
@@ -389,7 +388,7 @@ def _sparse_kl_divergence_with_grad(
         (loss, gradient) where gradient is (seq, vocab).
     """
     seq_len, vocab_size = student_logits.shape
-    k = top_k_indices.shape[1]
+    top_k_indices.shape[1]
 
     # Teacher distribution: softmax over top-k logprobs
     teacher_lp = top_k_logprobs / temperature
@@ -804,10 +803,6 @@ def run_offline_distillation(
     Returns:
         List of per-epoch summary dicts.
     """
-    from cubemind.execution.moqe import (
-        _quantize_weights_int4,
-        _quantize_weights_int8,
-    )
 
     # Import optimizer
     OptimizerClass = None

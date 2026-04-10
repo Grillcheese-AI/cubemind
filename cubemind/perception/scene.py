@@ -22,7 +22,6 @@ Key concepts:
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -250,7 +249,7 @@ class SceneAnalyzer:
             # - High brightness variance → interesting/dynamic → dopamine
             # - Smooth/uniform → calm → serotonin
             # - Rapid change → alerting → cortisol
-            brightness = float(np.mean(feat[:self.feature_dim // 2]))
+            float(np.mean(feat[:self.feature_dim // 2]))
             variance = float(np.std(feat))
 
             visual_valence = float(np.clip(variance * 2.0 - 0.3, -0.5, 0.5))  # variety = pleasant
@@ -665,7 +664,7 @@ class SceneAnalyzer:
 
         n = len(segments)
         avg_taste = float(np.mean([s.taste_score for s in segments]))
-        avg_valence = float(np.mean([s.valence for s in segments]))
+        float(np.mean([s.valence for s in segments]))
         avg_arousal = float(np.mean([s.arousal for s in segments]))
 
         # Taste-informed opening — first person, opinionated
@@ -705,7 +704,6 @@ class SceneAnalyzer:
         # Per-segment observations with visual descriptors
         lines.append("")
         for i, seg in enumerate(segments):
-            emo = seg.face_emotion or seg.dominant_emotion
             taste_icon = "+" if seg.taste_score > 0.1 else ("-" if seg.taste_score < -0.1 else "~")
             time_start = seg.start_frame / 30.0
 

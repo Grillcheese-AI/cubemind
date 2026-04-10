@@ -20,7 +20,7 @@ import pytest
 
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.perception.snn import NeurochemicalState
-from cubemind.perception.experiential import ExperientialEncoder, generate_orthogonal_matrix
+from cubemind.perception.experiential import generate_orthogonal_matrix
 
 
 # ── Mirror Mechanism Module ──────────────────────────────────────────
@@ -343,7 +343,7 @@ class TestMirrorGatedLearning:
         system encodes both action and objects from observation."""
         # From SRT: "the bear catches a salmon"
         v_catch = mirror.observe("catch", obj="salmon")
-        v_bear = mirror.encode_action("appear", agent="other", obj="bear")
+        mirror.encode_action("appear", agent="other", obj="bear")
 
         # Later, system sees a similar scene
         v_catch2 = mirror.observe("catch", obj="fish")

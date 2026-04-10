@@ -15,7 +15,6 @@ All datasets use DistillKit compressed format:
 
 # !pip install -q datasets numpy tqdm torch
 
-import os
 import numpy as np
 import torch
 from pathlib import Path
@@ -237,7 +236,7 @@ for row in tqdm(ds, desc="DeepSeek-R1", total=MAX_SEQS_PER_TEACHER):
             ds_k = lp_shape[0] // 2  # bf16 = 2 bytes each
             print(f"  Detected k={ds_k}")
         else:
-            print(f"  Non-DistillKit format — saving raw")
+            print("  Non-DistillKit format — saving raw")
             ds_format = "raw"
 
     if ds_format == "distillkit":
@@ -346,7 +345,6 @@ print(f"Qwen3-30B-MoE: {count} sequences saved to {out_dir}")
 # CELL 6: Summary + package for download
 # ============================================================================
 
-import subprocess
 
 print("\n" + "=" * 60)
 print("  Teacher Logits Summary")

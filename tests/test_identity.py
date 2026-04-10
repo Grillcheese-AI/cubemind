@@ -50,7 +50,7 @@ def test_modulate_retrieval(identity: Identity):
 
 
 def test_adapt(identity: Identity, bc: BlockCodes):
-    exp_before = identity.experience_hv.copy()
+    identity.experience_hv.copy()
     experience = bc.random_discrete(seed=20)
     identity.adapt(experience)
     assert identity.interaction_count == 1

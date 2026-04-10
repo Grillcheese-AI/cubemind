@@ -23,7 +23,7 @@ Usage:
 """
 
 from . import kernels, activations, similarity, learning, routing
-from .decorators import layer, gpu_fallback, timed, logged
+from .decorators import layer, gpu_fallback as gpu_fallback, timed as timed, logged as logged
 
 
 class F:

@@ -220,7 +220,8 @@ class WorldManager:
         Call this after document ingestion to perfectly decouple all specialists.
         Matches the paper's 'QR-based orthogonalization' logic.
         """
-        if self.active_worlds < 2: return
+        if self.active_worlds < 2:
+            return
         # 1. Get the active slice
         active_slice = self._arena[:self.active_worlds] # (n, k, l)
         n = self.active_worlds

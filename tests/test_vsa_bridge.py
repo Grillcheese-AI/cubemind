@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from cubemind.ops.vsa_bridge import binarize_and_pack, LSHProjector
 

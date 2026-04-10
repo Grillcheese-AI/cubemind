@@ -43,7 +43,7 @@ async def ingest_high_fidelity(model, text):
     )
 
     # 3. Hybrid Encoding: SDLS-purified semantic vectors + LLM attributes
-    print(f"Step 2: Building Specialist Manifold (Semantic + Oja-Plastic)...")
+    print("Step 2: Building Specialist Manifold (Semantic + Oja-Plastic)...")
     causal_cb = CausalCodebook(k=K, l=L, n_explicit=N_EXPLICIT)
 
     chunks, vectors = [], []

@@ -599,14 +599,14 @@ def main():
     usage = model.get_expert_usage(val_x[0])
 
     print(f"\n{'='*55}")
-    print(f"  MoQE TinyStories Results")
+    print("  MoQE TinyStories Results")
     print(f"{'='*55}")
     print(f"  Final val PPL:  {val_ppl:.2f}")
     print(f"  Best val PPL:   {best_ppl:.2f}")
     print(f"  Steps:          {step}")
     print(f"  Time:           {elapsed:.0f}s")
     print(f"  Steps/sec:      {step / elapsed:.1f}")
-    print(f"  Expert usage:")
+    print("  Expert usage:")
     for name, frac in usage.items():
         print(f"    {name}: {frac*100:.1f}%")
     print(f"{'='*55}")

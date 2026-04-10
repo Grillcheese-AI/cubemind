@@ -32,7 +32,7 @@ from __future__ import annotations
 import uuid
 import functools
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Type
+from typing import Any, Callable, Dict, Type
 
 from dependency_injector import containers, providers
 from loguru import logger

@@ -12,7 +12,6 @@ Run: python -u sandbox/moqe_tinystories/train_attn.py
 
 import math
 import os
-import time
 
 import numpy as np
 from loguru import logger

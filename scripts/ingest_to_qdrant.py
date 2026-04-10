@@ -156,7 +156,6 @@ class GGUFEmbedder:
         )
 
     def encode(self, texts, show_progress_bar=False, normalize_embeddings=True, batch_size=64):
-        import numpy as np
         embeddings = []
         for text in texts:
             emb = self._model.embed(text)
@@ -306,7 +305,7 @@ def ingest(
     elapsed = time.time() - t0
     print(f"\nDone: {total:,} records in {elapsed:.0f}s ({total/elapsed:.0f} rec/s)")
     print(f"Skipped: {skipped:,}")
-    print(f"Categories:")
+    print("Categories:")
     for realm, count in sorted(domain_counts.items(), key=lambda x: -x[1]):
         print(f"  {realm}: {count:,}")
 

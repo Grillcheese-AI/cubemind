@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from cubemind.training.losses import (
     cosine_similarity_loss,

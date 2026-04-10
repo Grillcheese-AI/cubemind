@@ -5,7 +5,6 @@ refractory rebound, and emotion classification.
 """
 
 import numpy as np
-import pytest
 
 from cubemind.brain.neurochemistry import Neurochemistry
 

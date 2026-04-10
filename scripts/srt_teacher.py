@@ -25,16 +25,15 @@ import argparse
 import json
 import os
 import re
-import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 import cv2
 import numpy as np
 
 from cubemind.ops import BlockCodes
-from cubemind.perception.snn import SNNEncoder, NeurochemicalState
+from cubemind.perception.snn import SNNEncoder
 from cubemind.brain.cortex import Thalamus, BasalGanglia
 from cubemind.ops.vsa_bridge import (
     ContinuousItemMemory, LSHProjector, binarize_and_pack,
@@ -201,7 +200,7 @@ def run_srt_teacher(
         if verbose:
             print(f"  Loaded previous memory: maturity={bio_vision.maturity:.1%}, "
                   f"{len(prev_concepts)} concepts known")
-            print(f"  System will recognize familiar concepts with oxytocin boost")
+            print("  System will recognize familiar concepts with oxytocin boost")
 
     t0 = time.time()
     prev_color_stats = None
@@ -390,7 +389,7 @@ def run_srt_teacher(
     if verbose:
         print()
         print("=" * 60)
-        print(f"  SRT Auto-Teacher Complete")
+        print("  SRT Auto-Teacher Complete")
         print("=" * 60)
         print(f"  Video:     {video_path}")
         print(f"  Processed: {log['entries_processed']} subtitle windows")
@@ -442,7 +441,7 @@ def run_srt_teacher(
             concepts=json.dumps(log["concepts_learned"]),
         )
         print(f"  Memory saved to {memory_path}")
-        print(f"  (Re-run with same video to see familiarity recognition)")
+        print("  (Re-run with same video to see familiarity recognition)")
 
     return log
 

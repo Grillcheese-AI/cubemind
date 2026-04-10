@@ -10,7 +10,6 @@ Tests the core idea end-to-end before integrating into MoQE:
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 
 # ── Minimal LiquidMoE implementation for concept testing ─────────────────────

@@ -349,7 +349,7 @@ def main():
     gc.moe_release(device, handle)
 
     print(f"\n{'='*55}")
-    print(f"  MoQE Distillation Results")
+    print("  MoQE Distillation Results")
     print(f"{'='*55}")
     print(f"  Best PPL: {best_ppl:.1f}")
     print(f"  Steps: {step}")

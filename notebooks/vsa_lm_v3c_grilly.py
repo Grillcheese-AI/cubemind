@@ -37,7 +37,6 @@ Run:
 from __future__ import annotations
 
 import math
-import os
 import time
 
 import numpy as np
@@ -82,14 +81,27 @@ val_x, val_y = mkseqs(va, SEQ_LEN)
 print(f"Vocab={vocab}, Train={len(train_x)}, Val={len(val_x)}")
 
 
-def compute_ppl(model, x_data, y_data, max_samples=64):
+def compute_ppl(model, x_data, y_data, max_samples=64, bs=None):
+    """Compute perplexity. ``bs`` MUST equal training BATCH_SIZE.
+
+    Why this constraint: grilly's Vulkan buffer pool currently reuses
+    buffers across calls, and switching batch shapes between train and
+    eval (e.g. train B=16, eval B=8) corrupts subsequent computations
+    after a few alternations — losses go to nan within ~5 train+eval
+    cycles. Until grilly issues per-shape buckets cleanly, we keep eval
+    batch aligned with train batch.
+    """
+    if bs is None:
+        bs = BATCH_SIZE
     model.eval()
     total_loss, n_tok = 0.0, 0
     with torch.no_grad():
-        bs = 8  # smaller batch for eval on grilly (no fp16 yet)
         for i in range(0, min(len(x_data), max_samples), bs):
             xb = x_data[i : i + bs].to(device)
             yb = y_data[i : i + bs].to(device)
+            # Skip the last partial batch — would re-introduce shape variance.
+            if xb.shape[0] != bs:
+                continue
             logits = model(xb)  # (B, S, V)
             # Flatten to (B*S, V) / (B*S,) for cross_entropy
             flat_logits = logits.reshape(-1, logits.shape[-1])
@@ -98,7 +110,9 @@ def compute_ppl(model, x_data, y_data, max_samples=64):
             total_loss += float(loss.item() if hasattr(loss, "item") else loss)
             n_tok += int(yb.numel())
     model.train()
-    return math.exp(min(total_loss / max(n_tok, 1), 20))
+    if n_tok == 0:
+        return float("inf")
+    return math.exp(min(total_loss / n_tok, 20))
 
 
 # ── Config ──
@@ -108,7 +122,22 @@ D_FFN = 1152
 LR = 2e-4
 WARM_RESTART_STEPS = 15000
 VAL_EVERY = 200
-GRAD_CLIP = 1.0
+# Tight grad clip (was 1.0). The mixer's prefix-scan recurrence creates
+# extreme curvature in the loss landscape — clipping global L2 to 0.1 keeps
+# Adam's momentum from committing to noisy directions when a single batch
+# produces gnorm in the millions. With 1.0, training oscillated and NaN'd
+# around step 1200; with 0.1 the per-step update direction stays sane.
+GRAD_CLIP = 0.1
+# Residual scaling factor: out = x + α·ffn(h) + α·mixer(h).
+# α = 1/sqrt(2*N_LAYERS) is the standard "Pre-LN scaled-residual" trick that
+# keeps the variance of the residual stream constant as depth grows. Without
+# it, gradients flowing back through the 12-layer stack compound by ~12x at
+# embed/cap_embed and the optimizer drifts off-axis.
+RESIDUAL_SCALE = 1.0 / math.sqrt(2.0 * N_LAYERS)
+# proj_x init scale: the prefix-scan recurrence amplifies x_t by up to
+# ~1/(1-a_max) ≈ 20 at the gate's saturation, so we shrink the default
+# Xavier init by 1/sqrt(SEQ_LEN) to keep the steady-state hidden norm O(1).
+PROJ_X_INIT = 1.0 / math.sqrt(SEQ_LEN)
 # B=16 because: (a) the FFN now uses real ``nn.Linear`` (Vulkan-native, fp32
 # fast path verified at ~19 ms for 4096x384x1152), (b) the prefix scan
 # shader takes the per-(batch, hidden_dim) workgroup count linearly so a
@@ -166,10 +195,10 @@ class VSALayerCUDA(nn.Module):
         # Standard 2-layer FFN with GELU. Fast Vulkan ``nn.Linear`` path.
         self.ffn_up = nn.Linear(d, d_ffn)
         self.ffn_down = nn.Linear(d_ffn, d)
-        # Subgroup-parallel causal RNN mixer. Replaces the
-        # causally-leaky ``h.mean(dim=1)`` pooling that was the old
-        # LiquidCell entry point.
-        self.mixer = CausalSequenceMixer(d)
+        # Subgroup-parallel causal RNN mixer with shrunk proj_x init so the
+        # 32-step recurrence's accumulated gain doesn't blow up the residual
+        # stream in this 12-layer stack.
+        self.mixer = CausalSequenceMixer(d, proj_x_init_scale=PROJ_X_INIT)
         self.d = d
 
     def parameters(self):
@@ -196,9 +225,13 @@ class VSALayerCUDA(nn.Module):
         # Causal Linear-RNN mixer: h_causal[b, t] depends only on h[b, 0..t].
         h_causal = self.mixer(h)  # (B, S, d)
 
-        # Standard residual block: x + ffn(h) + mixer(h)
+        # Pre-LN scaled residual: out = x + α·ffn(h) + α·mixer(h).
+        # The α factor (RESIDUAL_SCALE = 1/sqrt(2N)) keeps the residual
+        # stream's variance constant as depth grows. Without it the
+        # 12-layer stack compounds gain ~12x and the optimizer NaNs around
+        # step 1200 even with bounded gates and clipped grads.
         h_ffn = self._ffn(h)
-        return x + h_ffn + h_causal
+        return x + RESIDUAL_SCALE * h_ffn + RESIDUAL_SCALE * h_causal
 
 
 class VSALMModel(nn.Module):
@@ -250,7 +283,7 @@ model = VSALMModel(vocab, D_MODEL, D_FFN, N_LAYERS, SEQ_LEN).to(device)
 n_params = sum(p.size if hasattr(p, "size") else p.numel() for p in model.parameters())
 print(f"VSA-LM v3c-grilly: d={D_MODEL}, L={N_LAYERS}, B={BATCH_SIZE}, "
       f"params={n_params/1e6:.1f}M")
-print(f"Fresh init (no .pt checkpoint migration on grilly yet)")
+print("Fresh init (no .pt checkpoint migration on grilly yet)")
 print()
 
 # Initial PPL sanity check — should be roughly log(vocab) = ~9 for 8192

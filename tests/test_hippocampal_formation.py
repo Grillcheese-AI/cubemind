@@ -5,7 +5,6 @@ Ported from aura-hybrid test_hippocampal_formation.py + CubeMind-specific tests.
 
 from __future__ import annotations
 
-import time
 
 import numpy as np
 import pytest

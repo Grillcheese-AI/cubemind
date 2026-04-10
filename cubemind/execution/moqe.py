@@ -23,14 +23,14 @@ CPU fallback: vectorized dequant + BLAS matmul.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 # GPU bridge (2-expert fast path)
 _bridge_moqe = None
 try:
-    from grilly.backend._bridge import (
+    from grilly.backend._bridge import (  # noqa: F401
         moqe_dynamic_quantize,
         moqe_fused_gemv,
         moqe_route_and_gemv,
@@ -265,7 +265,8 @@ class MoQELayer:
     def w1_int(self): return self.expert_w_int[1] if len(self.expert_w_int) > 1 else self.expert_w_int[0]
     @w1_int.setter
     def w1_int(self, v):
-        if len(self.expert_w_int) > 1: self.expert_w_int[1] = v
+        if len(self.expert_w_int) > 1:
+            self.expert_w_int[1] = v
     @property
     def s0(self): return self.expert_scales[0]
     @s0.setter
@@ -274,7 +275,8 @@ class MoQELayer:
     def s1(self): return self.expert_scales[1] if len(self.expert_scales) > 1 else self.expert_scales[0]
     @s1.setter
     def s1(self, v):
-        if len(self.expert_scales) > 1: self.expert_scales[1] = v
+        if len(self.expert_scales) > 1:
+            self.expert_scales[1] = v
 
     def forward(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Forward pass: route + expert GEMV.
@@ -431,7 +433,7 @@ class MoQEModel:
                 logits: (seq_len, vocab_size) float32.
                 layer_weights: list of (seq_len, top_k) weight arrays.
         """
-        seq_len = len(input_ids)
+        len(input_ids)
         x = self.embedding[input_ids]
 
         layer_weights = []
@@ -445,7 +447,7 @@ class MoQEModel:
 
     def get_expert_usage(self, input_ids: np.ndarray) -> dict:
         """Profile expert usage across layers."""
-        seq_len = len(input_ids)
+        len(input_ids)
         x = self.embedding[input_ids]
 
         usage = {}

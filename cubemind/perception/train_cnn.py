@@ -62,7 +62,7 @@ def _load_iraven():
 
 # Force-load HF datasets from site-packages, bypassing grilly's editable
 # install finder hook which shadows it with grilly/datasets/.
-import sys as _sys
+import sys as _sys  # noqa: E402
 _venv_sp = [p for p in _sys.path if 'site-packages' in p and 'cubemind' in p]
 if _venv_sp:
     _ds_spec = _ilu.find_spec('datasets', [_venv_sp[0]])

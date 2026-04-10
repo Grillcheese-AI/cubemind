@@ -12,7 +12,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from cubemind.core import hyperfan_in_variance
 from cubemind.execution.hyla import HYLA
 
 

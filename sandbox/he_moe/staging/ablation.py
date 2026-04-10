@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict
 
 import numpy as np
 import pytest

@@ -16,7 +16,6 @@ available, with numpy CPU fallback.
 
 from __future__ import annotations
 
-import time as _time
 from datetime import datetime
 from enum import Enum
 from dataclasses import dataclass
@@ -215,7 +214,8 @@ class Thalamus:
 
         # Route logits → softmax (GPU)
         route_logits = (features @ self._route_w.T).ravel().astype(np.float32)
-        e = np.exp(route_logits - route_logits.max()); route_weights = (e / (e.sum() + 1e-8)).astype(np.float32)
+        e = np.exp(route_logits - route_logits.max())
+        route_weights = (e / (e.sum() + 1e-8)).astype(np.float32)
 
         return {
             "salience": float(salience),
@@ -277,7 +277,8 @@ class BasalGanglia:
 
         # GPU linear projection + temperature-scaled softmax
         logits = ((features @ self._strategy_w.T).ravel() / self.temperature).astype(np.float32)
-        e = np.exp(logits - logits.max()); probs = (e / (e.sum() + 1e-8)).astype(np.float32)
+        e = np.exp(logits - logits.max())
+        probs = (e / (e.sum() + 1e-8)).astype(np.float32)
 
         best = int(np.argmax(probs))
         self.current_strategy = self.STRATEGIES[best]

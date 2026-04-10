@@ -22,10 +22,9 @@ import numpy as np
 
 # CubeMind imports
 from cubemind.ops import BlockCodes
-from cubemind.perception.snn import SNNEncoder, NeurochemicalState
+from cubemind.perception.snn import SNNEncoder
 from cubemind.brain.cortex import Thalamus, BasalGanglia, CircadianCells
 from cubemind.ops.vsa_bridge import ContinuousItemMemory, LSHProjector
-from cubemind.experimental.vs_graph import spike_diffusion
 from cubemind.experimental.affective_graph import affective_alpha
 from cubemind.reasoning.hd_got import hd_got_resolve
 from cubemind.perception.experiential import ExperientialEncoder

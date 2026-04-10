@@ -388,7 +388,7 @@ def main():
     val_ppl, _ = compute_ppl(model, val_x, val_y)
 
     print(f"\n{'='*55}")
-    print(f"  HE-MoE Hybrid (Coulomb + NLMS + Liquid) Results")
+    print("  HE-MoE Hybrid (Coulomb + NLMS + Liquid) Results")
     print(f"{'='*55}")
     print(f"  Final val PPL:  {val_ppl:.2f}")
     print(f"  Best val PPL:   {best_ppl:.2f}")

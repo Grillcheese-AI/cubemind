@@ -15,7 +15,6 @@ import pytest
 
 from cubemind.experimental.vs_graph import (
     associative_message_passing,
-    spike_diffusion,
     VSGraph,
 )
 from cubemind.perception.snn import NeurochemicalState

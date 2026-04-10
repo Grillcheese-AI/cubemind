@@ -12,7 +12,6 @@ All tests self-contained.
 """
 
 import numpy as np
-import pytest
 
 from cubemind.perception.snn import NeurochemicalState
 
@@ -247,10 +246,12 @@ class TestColorIntegrationWithNeurochemistry:
     def test_different_videos_different_profiles(self):
         """Red-heavy vs blue-heavy frames produce different drive profiles."""
         red = np.zeros((50, 50, 3), dtype=np.uint8)
-        red[:, :, 2] = 200; red[:, :, 1] = 50
+        red[:, :, 2] = 200
+        red[:, :, 1] = 50
 
         blue = np.zeros((50, 50, 3), dtype=np.uint8)
-        blue[:, :, 0] = 200; blue[:, :, 1] = 50
+        blue[:, :, 0] = 200
+        blue[:, :, 1] = 50
 
         red_drive = color_to_neurochemistry(extract_color_stats(red))
         blue_drive = color_to_neurochemistry(extract_color_stats(blue))

@@ -93,7 +93,7 @@ def extract_logits_for_teacher(
     print(f"  Target:  {max_seqs} sequences (max_len={max_seq_len})")
     print(f"{'='*60}")
 
-    print(f"  Loading tokenizer...")
+    print("  Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
         cfg["name"], trust_remote_code=cfg.get("trust_remote_code", False))
 
@@ -189,7 +189,7 @@ def eval_harrier(corpus_path: str, output_dir: str, max_texts: int = 500):
     from sentence_transformers import SentenceTransformer
 
     print(f"\n{'='*60}")
-    print(f"  Evaluating Harrier-OSS-v1 Embeddings")
+    print("  Evaluating Harrier-OSS-v1 Embeddings")
     print(f"{'='*60}")
 
     print(f"  Loading {HARRIER_MODEL}...")
@@ -231,7 +231,7 @@ def eval_harrier(corpus_path: str, output_dir: str, max_texts: int = 500):
     mask = ~np.eye(n_sample, dtype=bool)
     avg_sim = sim_matrix[mask].mean()
 
-    print(f"\n  Harrier-OSS-v1 Results:")
+    print("\n  Harrier-OSS-v1 Results:")
     print(f"  Dimension:       {emb_dim}")
     print(f"  Texts encoded:   {len(texts)}")
     print(f"  Time:            {elapsed:.1f}s ({len(texts)/elapsed:.0f} texts/s)")
@@ -295,7 +295,7 @@ def main():
     cost = total_time / 3600 * 3.59
 
     print(f"\n{'='*60}")
-    print(f"  All done!")
+    print("  All done!")
     print(f"  Total time: {total_time/3600:.1f} hours")
     print(f"  Est. cost:  ${cost:.2f}")
     print(f"  Output:     {args.output}/")

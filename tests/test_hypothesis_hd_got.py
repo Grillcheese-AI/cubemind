@@ -18,9 +18,8 @@ from cubemind.ops import BlockCodes
 from cubemind.experimental.vs_graph import (
     spike_diffusion,
     associative_message_passing,
-    graph_readout,
 )
-from cubemind.reasoning.hmm_rule import HMMRule, HMMEnsemble, MultiViewHMM
+from cubemind.reasoning.hmm_rule import HMMEnsemble, MultiViewHMM
 
 
 # ── The HD-GoT pipeline under test ───────────────────────────────────

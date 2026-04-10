@@ -1,7 +1,5 @@
 """Tests for VSA-based Visual Question Answering."""
 
-import numpy as np
-import pytest
 
 from cubemind.reasoning.vqa import (
     DetectedObject,

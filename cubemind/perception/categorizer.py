@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 # Default taxonomy path
 _DEFAULT_TAXONOMY = Path(__file__).resolve().parent.parent.parent / "data" / "subdomain_taxonomy_patterns.jsonl"
@@ -149,7 +149,7 @@ class Categorizer:
             best_name = "general"
 
         # Confidence: normalized score
-        max_possible = max(best_score, 1)
+        max(best_score, 1)
         confidence = min(1.0, best_score / 20.0)  # 20 matches = full confidence
 
         result = {

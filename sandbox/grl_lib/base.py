@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Protocol, runtime_checkable
 import numpy as np
 
 from .types import (
-    ExpertConfig, Loss, RouteResult, Reward, Score, StepResult, Vector,
+    ExpertConfig, RouteResult, Reward, StepResult,
 )
 
 

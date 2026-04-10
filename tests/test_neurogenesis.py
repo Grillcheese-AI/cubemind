@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from cubemind.brain.neurogenesis import (
-    NeurogenesisController, MaturationStage, NeuronState,
+    NeurogenesisController, MaturationStage,
 )
 
 FEAT_DIM = 16
@@ -82,7 +82,7 @@ def test_growth_on_high_residual():
     # Feed inputs that the 4-neuron network can't represent well
     for _ in range(20):
         x = np.random.randn(FEAT_DIM).astype(np.float32) * 5
-        info = ctrl.step(x)
+        ctrl.step(x)
 
     assert ctrl.neuron_count > 4, f"Network didn't grow: {ctrl.neuron_count}"
 

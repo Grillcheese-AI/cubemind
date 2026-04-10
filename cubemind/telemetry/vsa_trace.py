@@ -23,7 +23,7 @@ import numpy as np
 
 def _check_matplotlib():
     try:
-        import matplotlib
+        import matplotlib  # noqa: F401
         return True
     except ImportError:
         return False

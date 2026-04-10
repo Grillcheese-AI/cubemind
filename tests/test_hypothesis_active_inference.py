@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from cubemind.ops import BlockCodes
-from cubemind.reasoning.hmm_rule import HMMRule, HMMEnsemble
+from cubemind.reasoning.hmm_rule import HMMEnsemble
 
 
 # ── Active Inference primitives under test ────────────────────────────

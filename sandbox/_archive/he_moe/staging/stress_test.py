@@ -12,7 +12,6 @@ import sys
 import time
 
 import numpy as np
-import pytest
 from hypothesis import given, settings, strategies as st
 
 _sandbox = str(__import__("pathlib").Path(__file__).resolve().parent.parent.parent)

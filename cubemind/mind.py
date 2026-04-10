@@ -34,7 +34,6 @@ from cubemind.ops.vsa_bridge import (
     LSHProjector,
     ContinuousItemMemory,
     binarize_and_pack,
-    hamming_similarity,
 )
 from cubemind.perception.snn import SNNEncoder, NeurochemicalState
 from cubemind.brain.cortex import (
@@ -913,7 +912,6 @@ class Mind:
             Dict with recognized concepts, sentiment, knowledge gaps,
             and the brain's routing decision.
         """
-        nc = self.snn.neurochemistry
         words = sentence.lower().split()
 
         # 1. Try to recall each word and meaningful n-grams from memory
@@ -981,7 +979,7 @@ class Mind:
 
         # 2. Compute sentiment from recognized concepts
         known_count = len(recognized)
-        total_sim = sum(r["similarity"] for r in recognized) if recognized else 0
+        sum(r["similarity"] for r in recognized) if recognized else 0
         content_words = set(words) - {"the","a","an","is","are","was","were","in","on","at","to","of","and","or","it","i","you","we","they"}
         comprehension = min(1.0, known_count / max(len(content_words), 1))
 

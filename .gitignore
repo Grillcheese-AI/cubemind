@@ -34,3 +34,5 @@ notebooks/vsa_lm_colab.ipynb
 notebooks/vsa_lm_v3b_resume.py
 notebooks/vsa_lm_colab.ipynb
 notebooks/vsa_lm_v3c_warmrestart.py
+vsa_lm_v3c_grilly_best.grl
+*.grl
