@@ -22,9 +22,8 @@ import numpy as np
 # CubeMind
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from cubemind.ops import BlockCodes
-from cubemind.reasoning.hmm_rule import HMMEnsemble
 from cubemind.reasoning.hd_got import hd_got_resolve
-from cubemind.experimental.vs_graph import spike_diffusion, associative_message_passing
+from cubemind.experimental.vs_graph import spike_diffusion
 from cubemind.experimental.affective_graph import affective_alpha
 from cubemind.perception.snn import NeurochemicalState
 
@@ -482,7 +481,7 @@ def fig4_hdgot_debate():
 def fig5_active_inference():
     print("Fig 5: Active Inference EFE...")
     from tests.test_active_inference_mind import (
-        ActiveInferenceEngine, expected_free_energy
+        ActiveInferenceEngine
     )
 
     K, L = 8, 64

@@ -33,9 +33,9 @@ def run_context_stress_test():
 
         # 1. Test Baseline (O(L*sqrt(L)))
         metrics.reset() # Reset telemetry
-        start = time.time()
+        time.time()
         _ = model_baseline.forward(phi=target_input, context=history)
-        end = time.time()
+        time.time()
         
         # Get specific latency from our internal metrics
         latency_ms = metrics.get("combiner.latency_ms")[-1]
@@ -44,9 +44,9 @@ def run_context_stress_test():
 
         # 2. Test HyperAttention (O(L))
         metrics.reset()
-        start = time.time()
+        time.time()
         _ = model_hyper.forward(phi=target_input, context=history)
-        end = time.time()
+        time.time()
         
         latency_ms = metrics.get("combiner.latency_ms")[-1]
         results["hyper_latency"].append(latency_ms.value)

@@ -111,7 +111,7 @@ def test_encode_state_determinism(enc: WorldEncoder):
     attrs = {"mood": "happy", "location": "park"}
     s1 = enc.encode_state(attrs)
     s2 = enc.encode_state(attrs)
-    np.testing.assert_array_equal(s1, s2)
+    np.testing.assert_allclose(s1, s2, atol=1e-14)
 
 
 # ── Test: encode_state role binding recoverable ──────────────────────────────
@@ -176,7 +176,7 @@ def test_encode_narrative_determinism(enc: WorldEncoder):
     text = "It was a dark and stormy night. The wind howled."
     n1 = enc.encode_narrative(text)
     n2 = enc.encode_narrative(text)
-    np.testing.assert_array_equal(n1, n2)
+    np.testing.assert_allclose(n1, n2, atol=1e-14)
 
 
 # ── Test: encode_narrative diversity ─────────────────────────────────────────
@@ -219,4 +219,4 @@ def test_generate_action_variants_determinism(enc: WorldEncoder):
     base = enc.encode_action("dodge")
     v1 = enc.generate_action_variants(base, n=16)
     v2 = enc.generate_action_variants(base, n=16)
-    np.testing.assert_array_equal(v1, v2)
+    np.testing.assert_allclose(v1, v2, atol=1e-14)

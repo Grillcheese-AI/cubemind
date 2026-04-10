@@ -119,7 +119,7 @@ class TestLuminanceNeurons:
         f3 = np.full((100, 100), 250, dtype=np.uint8)
         r1 = lum.process(f1).reshape(4, 4, 2)[:, :, 0].mean()
         lum.prev_luminance = None
-        r2 = lum.process(f2).reshape(4, 4, 2)[:, :, 0].mean()
+        lum.process(f2).reshape(4, 4, 2)[:, :, 0].mean()
         lum.prev_luminance = None
         r3 = lum.process(f3).reshape(4, 4, 2)[:, :, 0].mean()
         # Input goes 25→100→250 (4x then 2.5x)

@@ -22,3 +22,17 @@ vcpkg-configuration.json
 vcpkg.json
 docs/Medium_Article.md
 docs/distil_to_moqe.ipynb
+/.hypothesis
+checkllama.py
+/cloned
+.claude/elephant-coder.local.md
+.claude/elephant-coder.local.md
+test.py
+smoketest.py
+notebooks/vsa_lm_v3_resume.py
+notebooks/vsa_lm_colab.ipynb
+notebooks/vsa_lm_v3b_resume.py
+notebooks/vsa_lm_colab.ipynb
+notebooks/vsa_lm_v3c_warmrestart.py
+vsa_lm_v3c_grilly_best.grl
+*.grl

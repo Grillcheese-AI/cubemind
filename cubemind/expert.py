@@ -4,7 +4,7 @@ Uses WorldEncoder for Role-Binding and WorldManager for Specialist-based Memory.
 """
 
 import numpy as np
-from cubemind.model import HyperAxialAttention, PlasticCodebook
+from cubemind.model import HyperAxialAttention
 from cubemind.execution.world_encoder import WorldEncoder      # From input_file_10
 from cubemind.execution.world_manager import WorldManager      # From input_file_11
 from cubemind.execution.causal_codebook import CausalCodebook  # From input_file_5
@@ -54,14 +54,15 @@ class CubeMindExpert:
         print(f"🧠 CubeMind is building a Structured World Model from {len(raw_chunks)} sections...")
         
         for chunk in raw_chunks:
-            if len(chunk.strip()) < 200: continue
+            if len(chunk.strip()) < 200:
+                continue
             
             # Use Narrative Encoding (Positional Binding) for temporal flow
             phi = self.encoder.encode_narrative(chunk)
             
             # Let the WorldManager decide: Is this a new domain or an existing one?
             # It uses Oja's rule internally to 'Consolidate' the specialist.
-            transition = self.world_manager.process_transition(
+            self.world_manager.process_transition(
                 state_before=np.zeros((self.k, self.l)), # First step
                 state_after=phi
             )

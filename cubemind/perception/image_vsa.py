@@ -20,7 +20,6 @@ from cubemind.ops.vsa_bridge import (
     LSHProjector,
     ContinuousItemMemory,
     binarize_and_pack,
-    unpack_to_float,
     hamming_similarity,
 )
 from cubemind.perception.perceiver import PerceiverEncoder

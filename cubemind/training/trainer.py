@@ -91,7 +91,12 @@ class Trainer:
         metrics.record("training.surprise", surprise)
 
         # HMM training step (uses internal finite-diff gradients)
-        hmm_loss = self.model.train_step(observations, target, lr=lr)
+        if hasattr(self.model, 'train_step'):
+            hmm_loss = self.model.train_step(observations, target, lr=lr)
+        elif hasattr(self.model, 'hmm') and hasattr(self.model.hmm, 'update'):
+            hmm_loss = self.model.hmm.update(observations, target, lr=lr)
+        else:
+            hmm_loss = loss  # fallback: use main loss
 
         # Optimizer step (if attached)
         effective_lr = lr

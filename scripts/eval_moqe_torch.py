@@ -207,7 +207,7 @@ def eval_checkpoint(
     avg_8bit = (layer_8bit.sum() / (layer_count * n_layers) * 100).item()
 
     print(f"\n{'='*60}")
-    print(f"  MoQE E1 Checkpoint Evaluation (GPU)")
+    print("  MoQE E1 Checkpoint Evaluation (GPU)")
     print(f"{'='*60}")
     print(f"  Loss:       {avg_loss:.4f}")
     print(f"  CE:         {avg_ce:.4f}")
@@ -218,7 +218,7 @@ def eval_checkpoint(
     print(f"  Tokens:     {total_tokens:,}")
     print(f"  Time:       {elapsed:.1f}s")
     print(f"  Tok/s:      {total_tokens/elapsed:.0f}")
-    print(f"\n  Per-layer 8-bit:")
+    print("\n  Per-layer 8-bit:")
     for li in range(n_layers):
         frac = (layer_8bit[li] / layer_count * 100).item()
         print(f"    Layer {li:2d}: {frac:5.1f}%")
@@ -259,7 +259,7 @@ def test_generation(
     ]
 
     print(f"\n{'='*60}")
-    print(f"  MoQE Generation Test (GPU)")
+    print("  MoQE Generation Test (GPU)")
     print(f"{'='*60}")
 
     for prompt in prompts:

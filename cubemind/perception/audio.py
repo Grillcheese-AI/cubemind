@@ -30,7 +30,6 @@ import time
 import numpy as np
 
 from cubemind.perception.snn import SNNEncoder
-from cubemind.ops.vsa_bridge import binarize_and_pack, LSHProjector
 
 # sounddevice (optional)
 _SD = None

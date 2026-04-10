@@ -91,9 +91,11 @@ def train(
         warmup_steps=5, use_gpu=False,
     )
 
-    sys.stdout.write(f"DenseNet feat_dim={feat_dim}, loading data...\n"); sys.stdout.flush()
+    sys.stdout.write(f"DenseNet feat_dim={feat_dim}, loading data...\n")
+    sys.stdout.flush()
     problems = load_problems(config, "train", max_train)
-    sys.stdout.write(f"Loaded {len(problems)} problems\n"); sys.stdout.flush()
+    sys.stdout.write(f"Loaded {len(problems)} problems\n")
+    sys.stdout.flush()
 
     for epoch in range(n_epochs):
         is_warmup = epoch < warmup_epochs

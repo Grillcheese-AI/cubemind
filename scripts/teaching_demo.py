@@ -26,7 +26,6 @@ from __future__ import annotations
 import argparse
 import sys
 import time
-import threading
 from datetime import datetime
 from collections import deque
 
@@ -35,7 +34,7 @@ import numpy as np
 
 # CubeMind imports
 from cubemind.ops import BlockCodes
-from cubemind.perception.snn import SNNEncoder, NeurochemicalState
+from cubemind.perception.snn import SNNEncoder
 from cubemind.brain.cortex import Thalamus, BasalGanglia, CircadianCells
 from cubemind.ops.vsa_bridge import (
     ContinuousItemMemory, LSHProjector, binarize_and_pack,
@@ -628,7 +627,7 @@ def main():
         vid_cap.release()
     cv2.destroyAllWindows()
 
-    print(f"\nSession summary:")
+    print("\nSession summary:")
     print(f"  Frames: {frame_count}")
     print(f"  Concepts taught: {len(mind.concepts)}")
     for label, info in mind.concepts.items():

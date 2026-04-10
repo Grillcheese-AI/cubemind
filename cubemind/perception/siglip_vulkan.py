@@ -18,9 +18,7 @@ Uses grilly GPU ops: linear, gelu, softmax, layernorm via Vulkan shaders.
 
 from __future__ import annotations
 
-import json
 import math
-import os
 from pathlib import Path
 
 import numpy as np

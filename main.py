@@ -19,7 +19,6 @@ def clean_legal_text(text):
     return text.strip()
 
 
-import asyncio
 from cubemind.execution.attribute_extractor import extract_batch
 from cubemind.execution.causal_codebook import CausalCodebook
 

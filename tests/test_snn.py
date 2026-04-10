@@ -1,7 +1,6 @@
 """Tests for SNN perceptual layer: LIF neurons, neurochemistry, temporal encoding."""
 
 import numpy as np
-import pytest
 
 from cubemind.perception.snn import (
     IFNeuronLayer,

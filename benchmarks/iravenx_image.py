@@ -26,7 +26,6 @@ import numpy as np
 
 from cubemind.ops.vsa_bridge import (
     LSHProjector,
-    ContinuousItemMemory,
     binarize_and_pack,
     hamming_similarity,
 )

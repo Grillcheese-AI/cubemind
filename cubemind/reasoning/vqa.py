@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import re
 
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -86,7 +85,7 @@ class SpatialEncoder:
         self.bc = BlockCodes(k=k, l=l)
         self.grid_res = grid_res
 
-        rng = np.random.default_rng(seed)
+        np.random.default_rng(seed)
 
         # Four random axis vectors for spatial dimensions
         self.X_axis = self.bc.random_discrete(seed=seed)
@@ -495,7 +494,7 @@ class VQAEngine:
             args = step["args"]
 
             if fn == "select":
-                result = self.scene.select(args[0])
+                self.scene.select(args[0])
                 intermediate["selected"] = args[0]
 
             elif fn == "relate":

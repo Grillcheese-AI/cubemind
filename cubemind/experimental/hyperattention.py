@@ -271,7 +271,8 @@ class HyperAttention:
             attn = _gather_by_indices(attn_sorted, inv_q_idx)
 
         metrics.record("hyperattention.seq_len", float(L))
-        if squeezed: attn = attn[0]
+        if squeezed:
+            attn = attn[0]
         return attn
 
     def forward(self, x: np.ndarray, causal: bool = False) -> np.ndarray:

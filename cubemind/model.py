@@ -6,7 +6,6 @@ Fixed: Reshape ValueError for contexts smaller than bucket_size.
 from __future__ import annotations
 import numpy as np
 import math
-import re
 from sklearn.decomposition import PCA
 
 from cubemind.core import K_BLOCKS, L_BLOCK
@@ -18,7 +17,6 @@ from cubemind.memory.hippocampal import HippocampalMemory
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.perception.encoder import Encoder
 from cubemind.reasoning.hmm_rule import HMMEnsemble
-from cubemind.telemetry import metrics
 
 # ── Oja Plasticity Kernels ──────────────────────────────────────────────────
 
@@ -221,9 +219,9 @@ class CubeMind:
         return {"answer": answer, "confidence": confidence, "phi_integrated": phi_integrated}
 
     def visualize_manifold(self, context_vectors):
-        if len(context_vectors) < 2: return
+        if len(context_vectors) < 2:
+            return
         data = np.stack([c.ravel() for c in context_vectors])
-        from sklearn.decomposition import PCA
         import matplotlib.pyplot as plt
         coords = PCA(n_components=2).fit_transform(data)
         plt.figure(figsize=(10, 6))

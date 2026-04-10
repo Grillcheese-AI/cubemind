@@ -352,7 +352,7 @@ class TestFullActiveInferenceLoop:
         engine = ActiveInferenceEngine(codebook, n_rules=4, seed=42)
         nc = NeurochemicalState()
 
-        rng = np.random.default_rng(42)
+        np.random.default_rng(42)
 
         # Observe a consistent pattern
         pattern = [codebook[0], codebook[1], codebook[2]]

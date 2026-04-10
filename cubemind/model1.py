@@ -14,22 +14,6 @@ Usage:
 
 from __future__ import annotations
 
-
-"""CubeMind v2 — full MoWM pipeline orchestrator.
-
-Wires all modules into the complete pipeline:
-    Input → Perception → Routing → Memory → Detection → Execution → Answer
-
-Every stage emits telemetry for live monitoring and paper-quality plots.
-All tensor operations route through grilly's GPU backend where available.
-
-Usage:
-    model = CubeMind(n_experts=8, n_codebook=16)
-    model.attach_router(router)
-    result = model.forward("what is the capital of France?", embedder=enc)
-"""
-
-
 import numpy as np
 
 from cubemind.core import K_BLOCKS, L_BLOCK

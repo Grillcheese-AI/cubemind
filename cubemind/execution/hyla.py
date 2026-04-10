@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from cubemind.core import EPS, K_BLOCKS, L_BLOCK, hyperfan_init
+from cubemind.core import EPS, K_BLOCKS, L_BLOCK
 
 # -- GPU bridge (grilly GPU ops) -----------------------------------------------
 

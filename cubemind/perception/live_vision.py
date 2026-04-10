@@ -28,7 +28,7 @@ try:
 except ImportError:
     pass
 
-from cubemind.perception.snn import SNNEncoder
+from cubemind.perception.snn import SNNEncoder  # noqa: E402
 
 
 class FramePreprocessor:
