@@ -22,6 +22,7 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "tokenizers>=0.22.2",
     "safetensors>=0.7.0",
+    "grilly>=1.0.0"
 ]
 
 [project.optional-dependencies]
@@ -43,8 +44,8 @@ testpaths = ["tests"]
 # and no patched version exists yet. Safe to exclude since cubemind never imports onnx.
 exclude-dependencies = ["onnx"]
 
-[tool.uv.sources]
-grilly = { path = "../grilly", editable = true }
+# [tool.uv.sources]
+# grilly = { path = "../grilly", editable = true }
 
 [tool.ruff]
 line-length = 100
