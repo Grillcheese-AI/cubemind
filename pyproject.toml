@@ -3,7 +3,7 @@ name = "cubemind"
 version = "2.0.0"
 description = "Neuro-vector-symbolic architecture for compositional reasoning on consumer hardware"
 license = {text = "BSL-1.1"}
-requires-python = "3.12"
+requires-python = "==3.12"
 dependencies = [
     "datasets>=4.8.2",
     "grilly>=0.6.1",
