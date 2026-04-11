@@ -21,6 +21,7 @@ from __future__ import annotations
 import numpy as np
 
 from cubemind.core import K_BLOCKS, L_BLOCK
+from cubemind.core.registry import register
 
 # ── Import grilly nn modules ────────────────────────────────────────────────
 
@@ -148,6 +149,7 @@ def _maxpool2d_numpy(x, kernel=2, stride=2):
 # ── CNN Encoder ─────────────────────────────────────────────────────────────
 
 
+@register("encoder", "cnn")
 class CNNEncoder:
     """Lightweight VSA-CNN with full backward via grilly.nn modules.
 

@@ -8,8 +8,10 @@ import numpy as np
 
 from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops.block_codes import BlockCodes
+from cubemind.core.registry import register
 
 
+@register("encoder", "text")
 class Encoder:
     """Encodes text into block-code vectors.
 

@@ -27,6 +27,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # GPU bridge (2-expert fast path)
 _bridge_moqe = None
 try:
@@ -378,6 +380,8 @@ class MoQELayer:
 
 # ── MoQE Model ───────────────────────────────────────────────────────────────
 
+
+@register("executor", "moqe")
 class MoQEModel:
     """Multi-layer MoQE model with N configurable experts.
 

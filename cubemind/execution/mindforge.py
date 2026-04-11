@@ -29,6 +29,7 @@ from __future__ import annotations
 import numpy as np
 
 from cubemind.ops.block_codes import BlockCodes
+from cubemind.core.registry import register
 
 try:
     from cubemind.core import K_BLOCKS, L_BLOCK
@@ -44,6 +45,7 @@ def gelu(x: np.ndarray) -> np.ndarray:
     ))).astype(np.float32)
 
 
+@register("executor", "mindforge")
 class MindForge:
     """VSA-conditioned hypernetwork that forges LoRA adapters on the fly.
 

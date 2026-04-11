@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # ── Try importing defaults from cubemind.core ────────────────────────────────
 
 try:
@@ -50,6 +52,7 @@ except Exception:
 EPS = 1e-20
 
 
+@register("ops", "block_codes")
 class BlockCodes:
     """GPU-accelerated block-code VSA operations for CubeMind v2.
 

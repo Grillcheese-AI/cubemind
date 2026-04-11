@@ -55,6 +55,7 @@ exclude-dependencies = ["onnx"]
 
 [tool.ruff]
 line-length = 100
+exclude = ["cubemind/_archive"]
 
 [tool.ruff.lint]
 ignore = ["E741"]  # l is our block-length convention (k blocks × l length)

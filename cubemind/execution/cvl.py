@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # GPU bridge
 _bridge = None
 try:
@@ -119,6 +121,7 @@ class TruncatedGeometric:
 # -- Main estimator ------------------------------------------------------------
 
 
+@register("estimator", "cvl")
 class ContrastiveValueEstimator:
     """Q-value estimation via contrastive occupancy measure learning.
 
