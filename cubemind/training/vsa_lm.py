@@ -388,14 +388,15 @@ def compute_ppl(model, x_data, y_data, max_samples=100):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
+def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
+         seq_len: int = 64):
     cfg = VSALMConfig(
-        train_steps=10000,
-        n_layers=6,          # Half of FlashLM's 18, enough to show scaling
-        seq_len=64,         # Half of FlashLM, 2x our test
+        train_steps=train_steps,
+        n_layers=n_layers,
+        seq_len=seq_len,
         val_every=50,
-        d_model=256,         # 2/3 of FlashLM, good balance speed/capacity
-        d_ffn=768,           # 3x d_model
+        d_model=d_model,
+        d_ffn=d_model * 3,
         k=16,
         l=16,                # d_vsa = 256 = d_model
         forge_rank=8,

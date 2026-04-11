@@ -176,7 +176,7 @@ def train() -> None:
 def train_vsa_lm(steps, layers, d_model, seq_len, data_dir) -> None:
     """Train VSA-LM on TinyStories."""
     from cubemind.training.vsa_lm import main as vsa_lm_main
-    vsa_lm_main()
+    vsa_lm_main(train_steps=steps, n_layers=layers, d_model=d_model, seq_len=seq_len)
 
 
 @train.command("mindforge")
