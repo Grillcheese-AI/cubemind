@@ -525,12 +525,13 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
             prev_loss = loss if step > 0 else 0.0
             logits = model.forward(ids, prev_loss=prev_loss)
 
-            # ── Loss + gradient (GPU fused when available) ────────────
+            # ── Loss + gradient ──────────────────────────────────────
+            # Standard CE over vocab logits
             if _gc_distill and model._gpu_dev is not None:
                 dl = _gc.distillation_loss(
                     model._gpu_dev,
                     logits.astype(np.float32),
-                    logits.astype(np.float32),  # self-distill = pure CE
+                    logits.astype(np.float32),
                     labels.astype(np.int32),
                     temperature=1.0, alpha=0.0,
                 )
@@ -542,6 +543,29 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
                 grad_logits = probs.copy()
                 grad_logits[np.arange(S), labels] -= 1.0
                 grad_logits /= S
+
+            # Per-block CE auxiliary loss (uses block-code structure)
+            # Reshape last hidden to (S, k, l) and compute per-block softmax
+            if model._last_hidden is not None:
+                k, l_blk = cfg.k, cfg.l
+                d_vsa = k * l_blk
+                h_flat = model._last_hidden[:, :d_vsa]  # (S, d_vsa)
+                h_blocks = h_flat.reshape(S, k, l_blk)  # (S, k, l)
+                # Per-block softmax
+                h_max = h_blocks.max(axis=-1, keepdims=True)
+                h_exp = np.exp(h_blocks - h_max)
+                h_probs = h_exp / (h_exp.sum(axis=-1, keepdims=True) + 1e-8)
+                # Target: embed token's block-code structure
+                target_embed = model.embed[labels][:, :d_vsa].reshape(S, k, l_blk)
+                t_max = target_embed.max(axis=-1, keepdims=True)
+                t_exp = np.exp(target_embed - t_max)
+                t_probs = t_exp / (t_exp.sum(axis=-1, keepdims=True) + 1e-8)
+                # Per-block CE: -mean(sum(t * log(h)))
+                block_ce = -float(np.mean(np.sum(
+                    t_probs * np.log(h_probs + 1e-8), axis=-1,
+                )))
+                # Blend: 70% standard CE + 30% block CE
+                loss = 0.7 * loss + 0.3 * block_ce
 
             # ── Backward: zero grads + advance optimizer step ─────────
             opt.begin_step()
