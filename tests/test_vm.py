@@ -1144,3 +1144,51 @@ class TestJmp:
         vm.execute("ASSIGN", "x", 5)
         vm.execute("LABEL", "marker")
         assert vm.execute("QUERY", "x") == 5
+
+
+# ── DEBATE (HD Graph-of-Thoughts) ────────────────────────────────────────
+
+
+class TestDebate:
+    """Test HD-GoT debate resolution through the VM."""
+
+    def test_debate_single_candidate(self, vm, bc):
+        """DEBATE with one candidate returns it unchanged."""
+        v = bc.random_discrete(seed=42)
+        result = vm.execute("DEBATE", [v])
+        assert result.shape == (K, L)
+        sim = float(bc.similarity(result, v))
+        assert sim > 0.99
+
+    def test_debate_returns_consensus(self, vm, bc):
+        """DEBATE with multiple candidates returns a (k,l) consensus vector."""
+        candidates = [bc.random_discrete(seed=i) for i in range(5)]
+        result = vm.execute("DEBATE", candidates)
+        assert result.shape == (K, L)
+
+    def test_debate_favors_similar_cluster(self, vm, bc):
+        """If 3 candidates agree and 2 disagree, consensus should be close to the 3."""
+        base = bc.random_discrete(seed=42)
+        cluster = [base.copy() for _ in range(3)]
+        outliers = [bc.random_discrete(seed=100), bc.random_discrete(seed=200)]
+
+        result = vm.execute("DEBATE", cluster + outliers)
+
+        sim_to_base = float(bc.similarity(result, base))
+        sim_to_outlier = float(bc.similarity(result, outliers[0]))
+        assert sim_to_base > sim_to_outlier, (
+            f"Consensus should favor cluster: base={sim_to_base:.3f} "
+            f"vs outlier={sim_to_outlier:.3f}"
+        )
+
+    def test_debate_in_program(self, vm, bc):
+        """DEBATE works as part of a VM program."""
+        v0 = bc.random_discrete(seed=10)
+        v1 = bc.random_discrete(seed=20)
+        v2 = bc.random_discrete(seed=30)
+
+        program = [
+            ("DEBATE", [v0, v1, v2]),
+        ]
+        vm.run(program)
+        assert vm.step_count > 0
