@@ -492,6 +492,27 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
                 if val_ppl < best_ppl:
                     best_ppl = val_ppl
 
+            # Checkpoint
+            if step % cfg.save_every == 0 and step > 0:
+                ckpt_path = f"data/checkpoints/vsa_lm_step{step}.npz"
+                os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
+                np.savez_compressed(
+                    ckpt_path,
+                    embed=model.embed,
+                    out_w=model.out_w,
+                    capsule_embed=model.capsule_embed,
+                    capsule_proj=model.capsule_proj,
+                    forge_A_basis=model.forge.A_basis,
+                    forge_B_basis=model.forge.B_basis,
+                    forge_W_proj=model.forge.W_proj,
+                    forge_W_h=model.forge.W_h,
+                    forge_W_coeff=model.forge.W_coeff,
+                    forge_layer_emb=model.forge.layer_embeddings,
+                    step=step,
+                    best_ppl=best_ppl,
+                )
+                logger.info("Checkpoint saved: {} (PPL={:.1f})", ckpt_path, best_ppl)
+
             step += 1
 
     elapsed = time.time() - t0
