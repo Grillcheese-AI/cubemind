@@ -109,7 +109,6 @@ class TeacherExtractor:
         from llama_cpp import Llama
 
         logger.info("Loading teacher: {}", config.teacher_path)
-        n_gpu = -1 if config.teacher_gpu else 0
         self.model = Llama(
             model_path=config.teacher_path,
             n_ctx=config.n_ctx,
@@ -257,36 +256,57 @@ def train(config: HarrierPretrainConfig | None = None):
     loss_ema = 0.0
     t0 = time.time()
 
+    # Init VM for structured context encoding
+    from cubemind.reasoning.vm import VSAVM
+    vm = VSAVM(bc=bc, seed=config.seed)
+
+    # Build a persistent codebook of text patterns the VM discovers
+    # Each unique pattern type gets a stable context block-code
+
     logger.info("Starting MindForge pre-training: {} steps, {} texts, lr={}",
                 config.train_steps, n_texts, config.lr)
 
     for step in range(config.train_steps):
-        # Sample a random text and tokenize with teacher's tokenizer
-        text_idx = int(rng.integers(0, n_texts))
-        text = texts[text_idx]
+        # ── 1. Sample two consecutive texts (before → after) ─────────────
+        text_idx = int(rng.integers(0, n_texts - 1))
+        text_a = texts[text_idx]
+        text_b = texts[text_idx + 1]
 
-        # Extract logits using teacher's own tokenizer
-        input_ids, teacher_logits = teacher.extract_from_text(text, max_tokens=config.seq_len)
-        labels = input_ids[1:]  # shifted labels
+        # ── 2. Teacher tokenizes and produces logits ─────────────────────
+        ids_a, logits_a = teacher.extract_from_text(text_a, max_tokens=config.seq_len)
+        ids_b, logits_b = teacher.extract_from_text(text_b, max_tokens=config.seq_len)
 
-        # Create context block-code from token sequence
-        context = bc.random_discrete(seed=0)
-        for t_idx in range(min(8, len(input_ids))):
-            tok_vec = bc.random_discrete(seed=int(input_ids[t_idx]) + 1)
-            pos_shift = np.roll(tok_vec, t_idx, axis=-1)
-            context = bc.discretize(context.astype(np.float32) + pos_shift.astype(np.float32))
+        # ── 3. VM builds structured context via DISCOVER ─────────────────
+        # Encode each text as a block-code using positional binding (SEQ)
+        vecs_a = [bc.random_discrete(seed=int(t) + 1) for t in ids_a[:8]]
+        vecs_b = [bc.random_discrete(seed=int(t) + 1) for t in ids_b[:8]]
+        bc_a = vm.execute("SEQ", vecs_a) if len(vecs_a) > 0 else bc.random_discrete(seed=0)
+        bc_b = vm.execute("SEQ", vecs_b) if len(vecs_b) > 0 else bc.random_discrete(seed=1)
 
-        # Teacher soft targets: (seq, top_k) → probabilities
-        teacher_probs = np.asarray(
-            softmax(teacher_logits / config.temperature), dtype=np.float32,
+        # DISCOVER the transition rule between the two texts
+        discovery = vm.execute("DISCOVER", bc_a, bc_b)
+
+        # The context for MindForge is the STRUCTURED delta, not a random hash
+        if discovery["rule_type"] == "bind" and discovery["delta"] is not None:
+            context = discovery["delta"]  # structured transformation vector
+        else:
+            context = bc.bind(bc_a, bc_b)  # fallback: bind the two encodings
+
+        # Store in cleanup memory for SDLS purification
+        pattern_key = f"step_{step % 1000}"
+        vm.cleanup_mem.store(pattern_key, context)
+
+        # ── 4. Teacher soft targets ──────────────────────────────────────
+        teacher_probs_b = np.asarray(
+            softmax(logits_b / config.temperature), dtype=np.float32,
         )
-        teacher_probs = np.clip(teacher_probs, 1e-7, 1.0)
+        teacher_probs_b = np.clip(teacher_probs_b, 1e-7, 1.0)
 
-        # Forge adapter for one random layer
+        # ── 5. Forge adapter from structured context ─────────────────────
         layer_id = int(rng.integers(0, config.teacher_n_layers))
-        A, B = forge.forge(context, layer_id)  # A: (rank, d), B: (d, rank)
+        A, B = forge.forge(context, layer_id)
 
-        # LR schedule: cosine with warmup
+        # ── 6. LR schedule ───────────────────────────────────────────────
         lr = config.lr
         if step < config.warmup_steps:
             lr = config.lr * max(step, 1) / config.warmup_steps
@@ -298,94 +318,86 @@ def train(config: HarrierPretrainConfig | None = None):
                 1 + math.cos(math.pi * progress)
             )
 
-        # ── CE + KL loss with direct error-driven update ──────────────────
-        # Same approach as vsa_lm.py: compute error, update weights directly.
-        # No random hidden states — use teacher logits as both input and target.
-
-        # Teacher probs as target distribution: (seq, top_k)
-        # Student: forge adapter, apply to teacher's mean hidden state estimate
-        # The adapter should learn to project the input toward teacher's output dist.
-
-        # Use teacher logits mean as a proxy for the hidden state at this layer
-        teacher_mean = teacher_logits.mean(axis=0).astype(np.float32)  # (top_k,)
-
-        # Pad/truncate to d_target for adapter application
+        # ── 7. CE + KL loss ──────────────────────────────────────────────
+        # Use teacher logits_a as the "hidden state" input to the adapter
+        # (text_a is what the model saw, adapter should help predict text_b)
         d = config.teacher_d_model
-        tk = len(teacher_mean)
-        if tk >= d:
-            h_input = teacher_mean[:d]
-        else:
-            h_input = np.zeros(d, dtype=np.float32)
-            h_input[:tk] = teacher_mean
+        tk = min(config.top_k_logits, logits_a.shape[1])
+        teacher_mean_a = logits_a.mean(axis=0).astype(np.float32)[:tk]  # (tk,)
 
-        # Apply LoRA adapter: output = h + scale * h @ A.T @ B.T
-        lora_out = (h_input @ A.T @ B.T).astype(np.float32)  # (d,)
+        h_input = np.zeros(d, dtype=np.float32)
+        h_input[:tk] = teacher_mean_a
+
+        # Apply adapter
+        lora_out = (h_input @ A.T @ B.T).astype(np.float32)
         student_out = h_input + forge.scale * lora_out
 
-        # Project student output to logit-sized space
+        # Student probabilities
         s_logits = student_out[:tk]
         s_scaled = s_logits / config.temperature
         s_shifted = s_scaled - np.max(s_scaled)
-        s_exp = np.exp(s_shifted)
+        s_exp = np.exp(np.clip(s_shifted, -20, 20))
         s_probs = (s_exp / (np.sum(s_exp) + 1e-8)).astype(np.float32)
         s_probs = np.clip(s_probs, 1e-7, 1.0)
 
-        # Teacher target (average across sequence positions)
-        t_probs = teacher_probs.mean(axis=0).astype(np.float32)
+        # Teacher target (text_b distribution)
+        t_probs = teacher_probs_b.mean(axis=0).astype(np.float32)[:tk]
         t_probs = np.clip(t_probs, 1e-7, 1.0)
 
-        # KL divergence: teacher || student
+        # KL divergence
         kl = float(np.sum(t_probs * (np.log(t_probs) - np.log(s_probs)))) * (config.temperature ** 2)
+        kl = min(kl, 100.0)  # cap to prevent explosion
 
-        # CE on hard labels
+        # CE
+        labels = ids_b[1:] if len(ids_b) > 1 else ids_b
         ce = 0.0
         for t in range(min(len(labels), config.seq_len)):
             tok = int(labels[t]) % tk
             ce -= math.log(max(float(s_probs[tok]), 1e-8))
-        ce /= max(config.seq_len, 1)
+        ce /= max(len(labels), 1)
 
         loss = 0.3 * ce + 0.6 * kl
 
-        # ── Direct error-driven update (like vsa_lm.py) ──────────────────
-        # Error: gradient of CE+KL w.r.t. student logits = s_probs - t_probs
-        grad_logits = (s_probs - t_probs).astype(np.float32)  # (top_k,)
+        # ── 8. Error-driven update ───────────────────────────────────────
+        grad_logits = (s_probs - t_probs).astype(np.float32)
 
-        # Backprop through output projection: grad w.r.t. lora_out
+        # Backprop through LoRA
         grad_lora = np.zeros(d, dtype=np.float32)
-        grad_lora[:tk] = grad_logits / config.temperature
+        grad_lora[:tk] = grad_logits / max(config.temperature, 0.1)
+        grad_A = np.outer(grad_lora[:forge.rank], h_input)
+        grad_B = np.outer(h_input, grad_lora[:forge.rank])
 
-        # Backprop through LoRA: lora_out = h @ A.T @ B.T
-        # grad_A ≈ outer(B @ grad_lora, h) → (rank, d)
-        # grad_B ≈ outer(h, A @ grad_lora) → (d, rank)
-        grad_A_direct = np.outer(grad_lora[:forge.rank], h_input)  # (rank, d)
-        grad_B_direct = np.outer(h_input, grad_lora[:forge.rank])  # (d, rank)
-
-        # Get softmax coefficients for this context+layer
+        # Get mixing coefficients
         ctx_flat = bc.to_flat(context).astype(np.float32)
         ctx_proj = (ctx_flat @ forge.W_proj.T).astype(np.float32)
         layer_emb = forge.layer_embeddings[layer_id]
         combined = np.concatenate([ctx_proj, layer_emb])
         from cubemind.execution.mindforge import gelu
-        h_hidden = np.asarray(gelu(combined @ forge.W_h.T + forge.b_h), dtype=np.float32)
-        coeffs_raw = h_hidden @ forge.W_coeff.T + forge.b_coeff
-        coeffs_exp = np.exp(coeffs_raw - np.max(coeffs_raw))
-        coeffs_soft = (coeffs_exp / np.sum(coeffs_exp)).astype(np.float32)
+        h_h = np.asarray(gelu(combined @ forge.W_h.T + forge.b_h), dtype=np.float32)
+        c_raw = h_h @ forge.W_coeff.T + forge.b_coeff
+        c_exp = np.exp(c_raw - np.max(c_raw))
+        c_soft = (c_exp / np.sum(c_exp)).astype(np.float32)
 
-        # Update each basis adapter proportional to its coefficient
+        # Update basis adapters (proportional to coefficient)
         for i in range(forge.n_basis):
-            w = float(coeffs_soft[i])
+            w = float(c_soft[i])
             if w < 0.01:
                 continue
-            forge.A_basis[i] -= lr * w * np.clip(grad_A_direct, -0.1, 0.1).astype(np.float32)
-            forge.B_basis[i] -= lr * w * np.clip(grad_B_direct, -0.1, 0.1).astype(np.float32)
+            forge.A_basis[i] -= lr * w * np.clip(grad_A, -0.05, 0.05).astype(np.float32)
+            forge.B_basis[i] -= lr * w * np.clip(grad_B, -0.05, 0.05).astype(np.float32)
 
-        # Update output projection (W_proj) — scatter-add style
-        grad_proj = np.outer(
-            (grad_lora[:forge.W_proj.shape[0]]),
-            ctx_flat[:forge.W_proj.shape[1]],
-        )
-        if grad_proj.shape == forge.W_proj.shape:
-            forge.W_proj -= lr * 0.01 * np.clip(grad_proj, -0.01, 0.01).astype(np.float32)
+        # Update W_proj (slow)
+        gp = np.outer(grad_lora[:forge.W_proj.shape[0]], ctx_flat[:forge.W_proj.shape[1]])
+        if gp.shape == forge.W_proj.shape:
+            forge.W_proj -= lr * 0.01 * np.clip(gp, -0.01, 0.01).astype(np.float32)
+
+        # Update W_coeff via coefficient error (push toward uniform when loss high)
+        if loss > 1.0:
+            uniform = np.ones(forge.n_basis, dtype=np.float32) / forge.n_basis
+            coeff_error = c_soft - uniform
+            grad_wc = np.outer(coeff_error, h_h[:forge.W_coeff.shape[1]])
+            if grad_wc.shape == forge.W_coeff.shape:
+                forge.W_coeff -= lr * 0.1 * np.clip(grad_wc, -0.01, 0.01).astype(np.float32)
 
         # Track loss
         loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
