@@ -197,7 +197,7 @@ def train(config: HarrierPretrainConfig | None = None):
         adapter_var = float(np.var(adapter_norms))
 
         # Teacher logit entropy (measure of teacher confidence)
-        teacher_probs = softmax(teacher_logits / config.temperature)
+        teacher_probs = np.asarray(softmax(teacher_logits / config.temperature), dtype=np.float32)
         teacher_entropy = -float(np.mean(np.sum(teacher_probs * np.log(teacher_probs + 1e-8), axis=-1)))
 
         # Loss: negative adapter variance + teacher entropy alignment
