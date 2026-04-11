@@ -689,6 +689,10 @@ def train_distill(
     logger.info("VSA-LM distill: d={}, layers={}, vocab={}, params={:.1f}M",
                 cfg.d_model, cfg.n_layers, cfg.vocab_size, model.param_count() / 1e6)
 
+    # Init GPU for forward + backward
+    gpu_ok = model._init_gpu()
+    logger.info("GPU: {}", "enabled (forward+backward)" if gpu_ok else "CPU only")
+
     opt = AdamW(lr=lr)
     t0 = time.time()
     best_loss = float("inf")
@@ -746,49 +750,88 @@ def train_distill(
 
             # ── Backward ─────────────────────────────────────────────
             opt.begin_step()
-            model.forge.grads = model.forge.zero_grads()
-            for layer in model.layers:
-                for k in layer.grads:
-                    layer.grads[k].fill(0.0)
 
-            # Forward with caches for backward
-            x_fwd = model.embed[ids] + model.pe[:S]
-            caps = model.capsule_embed[ids]
-            x_fwd = x_fwd + (caps @ model.capsule_proj.T).astype(np.float32)
-            caps_mean = caps.mean(axis=0)
-            novelty = float(np.clip(caps_mean[CAP_NOVELTY], 0, 1))
-            plasticity = float(np.clip(caps_mean[CAP_PLASTICITY], 0, 1))
+            # Try GPU backward first (grilly_core.vsa_lm_backward)
+            gpu_backward_ok = False
+            if model._gpu_handle is not None and _gc is not None:
+                try:
+                    grads = _gc.vsa_lm_backward(
+                        model._gpu_dev, model._gpu_handle,
+                        ids.astype(np.int32),
+                        grad_logits.astype(np.float32),
+                    )
+                    # Apply all gradients via AdamW
+                    opt.step(model.embed, grads["grad_embed"])
+                    opt.step(model.out_w, grads["grad_out_w"])
+                    if "grad_pos" in grads:
+                        opt.step(model.pe, grads["grad_pos"])
+                    for li in range(cfg.n_layers):
+                        for key, attr in [
+                            (f"grad_ffn_up_{li}", "ffn_up"),
+                            (f"grad_ffn_down_{li}", "ffn_down"),
+                        ]:
+                            if key in grads:
+                                wp = getattr(model.layers[li], attr).weight_patterns
+                                opt.step(wp, grads[key])
+                        for key, attr in [
+                            (f"grad_ln_g_{li}", "ln_g"),
+                            (f"grad_ln_b_{li}", "ln_b"),
+                        ]:
+                            if key in grads:
+                                opt.step(getattr(model.layers[li], attr), grads[key])
+                    # MindForge grads from GPU (if returned)
+                    for fk in ["A_basis", "B_basis", "W_coeff", "b_coeff",
+                               "W_h", "b_h", "W_proj", "layer_embeddings",
+                               "ln_g", "ln_b"]:
+                        gkey = f"grad_forge_{fk}"
+                        if gkey in grads:
+                            opt.step(getattr(model.forge, fk), grads[gkey])
+                    model._reupload_gpu()
+                    gpu_backward_ok = True
+                except Exception as e:
+                    logger.warning("GPU backward failed: {}, using CPU", e)
 
-            caches = []
-            for layer in model.layers:
-                x_fwd, cache = layer.forward_with_cache(
-                    x_fwd, novelty=novelty, plasticity=plasticity)
-                caches.append(cache)
+            # CPU backward fallback
+            if not gpu_backward_ok:
+                model.forge.grads = model.forge.zero_grads()
+                for layer in model.layers:
+                    for k in layer.grads:
+                        layer.grads[k].fill(0.0)
 
-            # Output projection backward
-            dx = (grad_logits @ model.out_w / np.sqrt(cfg.d_model)).astype(np.float32)
-            grad_out_w = (grad_logits.T @ x_fwd / np.sqrt(cfg.d_model)).astype(np.float32)
-            opt.step(model.out_w, grad_out_w)
+                # Forward with caches
+                x_fwd = model.embed[ids] + model.pe[:S]
+                caps = model.capsule_embed[ids]
+                x_fwd = x_fwd + (caps @ model.capsule_proj.T).astype(np.float32)
+                caps_mean = caps.mean(axis=0)
+                novelty = float(np.clip(caps_mean[CAP_NOVELTY], 0, 1))
+                plasticity = float(np.clip(caps_mean[CAP_PLASTICITY], 0, 1))
 
-            # Layer backward (chain rule)
-            for layer, cache in reversed(list(zip(model.layers, caches))):
-                dx = layer.backward(dx, cache)
+                caches = []
+                for layer in model.layers:
+                    x_fwd, cache = layer.forward_with_cache(
+                        x_fwd, novelty=novelty, plasticity=plasticity)
+                    caches.append(cache)
 
-            # Apply layer + forge gradients via AdamW
-            for layer in model.layers:
-                opt.step(layer.ffn_up.weight_patterns, layer.grads["ffn_up_w"])
-                opt.step(layer.ffn_down.weight_patterns, layer.grads["ffn_down_w"])
-                opt.step(layer.ln_g, layer.grads["ln_g"])
-                opt.step(layer.ln_b, layer.grads["ln_b"])
+                dx = (grad_logits @ model.out_w / np.sqrt(cfg.d_model)).astype(np.float32)
+                grad_out_w = (grad_logits.T @ x_fwd / np.sqrt(cfg.d_model)).astype(np.float32)
+                opt.step(model.out_w, grad_out_w)
 
-            for fk, fg in model.forge.grads.items():
-                opt.step(getattr(model.forge, fk), fg)
+                for layer, cache in reversed(list(zip(model.layers, caches))):
+                    dx = layer.backward(dx, cache)
 
-            # Embedding gradients
-            for t in range(S):
-                tok = int(ids[t])
-                if 0 <= tok < cfg.vocab_size:
-                    model.embed[tok] -= lr * np.clip(dx[t], -0.1, 0.1)
+                for layer in model.layers:
+                    opt.step(layer.ffn_up.weight_patterns, layer.grads["ffn_up_w"])
+                    opt.step(layer.ffn_down.weight_patterns, layer.grads["ffn_down_w"])
+                    opt.step(layer.ln_g, layer.grads["ln_g"])
+                    opt.step(layer.ln_b, layer.grads["ln_b"])
+
+                for fk, fg in model.forge.grads.items():
+                    opt.step(getattr(model.forge, fk), fg)
+
+                for t in range(S):
+                    tok = int(ids[t])
+                    if 0 <= tok < cfg.vocab_size:
+                        model.embed[tok] -= lr * np.clip(dx[t], -0.1, 0.1)
 
             # ── Logging ──────────────────────────────────────────────
             loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
