@@ -157,38 +157,59 @@ class TeacherExtractor:
 
 
 def load_text_data(config: HarrierPretrainConfig) -> list[str]:
-    """Load TinyStories as raw text chunks for teacher tokenization."""
-    # Try loading from HuggingFace datasets
-    # Fix: grilly.tokenizers shadows HF tokenizers — temporarily remove from path
-    import sys
-    grilly_paths = [p for p in sys.path if "grilly" in p.lower()]
-    for p in grilly_paths:
-        sys.path.remove(p)
-    try:
-        import datasets
-        logger.info("Loading TinyStories from HuggingFace...")
-        ds = datasets.load_dataset("roneneldan/TinyStories", split="train")
-        texts = [row["text"] for row in ds if len(row.get("text", "")) > 50]
-        logger.info("Loaded {} text samples from TinyStories", len(texts))
-        return texts[:config.max_stories] if config.max_stories > 0 else texts
-    except Exception as e:
-        logger.warning("HF load failed: {}. Trying local fallback.", e)
-    finally:
-        for p in grilly_paths:
-            if p not in sys.path:
-                sys.path.append(p)
+    """Load TinyStories as raw text for teacher tokenization.
 
-    # Fallback: read any .txt files in data_dir
+    Priority: local JSON > local .txt > HuggingFace > synthetic
+    """
+    import json
+
+    # 1. Local JSON (fastest — pre-downloaded)
+    json_path = Path("data/tinystories_50k.json")
+    if json_path.exists():
+        with open(json_path, encoding="utf-8") as f:
+            texts = json.load(f)
+        logger.info("Loaded {} stories from {}", len(texts), json_path)
+        return texts[:config.max_stories] if config.max_stories > 0 else texts
+
+    # 2. Local .txt files
     text_files = sorted(Path(config.data_dir).glob("*.txt"))
     if text_files:
         texts = []
         for f in text_files:
             texts.extend(f.read_text(encoding="utf-8", errors="ignore").split("\n\n"))
         texts = [t.strip() for t in texts if len(t.strip()) > 50]
-        logger.info("Loaded {} text chunks from {}", len(texts), config.data_dir)
-        return texts
+        if texts:
+            logger.info("Loaded {} text chunks from {}", len(texts), config.data_dir)
+            return texts
 
-    # Last resort: generate simple training sentences
+    # 3. HuggingFace (slow, may have import conflicts)
+    try:
+        import sys
+        grilly_paths = [p for p in sys.path if "grilly" in p.lower()]
+        for p in grilly_paths:
+            sys.path.remove(p)
+        try:
+            import datasets
+            logger.info("Loading TinyStories from HuggingFace...")
+            ds = datasets.load_dataset("roneneldan/TinyStories", split="train")
+            texts = [row["text"] for row in ds if len(row.get("text", "")) > 50]
+            logger.info("Loaded {} stories from HF", len(texts))
+
+            # Cache locally for next time
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(texts[:50000], f)
+            logger.info("Cached to {}", json_path)
+
+            return texts[:config.max_stories] if config.max_stories > 0 else texts
+        finally:
+            for p in grilly_paths:
+                if p not in sys.path:
+                    sys.path.append(p)
+    except Exception as e:
+        logger.warning("HF load failed: {}", e)
+
+    # 4. Synthetic fallback
     logger.warning("No text data found. Using synthetic training sentences.")
     return [
         f"Once upon a time there was a {animal} who liked to {action}."
