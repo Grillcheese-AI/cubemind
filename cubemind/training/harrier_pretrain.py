@@ -83,7 +83,7 @@ class TeacherExtractor:
         self.model = Llama(
             model_path=config.teacher_path,
             n_ctx=config.n_ctx,
-            n_gpu_layers=0,  # CPU — GPU for grilly
+            n_gpu_layers=-1,  # all layers on Vulkan GPU
             verbose=False,
             logits_all=True,
         )
@@ -182,44 +182,93 @@ def train(config: HarrierPretrainConfig | None = None):
         # Get teacher logits
         teacher_logits = teacher.extract(input_ids)  # (seq, top_k)
 
-        # Create context block-code from input embedding
-        # Use a simple hash of the token sequence as context
-        ctx_seed = int(np.sum(input_ids.astype(np.int64)) % (2**31))
-        context = bc.random_discrete(seed=ctx_seed)
+        # Create context block-code from token sequence
+        # Each token contributes via positional binding for richer context
+        context = bc.random_discrete(seed=0)  # identity-like base
+        for t_idx in range(min(8, len(input_ids))):  # first 8 tokens
+            tok_vec = bc.random_discrete(seed=int(input_ids[t_idx]) + 1)
+            pos_shift = np.roll(tok_vec, t_idx, axis=-1)
+            context = bc.discretize(context.astype(np.float32) + pos_shift.astype(np.float32))
 
-        # Forge adapters for all layers
-        adapters = forge.forge_all_layers(context)
+        # Forge adapters for a subset of layers (faster than all 24)
+        n_sample_layers = min(4, config.teacher_n_layers)
+        layer_ids = rng.choice(config.teacher_n_layers, size=n_sample_layers, replace=False)
+        adapters = [forge.forge(context, int(lid)) for lid in layer_ids]
 
-        # Compute distillation loss: how well do the forged adapters
-        # capture the teacher's behavior?
-        # For now: measure adapter variance as proxy for learning signal
-        # (real KL div needs student model forward pass)
-        adapter_norms = [float(np.linalg.norm(A) + np.linalg.norm(B)) for A, B in adapters]
-        adapter_var = float(np.var(adapter_norms))
+        # Teacher soft targets
+        teacher_probs = np.asarray(
+            softmax(teacher_logits / config.temperature), dtype=np.float32,
+        )
 
-        # Teacher logit entropy (measure of teacher confidence)
-        teacher_probs = np.asarray(softmax(teacher_logits / config.temperature), dtype=np.float32)
-        teacher_entropy = -float(np.mean(np.sum(teacher_probs * np.log(teacher_probs + 1e-8), axis=-1)))
+        # Loss: adapter reconstruction error
+        # For each forged adapter (A, B), apply it to a random input vector
+        # and measure how much the output aligns with the teacher's logit direction
+        teacher_direction = teacher_probs.mean(axis=0)  # (top_k,) average teacher preference
+        teacher_direction = teacher_direction / (np.linalg.norm(teacher_direction) + 1e-8)
 
-        # Loss: negative adapter variance + teacher entropy alignment
-        # Higher variance = more differentiated adapters per layer (good)
-        # Lower entropy = more confident teacher (easier to match)
-        loss = teacher_entropy - 0.1 * adapter_var
+        total_loss = 0.0
+        for A, B in adapters:
+            # Simulate: random hidden state → adapter → output direction
+            h = rng.standard_normal(config.teacher_d_model).astype(np.float32) * 0.1
+            adapted = (h @ A.T @ B.T).astype(np.float32)  # (d_model,)
 
-        # Error-driven update on MindForge projection weights
+            # Project adapted output to logit space (simplified: use norm as signal)
+            # Real loss: KL(teacher || student). Proxy: adapter should produce
+            # non-trivial, differentiated outputs per layer
+            output_norm = float(np.linalg.norm(adapted))
+            # Target: adapter output should have norm proportional to teacher confidence
+            target_norm = float(np.linalg.norm(teacher_direction)) * 10.0
+            total_loss += (output_norm - target_norm) ** 2
+
+        loss = total_loss / max(n_sample_layers, 1)
+
+        # LR schedule: cosine with warmup
         lr = config.lr
         if step < config.warmup_steps:
-            lr = config.lr * step / config.warmup_steps
+            lr = config.lr * max(step, 1) / config.warmup_steps
         else:
-            progress = (step - config.warmup_steps) / max(config.train_steps - config.warmup_steps, 1)
-            lr = config.lr_min + 0.5 * (config.lr - config.lr_min) * (1 + math.cos(math.pi * progress))
+            progress = (step - config.warmup_steps) / max(
+                config.train_steps - config.warmup_steps, 1,
+            )
+            lr = config.lr_min + 0.5 * (config.lr - config.lr_min) * (
+                1 + math.cos(math.pi * progress)
+            )
 
-        # Gradient-free update: nudge W_proj toward producing adapters
-        # that differentiate across layers (maximize adapter variance)
-        ctx_flat = bc.to_flat(context)
-        grad_proj = np.outer(ctx_flat, np.random.default_rng(step).standard_normal(config.forge_d_hidden))
-        if grad_proj.shape == forge.W_proj.T.shape:
-            forge.W_proj -= lr * 0.01 * np.clip(grad_proj.T, -0.1, 0.1).astype(np.float32)
+        # Error-driven update on MindForge weights
+        # Finite-difference gradient: perturb W_proj, measure loss change
+        ctx_flat = bc.to_flat(context).astype(np.float32)
+        perturbation = rng.standard_normal(forge.W_proj.shape).astype(np.float32) * 0.01
+
+        # Perturbed forge
+        forge.W_proj += perturbation
+        adapters_p = [forge.forge(context, int(lid)) for lid in layer_ids]
+        loss_p = 0.0
+        for A, B in adapters_p:
+            h = rng.standard_normal(config.teacher_d_model).astype(np.float32) * 0.1
+            adapted = (h @ A.T @ B.T).astype(np.float32)
+            target_norm = float(np.linalg.norm(teacher_direction)) * 10.0
+            loss_p += (float(np.linalg.norm(adapted)) - target_norm) ** 2
+        loss_p /= max(n_sample_layers, 1)
+        forge.W_proj -= perturbation  # restore
+
+        # Gradient estimate: (loss_p - loss) / perturbation
+        grad_est = perturbation * (loss_p - loss) / (0.01 ** 2 + 1e-8)
+        forge.W_proj -= lr * np.clip(grad_est, -0.1, 0.1).astype(np.float32)
+
+        # Also update W_coeff (coefficient layer) — same approach
+        pert_c = rng.standard_normal(forge.W_coeff.shape).astype(np.float32) * 0.01
+        forge.W_coeff += pert_c
+        adapters_c = [forge.forge(context, int(lid)) for lid in layer_ids]
+        loss_c = 0.0
+        for A, B in adapters_c:
+            h = rng.standard_normal(config.teacher_d_model).astype(np.float32) * 0.1
+            adapted = (h @ A.T @ B.T).astype(np.float32)
+            target_norm = float(np.linalg.norm(teacher_direction)) * 10.0
+            loss_c += (float(np.linalg.norm(adapted)) - target_norm) ** 2
+        loss_c /= max(n_sample_layers, 1)
+        forge.W_coeff -= pert_c
+        grad_c = pert_c * (loss_c - loss) / (0.01 ** 2 + 1e-8)
+        forge.W_coeff -= lr * np.clip(grad_c, -0.1, 0.1).astype(np.float32)
 
         # Track loss
         loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
