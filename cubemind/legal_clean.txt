@@ -1,0 +1,1777 @@
+4 Domains of Warfare
+
+Sarah McCosker
+
+From: The Oxford Guide to International Humanitarian Law
+Edited By: Ben Saul, Dapo Akande
+
+Content type: Book content
+
+Product: Oxford Scholarly Authorities on International Law [OSAIL]
+
+Published in print: 07 May 2020
+
+ISBN: 9780198855309
+
+Subject(s):
+
+Armed conflict  Military necessity  Proportionality  Warfare, air  Warfare, land  Warfare, sea
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+(p. 77) 4 Domains of Warfare
+
+1. Introduction
+
+Domains of warfare are generally understood as the operational environments in which 
+armed conflict occurs, and to which international humanitarian law (IHL) therefore applies. 
+Until recent decades, domains of armed conflict have been largely predicated on geospatial 
+conceptions, denoting the physical places where armed conflict has customarily occurred: 
+land, sea, and air. General IHL applies across all these areasincluding the fundamental 
+principles of humanity, military necessity, and proportionality; restrictions or prohibitions of 
+certain means and methods of warfare; and basic rules requiring humane treatment of 
+persons and respect for civilians and civilian property. Over time however, the particular 
+exigencies of land, sea, and air warfare have led to the development of some specific IHL 
+rules and principles tailored to each of those environments. Discussing domains of armed 
+conflict therefore offers a window into the historical development of IHL. It shows how the 
+emergence of new operational environments and new means and methods of armed conflict 
+catalyses efforts at legal regulation, which can lead to the development of new domains or 
+sub-sets of IHL. In this way, IHL has become more specialized over time, organized into 
+sub-fields of interpretation and application.
+
+This chapter first examines the land, air, and sea domains, and then considers how the idea 
+of a domain might apply to armed conflict in outer space, and armed conflict involving 
+cyber operations and other emerging capabilities. The aim is to give a general overview of 
+the development of IHL in relation to these different operational contexts, and to analyse 
+the concept itself of a domain of armed conflict and show how it shapes the way we think 
+about and apply IHL. The chapter argues that the concept remains useful when analysing 
+how IHL applies to armed conflict occurring in specific physical environments. However, it 
+is perhaps less useful in the contexts of armed conflict occurring in multiple domains 
+simultaneously, and armed conflict carried out through some new technologies and 
+capabilities. Such contexts show the limitations of the concept and suggest that the 
+increasingly complex nature of armed conflict may require the future development of more 
+sophisticated ways of thinking about armed conflict and IHL.
+
+(p. 78) 2. The Evolving Concept of Domain: From Physical 
+Battlefield to Figurative Field of IHL Application
+
+The traditional concept of a battlefield is the physical location of armed conflict. 
+Accordingly, IHL is underpinned by several fundamental geospatial concepts, essentially 
+prescribing what parties to armed conflict can and cannot do in certain places. Two such 
+concepts are the area of war and the area of operations. The area of war is the area 
+1 
+within which the military operations of the parties to an armed conflict may be carried out.1 
+This is an extensive area, comprising all the territories of the parties, the high seas 
+(including the airspace above and the sea floor), and exclusive economic zones.2 Certain 
+areas may be excluded from the area of war, for example neutralized zones (such as 
+Antarctica), demilitarized zones, or the territory of neutral states. Within the area of war 
+are the places where military operations actually take place at any given time, known as the 
+3
+theatre of war or the area of operations.3 Domains of armed conflict are traditionally 
+understood as the specific environments in which military operations may be conducted. 
+The three main physical domains are land, sea, and air, where particular means and 
+
+2
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+methods of armed conflict are conducted by states armies, navies, and air forces 
+respectively.
+
+As indicated earlier, much of IHL is not domain-specific and applies generally, including 
+most weapons-related treaties and treaties regarding cultural property. However, general 
+IHL is supplemented by some domain-specific IHL rules and principles. This regulatory 
+development began with armed conflict on land, was followed by sea and air, and now 
+debates are occurring about possible extension into other operational environments such as 
+outer space and cyberspace. The diversification of domains of IHL therefore reflects 
+technological developments, as humans have evolved different environments in which to 
+fight and new capabilities. This is not, of course, a clear linear progression; there are 
+ongoing efforts to refine various aspects of IHL regarding land, sea, and air warfare.
+
+In general, however, the history of IHL is one of increasing detail and specificity in legal 
+regulation, as warfighting capabilities have become more sophisticated and specialized. 
+Over time, domains of armed conflict have given rise to domains of IHL: the particular 
+bodies of law, practice, and interpretation that have developed to guide behaviour in certain 
+operational environments. Land, sea, and air warfare now represent bodies of specialized 
+IHL and professional communities of expertise and practice. The latter comprise both those 
+who engage directly in armed conflict, and those who advise on and/or interpret the 
+relevant rules and principlesprincipally state defence forces, government ministries, 
+relevant international organizations, the International Committee of the Red Cross, and 
+legal academics.
+
+While some might use the terms domains of armed conflict and domains of IHL 
+interchangeably, it is important to recognize that these are different concepts. As will be 
+discussed further in sections 68 of this chapter, not all domains of armed conflict 
+necessarily correlate to specific fields of IHL. That is, while all domains of armed conflict 
+may be understood as domains of IHL in the broad sense that general IHL applies to all 
+activities (p. 79) undertaken in the course of armed conflict, they are not all domains of IHL 
+in the more narrow sense of being the subject of sub-sets of specialized IHL rules and 
+principles.
+
+Within military forces, the domain is a fundamental concept for organizing particular 
+expertise, resources, and operations. For international lawyers, the domain similarly 
+serves as an organizational concept, which helps to structure our thinking about the 
+application of IHL to a given context. That is, a basic first step in analysing the application 
+of IHL is to ask where the armed conflict is occurring, which helps us to identify the 
+applicable specialized sources of law and commentary. The way many lawyers structure 
+their legal analysis therefore reflects traditional spatial conceptualizations of the battlefield.
+
+In recent decades, the idea of discrete geographic domains has been challenged by two 
+interrelated features of contemporary warfare. The first feature is that armed conflict 
+increasingly involves integrated operations carried out simultaneously across multiple 
+domains. The second feature is the increasing technological sophistication of armed 
+conflict, with new capabilities changing the ways and spaces in which armed conflict is 
+being fought. In turn, this is opening up new spaces for consideration by lawyers about how 
+to apply and interpret IHL. This is demonstrated by the recognition by some states of outer 
+space, cyberspace, and the electromagnetic spectrum as domains of armed conflict, and 
+debates about whether other emerging capabilities may lead to the future recognition of 
+additional domains. With some of these technologies, it is not possible to pinpoint a specific 
+place where armed conflict occurs. In these contexts, understanding domains is less about 
+the physical theatre or locus where parties fight, than about how they fight and using what 
+means and methods. In this way the concept of a domain as an environment is evolving into 
+a broader concept, encompassing methods and means of warfare. For example, the 
+Australian Army has recently defined domains as the physical or conceptual areas in which 
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+human activity and interaction occurs, including the four environmental domains of 
+maritime (including subsurface), land, air and space, and the three non-environmental 
+4
+domains of cyberspace, the electromagnetic spectrum, and information.4
+
+The next sections will examine briefly the three main physical domains of armed conflict: 
+land, sea, and air. Each section will flag key IHL treaties and other relevant instruments. It 
+should be noted that both international and non-international armed conflict may occur in 
+all of the domains discussed in the chapter. The classification of conflicts will not be 
+discussed here, other than to note that most domain-specific IHL has developed initially in 
+the context of international armed conflict.
+
+3. Land
+
+6
+
+Land is the oldest domain of warfare, where humans first began fighting each other. As 
+most contemporary armed conflicts are conducted at least partially on land, questions 
+5
+about land warfare remain as topical as ever.5 Treaty law regarding the means and methods 
+of land warfare stretches back well over a century. Early instruments include the Lieber 
+Code (p. 80) 18636 and the Hague Convention (II) with Respect to the Law and Customs of 
+War on Land 1899, and its annexed Regulations,7 which are considered declaratory of 
+customary rules regarding armed conflict in general.8 This Convention was replaced and 
+amended as Hague Convention IV at the 1907 Hague Conference.9 Other important treaties 
+regarding armed conflict on land are the Hague Convention III (Opening of Hostilities) 
+1907;10 Hague Convention V (Respecting the Rights and Duties of Neutral Powers and 
+Persons in Case of War on Land) 1907;11 Hague Convention IX (Respecting Bombardment 
+by Naval Forces in Time of War) 1907;12 and the First, Third, and Fourth Geneva 
+Conventions 1949,13 as well as Additional Protocols I and II of 1977.14 IHL regarding land 
+warfare has largely been applied and adapted to other domains, including maritime and air 
+15
+warfare.15
+
+12
+
+11
+
+14
+
+10
+
+13
+
+7
+
+8
+
+9
+
+4. Sea
+
+16
+
+The maritime domain is a three-dimensional space, as military operations may be conducted 
+on, under, or over the sea.16 More specifically, hostile actions by naval forces may be 
+conducted in, on, or over the land territory of the parties to armed conflict; their internal 
+and archipelagic waters; territorial seas; neutral contiguous zones; fishery zones; 
+continental shelf areas and exclusive economic zones; the high seas; and the airspace above 
+those areas. The general principles of IHL are applicable in naval warfare as they are in 
+land and air warfare. However, a significant body of treaty law and other instruments has 
+developed to cater for the specificities of armed conflict in the maritime context, in 
+particular the fact that the emphasis is on ships taking part in hostilities rather than 
+individuals,17 and also the involvement of neutral interests to a much greater extent than 
+with land operations.18 (p. 81) Certain means and methods of armed conflict are unique to 
+the maritime domain, such as blockade, visit and search, and naval mine warfare.19 In 
+maritime warfare only warships may take part in hostilities and exercise belligerent 
+20
+measures, not merchant vessels.20
+
+19
+
+17
+
+18
+
+How IHL applies often depends on the particular maritime area in which the relevant 
+activity occurs. For example, armed conflict in a belligerents sovereign waters (internal 
+waters and territorial sea) is largely analogous to fighting on a belligerents land territory, 
+and includes fighting in the adversarys national airspace.21 This contrasts to armed conflict 
+occurring in the maritime zones beyond states territorial seas, and the airspace above 
+themcommonly referred to respectively as international waters and international 
+airspace.
+
+21
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+26
+
+22
+
+25
+
+23
+
+Although naval battles have been fought for several thousand years, legal regulation 
+occurred later than for armed conflict on land. Following some early instruments adopted in 
+the late nineteenth century,22 most of the international instruments governing naval armed 
+conflict were developed in 1907 through eight Hague Conventions (Hague Conventions VI 
+XII).23 They concern the conduct of hostilities (the laying of underwater mines, 
+24 
+bombardment by naval forces, and protection of the sick, wounded, and shipwrecked);24 
+and the protection of certain ships (the status of merchant ships and their conversion into 
+27 
+warships,25 the right of capture,26 and the rights and duties of neutral powers).27 
+Technological progress led to further codification efforts, including the Declaration of 
+London concerning the Laws of Naval War 1909;28 the 1913 Oxford Manual of the Laws of 
+Naval War;29 agreements in 1922 regarding the use of submarines and noxious gases;30 and 
+further instruments (p. 82) in the 1930s on the limitation and reduction of naval 
+armaments, and on submarines.31 The Second World War saw numerous torpedo attacks on 
+neutral vessels, merchant ships, and hospital ships, as well as indiscriminate laying of 
+underwater mines. This led to the development in 1945 of the Geneva Convention II, 
+providing a regime for the protection of the wounded, sick, and shipwrecked in armed 
+conflict at sea.32 However, since 1945 there have been no new treaties specifically 
+concerning naval warfare, with attempts to promote further codification being generally 
+unsuccessful.33 This means that interpreting and updating the law has been entrusted to 
+34
+state practice, which is reflected largely in states naval manuals.34
+
+28
+
+31
+
+32
+
+33
+
+30
+
+29
+
+The main contemporary reference document for the law of naval warfare is the San Remo 
+Manual on International Applicable Armed Conflicts at Sea.35 Developed between 1987 and 
+1994 by a Committee of Experts under the auspices of the International Institute of 
+Humanitarian Law and the International Committee of the Red Cross (ICRC), it restated 
+and significantly clarified the rules applicable to naval warfare, taking into account 
+developments over the previous century. Although non-binding, it is often used as the basis 
+of national military manuals.36 While some consider it expressive of customary law,37 others 
+38
+argue that not all its details necessarily reflect custom.38
+
+35
+
+37
+
+36
+
+40
+
+In comparison with armed conflicts on land, armed conflicts at sea (or in other waters) have 
+39
+been uncommon over the past decades.39 While the basic principles of the Hague 
+Conventions and other early treaties are still generally recognized as customary in 
+character,40 the age of the instruments understandably means that aspects are significantly 
+outdated, and need to be adapted to contemporary naval warfare,41 as well as to take into 
+account the major changes in the law of the sea.42 An ongoing challenge is therefore how to 
+interpret existing law to apply to the modern realities of the maritime domain. Particular 
+topical issues include how to apply existing law to non-international maritime conflict; the 
+blurring of paradigms from constabulary operations into armed conflict; and how to 
+43
+characterize unmanned and autonomous surface and sub-surface combat vehicles.43
+
+41
+
+42
+
+(p. 83) 5. Air
+
+46
+
+44
+
+Airpower plays a critical role in twenty-first-century armed conflict, and yet it remains the 
+operational domain least regulated by IHL treaty law.44 To date, unlike for land and 
+maritime warfare, states have not adopted any treaty exclusively devoted to air warfare 
+understood as hostilities conducted during armed conflict by or against aircraft.45 The 
+limited existing treaty law concerning air and missile warfare mainly deals with medical 
+aircraft.46 However, much of the vacuum has been filled by customary international law, 
+combined with some provisions in general IHL treaties that constrain air operations and 
+non-binding instruments.47 IHL applicable to air and missile warfare draws on both the land 
+and naval domains, either directly or indirectly, for relevant legal rules and principles.48 Air 
+attacks against targets on land are governed by the rules of war on land. When aircraft fly 
+49 
+over open sea or engage in combat with naval forces, the law of naval warfare applies.49 
+Though the San Remo Manual does not deal with aviation, it looks at aerial activity in 
+
+45
+
+47
+
+48
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+conjunction with naval operationsfor example, it contains special rules on the 
+50
+interception, visit, and search of civil aircraft.50
+
+52
+
+51
+
+Airspace is divided into national airspace and international airspace (airspace over the 
+exclusive economic zones of other states, and the high seas). Under customary international 
+law each state has exclusive sovereignty over the airspace above its land and territorial 
+sea.51 The vertical extent of airspace, and the beginning of outer space, is unsettled in 
+53 
+international law.52 It has been argued that anything in orbit or beyond is in outer space,53 
+which reflects the view that airspace means the air up to the highest altitude at which an 
+aircraft can fly and below the lowest possible perigee of an earth satellite in orbit.54 In 
+international armed conflict air operations may be conducted over the territory of 
+belligerent states, and also in international air space.55 There is no settled definition of the 
+term aircraft in international law,56 though one suggested definition is craft deriving their 
+support in the atmosphere from the reactions of the air, with military aircraft understood 
+as all aircraft (whether manned or unmanned, armed or unarmed) that are operated by the 
+armed forces or a state and bear its military markings.57 Only military aircraft are entitled 
+58
+to engage in hostilities, unlike other state aircraft or civilian aircraft.58
+
+55
+
+54
+
+57
+
+56
+
+59
+
+61
+
+60
+
+(p. 84) Following the beginnings of air warfare through use of balloons in the late 
+eighteenth century,59 the first attempt to develop principles concerning air warfare was at 
+the 1899 Hague Peace Conference, where declarations were adopted banning the launching 
+of projectiles and explosives by balloons or by similar methods, and the use of certain kinds 
+of projectiles.60 The Balloons Declaration was replaced in 1907 by a further Declaration to 
+the same effect,61 although few states ratified either Declaration. At the time of the 1899 
+and 1907 Hague Conferences air technology was insufficiently advanced to allow precise 
+targeting of military objectives, but by the First World War air operations played a critical 
+role, with aircraft widely used for observation, bombing, and dog fighting.62 It became 
+apparent that some rules were necessary to regulate conflict in this theatre of activity, 
+which led to the 1923 development of the Hague Rules of Air Warfare.63 Although not in 
+treaty form, much of the Hague Rules are understood as reflecting customary law.64 Two 
+particularly important provisionsearly versions of the principle of distinction (between 
+military aircraft and other aircraft) and IHLs first definition of military objectivesbecame 
+65
+custom and were later codified in API in 1977.65
+
+63
+
+62
+
+64
+
+The Second World War involved extensive bombing offensives which resulted in the 
+destruction of many civilian areas, and during this period there was no written law binding 
+specifically governing air warfare.66 While much of the law of air warfare has developed 
+through analogies drawn from the laws of armed conflict on land and at sea, since the 
+Second World War it has become quite clear  that such analogies are often inadequate, 
+inasmuch as conditions of air warfare differ radically from those prevailing on land and at 
+sea, such as [t]he high speed, the vast space, and the state-of-the-art sophistication of air 
+67
+warfare.67
+
+66
+
+68
+
+However, overall there seems to have been a reluctance to address the broad issues of air 
+warfare through treaty law, with only a few specific aspects selected for regulation through 
+binding rules.68 The four Geneva Conventions of 1949 mention aircraft primarily regarding 
+their medical functions rather than their use in the conduct of hostilities,69 and certain 
+other instruments not specific to armed conflict also contain rules restricting air 
+operations.70 API contains several provisions regarding medical aircraft,71 and rules 
+concerning (p. 85) air-to-ground attacks, but does not address air-to-sea, sea-to-air, ground- 
+to-air, or air-to-air combat except as they have incidental effects on civilians or civilian 
+objects on the ground.72 Despite this incompleteness, APIs general norms regarding issues 
+like proportionality and precautions in attack are regarded by most states as reflective of 
+custom applicable in all air operations.73 API is therefore understood as prohibiting attacks 
+
+73
+
+69
+
+71
+
+70
+
+72
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+on the civilian population and civilian property, regardless of whether the attack is on land, 
+74
+from the air or from the sea.74
+
+In an effort to restate and update the law applicable to air warfare, between 2002 and 2010 
+a group of military and humanitarian experts developed the Harvard Manual on 
+International Law Applicable to Air and Missile Warfare,75 which now represents the most 
+authoritative and comprehensive treatment of air warfare to date. Although non-binding, it 
+is regarded by many as reflecting customary rules, and as a subsidiary means to determine 
+international law applicable to air and missile warfare.76 Its 175 Rules and detailed 
+accompanying commentary focus on where air operations may be conducted; who and what 
+77 
+may be attacked; how air operations must be conducted; and what weapons may be used.77 
+It has been noted, however, that in many cases the Manual only includes the least common 
+denominator, in particular in the crucial area of protection of the civilian population on land 
+78
+against air attacks.78
+
+75
+
+76
+
+80
+
+Topical issues in recent years include how to apply IHL in relation to unmanned aerial 
+vehicles (UAVs) or remotely piloted aerial systems (RPAS).79 While UAV/RPAS are 
+governed by the fundamental rules of IHL just as non-remotely piloted aircraft or any other 
+weapon system,80 some interpretative challenges remain, such as how UAVs should be 
+marked; how to apply the concept of command to the operation of a UAV, and how the 
+81 
+concept of crew applies to those who are remotely operating or programming a UAV.81 
+Several aspects of the existing law of air warfare need further updating. Given that air 
+capabilities are continuing to evolve rapidly and to be relied on heavily by states, it has 
+been argued that [t]here is a constant and obvious need to adapt the law of armed conflict 
+82
+to the changing and challenging contingencies of air warfare.82
+
+79
+
+(p. 86) 6. Outer Space
+
+83
+
+86
+
+84
+
+Outer space83 is another physical environment in which armed conflict may potentially 
+occur, and is considered by some as a fourth domain of armed conflict.84 There is 
+85 
+significant interest in developing more detailed guidance on the application of IHL to it.85 
+Although long recognized that IHL applies to military operations in outer space, there is 
+little state practice, both because of the legal requirement to use space only for peaceful 
+purposes, and because not all states are capable of conducting military operations in 
+space.86 It was not until the 1960s that armed conflict in space began to be possible, 
+following space research and missions in the 1950s, and the US and Soviet launch of 
+satellites and manned space missions during the Cold War.87 In 1959 the UN Committee on 
+the Peaceful Uses of Outer Space was established88 and was instrumental in the creation of 
+90 
+five space-related treaties89 and five non-binding instruments and sets of principles.90 
+However, these treaties have few states parties and provide little detailed guidance for 
+modern military uses of space. Inter alia, they provide that the moon and other bodies in 
+outer space must only be used for peaceful purposes,91 and prohibit the establishment of 
+military bases, installations and fortifications, testing of weapons, and conduct of military 
+manoeuvres.92 Thus far, much of the military use of outer space has been considered in the 
+93
+context of disarmament and arms control issues rather than IHL.93
+
+87
+
+88
+
+91
+
+89
+
+92
+
+Over the ensuing decades, space capabilities have increased significantly, such that now 
+many states rely heavily on space and satellites for communications; transportation; global 
+positioning systems; reconnaissance; surveillance; and early warning and navigation (p. 87) 
+systems94all capabilities with potential dual uses for civilian and military purposes. As a 
+consequence, the possibility of armed conflict extending to outer space is considered by 
+some to be growing,95 with space now being described as a critical security and conflict 
+domain.96 It can be understood both as a supporting domain of armed conflict, in that 
+
+94
+
+96
+
+95
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+space capabilities play an important role in supporting military operations in land, sea, and 
+air warfare,97 and also as a potential domain itself.
+
+97
+
+98
+
+With these growing space capabilities is an increasing interest in legal regulation.98 There 
+is currently no intergovernmental instrument specifically examining the application of IHL 
+to armed conflict in outer space. However, two independent expert-led projects are 
+underway to develop manuals to clarify existing international laws applicable to military 
+space operations, including IHL. One initiative, which began in 2016, is being led by the 
+McGill University Centre for Research in Air and Space Law and aims to develop a Manual 
+on International Law Applicable to Military Activities in Outer Space.99 Another, launched 
+in 2018, aims to develop the Woomera Manual on the International Law of Military Space 
+Operations.100 Both projects comprise experts from academia, the private sector, 
+government, and military service, contributing in their personal capacities. These processes 
+seek to avoid some of the challenges associated with space-related discussions in 
+intergovernmental fora. For example, a lack of consensus has prevented progress on 
+international law issues through the UN Committee on the Peaceful Uses of Outer Space 
+101
+and the UN Conference on Disarmament.101 Current UN-facilitated intergovernmental 
+initiatives therefore focus more on broader issues, for example the UN General Assembly 
+Group of Government Experts on the Prevention of an Arms Race in Outer Space, and the 
+UN Group of Governmental Experts on Transparency and Confidence-Building Measures in 
+102
+Outer Space Activities.102
+
+100
+
+99
+
+7. New and Emerging Technologies
+
+As discussed earlier, the development of new technologies has been a force driving the 
+recognition of new domains of armed conflict. Technological innovation led to expansion of 
+armed conflict from land into the naval and air environments, spurring efforts at legal (p. 
+88) regulation that led eventually to the development of new domains of IHL. Throughout 
+history there is a clear tendency initially for the law to follow the technology, with new 
+platforms as well as weapons prompting attempts to regulate.103 Technological change is 
+therefore not a new challenge for IHL; however, the speed of change is now much faster, 
+which exacerbates the problem of law lagging behind technology.104 Below is a discussion 
+of three areas of new technologies and capabilities that some states and commentators 
+have identified as constituting new or future domains of armed conflict: activities conducted 
+through cyber space; the electromagnetic spectrum; and computerhuman body interfaces.
+
+104
+
+103
+
+A. Information Technology/Cyberspace
+
+106
+
+105
+
+For many states, critical areas of defence capability have become increasingly reliant on 
+information technology and cyber operationssuch as command-and-control, navigations, 
+communications, intelligence, surveillance and reconnaissance, and weapons 
+employment.105 Cyberspace has therefore been described by some as the fifth domain or 
+dimension of armed conflict.106 For example, the US Department of Defence recognized 
+cyberspace as an operational domain in 2011.107 It has been described as a global domain 
+within the information environment which is dependent on the physical domains of air, 
+land, maritime, and space.108 The US regards it both as a critical enabler for other 
+warfighting domains and a new domain itself.109 Other countries are following suit by 
+acquiring cyber capabilities and developing their force structures to leverage these 
+capabilities.110 In 2016 NATO Allied Ministers formally recognized cyberspace as an 
+operational domain along with land, air, and sea operations, noting that [m]ost crises and 
+conflicts today have a cyber dimension.111 By 2015 more than 100 states had reportedly 
+established dedicated cyber-warfare units within their armed forces or intelligence 
+112
+agencies.112
+
+110
+
+108
+
+111
+
+109
+
+107
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+Most states and commentators would appear to recognize cyber capabilities as new means 
+of supporting the conduct of armed conflict through kinetic operations. In this sense cyber 
+capabilities can be understood as representing a domain of armed conflict, although their 
+non-geospatially bounded nature makes use of a term like domain figurative rather (p. 89) 
+than actual. Despite the common use of the term cyber-space, cyber operations cannot 
+easily be conceptualized spatially.113 Cyber capabilities denote a complex range of 
+technologies, together understood loosely as a medium or dimension through which certain 
+kinds of activities may be conducted, with real-world effects in the domains of land, sea, air, 
+and space.114 IHL is applied by states to cyber operations that occur in the context of 
+armed conflict or which have effect comparable to armed conflict.115 The ICRC has 
+described cyber warfare as encompassing operations against a computer or a computer 
+system through a data stream, when used as means and methods of warfare in the context 
+116
+of an armed conflict, as defined under IHL.116
+
+115
+
+114
+
+113
+
+As an emergent capability in armed conflict it poses several challenges for our existing 
+constructsincluding debate about whether actions such as cyber-attacks fall within the 
+definition of armed conflict, or a military attack; and whether data is an object whose 
+targeting is regulated by IHL.117 Some commentators have therefore argued that it is an 
+error to think of cyberspace as a warfighting domain analogous to the traditional domains, 
+and have critiqued the narrative that seems to suggest that cyberspace has become the 
+118
+new high ground of warfare, the one domain to rule them all and in the ether bind them.118
+
+117
+
+119
+
+While it is clear that the fundamental rules and principles of IHL apply to computer network 
+attacks conducted in the course of armed conflict, as with other means and methods of 
+warfare,119 the issue is specifically how they should apply and be interpreted. This has been 
+the topic of considerable debate since the late 1990s120together with the question of 
+whether cyber operations should be considered a new and distinct domain of IHL. This is a 
+context in which commentary and analysis of academics and non-state experts is far ahead 
+of the law, as well as state practice. There is currently no treaty law explicitly addressing 
+the use of military computer network operations in armed conflict. The most in-depth 
+attempt so far to clarify the international legal framework was the 2013 Tallinn Manual on 
+the International Law Applicable to Cyber Warfare,121 a statement of rules by an 
+international group of experts facilitated and led by the NATO Cooperative Cyber Defence 
+Center of Excellence. This was followed in 2017 by Tallinn Manual 2.0, an updated and 
+122
+expanded edition.122
+
+121
+
+120
+
+(p. 90) In intergovernmental fora such as the UN Group of Governmental Experts on cyber 
+security, discussion of the applicability of IHL to cyberspace operations has proved very 
+sensitive and difficult. Between 2004 and 2017 it made modest progress in discussing 
+norms, rules, and principles for responsible state behaviour in cyberspace, but it concluded 
+its deliberations in the final session without arriving at a consensus outcome report.123 It is 
+widely considered to have failed in its objective, due to fundamental disagreements among 
+124
+members, including on the applicability of IHL.124
+
+123
+
+State practice on this issue is either contradictory or classified, and thus undetectable. 
+Although there are some emerging sprouts of opinio juris to be found in some states 
+national cyber-security strategies and other sources, overall states have been reluctant to 
+express opinio juris in this rapidly evolving area.125 The ICRC has acknowledged this is a 
+difficult area, observing that [c]yber warfare adds a new level of complexity to armed 
+conflict that may pose novel questions for IHL.126 While many states appear to consider 
+cyber operations as constituting a potential domain of armed conflict, it remains debatable 
+whether it can be considered a distinct sub-field of IHL.
+
+126
+
+125
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+B. Electromagnetic Spectrum
+
+128
+
+The electromagnetic spectrum (EMS) appears to be considered by several states as a 
+separate domain of armed conflict. The EMS encompasses infrared, radar, TV, and radio 
+waves. There is increasing discussion about the possible uses of EMS in armed conflict, 
+such as sensor technology, electronic jammers, and radars.127 For example, military radar 
+and military communications networks require increasing access to the radio frequency 
+spectrum.128 The phrase electronic warfare is being used by several states to denote 
+manipulation of the electromagnetic spectrum for military advantage.129 It is closely 
+related to the concept of cyber warfare (both being forms of electronic communication), 
+but their relationship is the subject of debate.130 Australia has recognized the EMS as one 
+131 
+of three (p. 91) non-environmental domains, alongside cyberspace and information.131 
+In 2016, the US Defense Advanced Research Projects Agency (DARPA) has described the 
+EMS as the sixth domain of modern warfare,132 explaining that:
+
+127
+
+132
+
+130
+
+129
+
+The effectiveness of combat operations in the land, sea, air, space, and cyber 
+domains depends on our ability to control and exploit the spectrum, because it is 
+critical to our capabilities in navigation. While the spectrum is at the heart of 
+current and future warfare, it remains highly contested and congested, and future 
+133
+info-centric warfare will require more access than ever before.133
+
+134
+
+In 2018 a US Navy policy appeared to recognize the EMS as a warfighting domain on par 
+with sea, land, air, space and cyber,134 while in 2019 a US Defense Primer on Electronic 
+Warfare characterized it somewhat differently, noting that [a]s electronic warfare affects 
+all military domainsland, air, sea, space, and cyberspaceeach of the military services 
+135
+has its own EW capabilities and programs.135 Like the use of cyber technologies, the EMS 
+is not a discrete geographic area and it potentially traverses several existing physical 
+domains. A question for future consideration may be whether to regard the EMS solely as a 
+means or method of armed conflict, or as a domain of armed conflict. It remains to be seen 
+whether over time specific IHL rules and principles might be developed in this area.
+
+C. The Human Mind?
+
+136
+
+Another emerging area of capability to mention briefly concerns the human mind, and 
+braincomputer interface (BCI) technologies, which connect the brain to certain kinds of 
+devices. This has led some commentators to forecast the human mind as being the next 
+domain of warfare.136 This body of debate discusses matters such as the potential for 
+brain-controlled drones, metal exoskeletons, and other BCIs aimed at enhancing the power, 
+efficiency, and lethality of soldiers.137 It has been observed that military research arms like 
+the (p. 92) US DARPA are investing in understanding complex neural processes and 
+enhanced threat detection through BCI and that it seems the marriage between 
+neuroscience and military systems will fundamentally alter the future of conflict.138 Again, 
+the interrelationships with existing domains has been emphasized:
+
+137
+
+138
+
+Like every other domain of warfare, the mind as the sixth domain is neither isolated 
+nor removed from other domains; coordinated attacks across all domains will 
+continue to be the norm. Its just that military and defense thinkers now need to 
+account for the subtleties of the human mind  and our increasing reliance upon 
+139
+the braincomputer interface.139
+
+Debates about BCIs and IHL are at any early stage, but this brief example illustrates how 
+commentators describe emerging capabilities through the language of domains of warfare.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+D. New Domains or Just New Means/Methods of Armed Conflict?
+
+In addition to the above examples, there are a whole host of other technologies in armed 
+conflict that are the subject of current debate about how IHL should be applied to them, 
+including artificial intelligence and autonomous weapons. Should these kinds of 
+developments be approached as emerging domains of armed conflict or instead thought of 
+as capabilities and/or weapons?
+
+This depends on how broadly one understands the concept of domains of armed conflict. If 
+one interprets it broadly, as new operating environments and capabilities through which 
+armed conflict is conducted, then these new technologies might be regarding as emerging 
+domains of armed conflict. However, whether the extension of armed conflict into new 
+domains has led already to new domains of IHL, or will do so in the future, is a separate 
+question. The application of IHL to new technologies in armed conflict is the subject of 
+significant debate140 and is recognized by the ICRC as one of the key contemporary 
+challenges for IHL.141 The ICRC is engaged in clarifying the significance of basic IHL 
+concepts, and suggests that although the fundamental rules of IHL apply to new 
+technologies used in armed conflict, [m]ore tailor-made rules to protect civilians from 
+142
+conflicts future frontlines may be needed.142
+
+141
+
+140
+
+Many would argue that land, sea, and air are currently the only three recognized domains 
+of IHL (in the sense of an established sub-set of specialized rules, principles, practice, and 
+analytical commentary) and that, as yet, there are no new sub-sets of IHL applicable to 
+newer technologies. Others would contend that these new capabilities are giving rise to (p. 
+93) new domains of IHL. They might support this by arguing either that they are new 
+domains of IHLin the broad sense of being capabilities subject to general IHLand/or 
+that they already constitute particular sub-sets of IHL due to the growing body of non- 
+binding guidance instruments that interpret and apply existing IHL by analogy.
+
+The former argument is not contentious; all military activities undertaken by a party in the 
+course of armed conflict are subject to IHL. Although there may be no specific, tailored 
+treaty obligations regarding the conduct of armed conflict through a new technology, the 
+fundamental principles of IHL apply to all military operations, regardless of the specific 
+medium employed. This is reflected in the Martens Clause143 and the weapons review 
+process of Article 36 of API, requiring states to conduct legal reviews of a new weapon, 
+means, or method of warfare, to determine whether its employment would be prohibited 
+under international law.144 As the International Court of Justice has affirmed, IHL applies 
+to all forms of warfare and to all kinds of weapons, those of the past, those of the present 
+and those of the future.145 One just has to apply IHL by analogy to adapt it to new contexts 
+146
+and situations.146
+
+143
+
+145
+
+144
+
+The second argument is more contentious, as it raises deeper questions about what 
+constitutes the development of IHLspecifically, whether IHL can be said to be developed 
+through non-legal instruments, and through processes of interpretation and application, 
+rather than only through binding treaty law or customary law. That is, is development 
+through non-binding instruments and commentary sufficient to give rise to a new sub-field 
+of IHL? Some might argue this to be the case, particularly in the current multilateral 
+environment, where state-led development of IHL through binding law is proving so 
+difficult, and where there is an increase in interpretative activity by non-state bodies or 
+groups of experts.147 Many others, from a more positivist perspective, would argue that 
+such instruments and activities do not give rise to binding legal obligations on states, and 
+are therefore not new IHLwhile recognizing of course, that over time some sources may 
+148
+come to be regarded as subsidiary sources for interpreting international law.148
+
+147
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+This kind of debate shows that the concept of an IHL domain is being used by 
+commentators in different ways. Some use it to denote a physical environment where armed 
+conflict occurs; others use it more broadly to mean a new field of operational activity to 
+which IHL needs to be applied; while yet others use it to refer to a developed sub-set of 
+specialized IHL rules, principles, interpretation, and practice. There is therefore some 
+conflation between the concepts of operational environments and new methods and means 
+of armed conflict, and also between the concepts of domains of armed conflict and 
+domains of IHL.
+
+(p. 94) 8. Armed Conflict Traversing Multiple Domains
+
+149
+
+With the trend towards increasing detail and specificity of legal regulation, it is important 
+that each domain (or potential future domain) of IHL is not considered in isolation as a self- 
+contained sub-set, but that they are understood and applied together in a comprehensive, 
+integrated manner.149 In practice, armed conflict is often conducted across several different 
+operational environments simultaneously. This can occur in different ways. For example, as 
+noted earlier in section 7 New and Emerging Technologies, military operations on land, at 
+sea, or in the air often use cyber and/or space-based interconnected technologies, which 
+can sometimes make it difficult to isolate precisely where a particular action is occurring. 
+Also, an action may start in one domain and move into, or produce effects in, one or more 
+other domains.
+
+The complexities here are demonstrated by the significant debate about the application of 
+IHL to technologies that produce a remote effect, for example the use of unmanned aerial 
+or underwater vehicles to track and analyse potential targets or to provide platforms for 
+weapons that are activated remotely.150 Such capabilities challenge the concept of the 
+domain of armed conflict as a discrete physical space, and affect how we understand the 
+area of operationsbecause the effect may occur in the area of operations while the 
+operator and targeting decisions may be far outside that area.151 An additional layer of 
+complexity arises due to the fact that military operations are often of a joint nature, 
+152
+undertaken in coalitions with other states152 who may have different IHL obligations or 
+interpret their obligations differently.
+
+150
+
+151
+
+154
+
+153
+
+For all these reasons the concept of a battlefield as a discrete, identifiable physical space is 
+now changing,153 with the importance of integrated approaches to armed conflict evidenced 
+in growing discussions of multi-domain battle154 (MDB) or multi-domain operations.155 In 
+essence, the concept concerns the need for a party to armed conflict to synchronize and 
+coordinate its actions across multiple domains, involving both kinetic and non-kinetic 
+operations. It has been explained as having emerged from a re-examination of  previous 
+military concepts and doctrine caused by the rapid growth of capabilities tied to the newly 
+minted space and cyber domains.156 It has been argued that the concept is being 
+developed (p. 95) to address the interconnected, Omni domain battlespace of the 21st 
+Century,157 and that it promises more fluid, adaptive, and effective operations 
+158
+simultaneously across five domains (land, sea, air, space, and cyber).158
+
+155
+
+156
+
+157
+
+One illustration is the 2019 US Air Force launch of a next-generation airborne surveillance 
+and command and control technology intended to successfully synchronize air, ground, 
+drone and satellite assets onto a single seamless network.159 Known as Advanced Battle 
+Management and Surveillance, it is planned to reach full maturity in the 2040s and is 
+160 
+described by Air Force officials as more of a system than a platform-specific application,160 
+intending to change the way we execute battlefield management command and control in 
+the multi-domain environment.161 More broadly, the US has argued inter alia, that:
+
+161
+
+159
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+Multi-domain battle is a concept designed to overcome our adversarys integrated 
+defensive capabilities, avoid domain isolation and fracturing, and preserve freedom 
+of action  The rate and speed of current and future world events will not allow us 
+the time to synchronize federated solutions. In order to present the enemy with 
+multiple dilemmas, we must converge and integrate multi-domain solutions and 
+approaches before the battle starts  we must maintain a common operating 
+162
+picture.162
+
+163
+
+The MDB concept is the subject of ongoing debate. While it has received some critiques for 
+not being new,163 others question more fundamentally the heavy military reliance on the 
+concept of domains, arguing for example that the word domain itself contains some built- 
+in assumptions regarding how we view warfare that can limit our thinking.164 That is, it 
+undermines the ability to think holistically, which could actually pose an intractable 
+conceptual threat to an integrated joint force.165 It appears therefore that the concept 
+needs further testing before its practical utility can be established.166 For example, how 
+might MDB approaches affect the future drafting of rules of engagement, the delivery of 
+IHL advice, and legal decision-making processes? And more generally, what might be the 
+impact of MDB approaches on the way international lawyers approach IHL?
+
+166
+
+164
+
+165
+
+(p. 96) A. Moving beyond Specific Domains: Challenges for Legal 
+Analysis
+
+The above points about multi-domain armed conflict and the complex relationships between 
+different domains present challenges for international law interpretation and application, 
+and for the organization and delivery of IHL advice within governments. How may states 
+cultivate deep expertise across all the growing sub-fields of IHL, but also ensure that 
+lawyers develop a common operating picture of how all the sub-fields work together? How 
+is potential domain isolation in IHL to be avoided, and how can we ensure that experts in 
+IHL regarding land, sea, and naval warfare, as well as in space and new technologies, are 
+acting in coordination? If the fast pace of armed conflict requires quick decisions that do 
+not always allow time to synchronize federated solutions, it is important to ensure that IHL 
+expertise is made an integral part of the planning, risk assessment, and decision-making 
+involved for MDB approaches. In practice, this underscores the importance of lawyers, with 
+IHL expertise being embedded in joint operations commands; and/or of IHL lawyers 
+advising decision-makers across different parts of a defence force, different military 
+services, and different parts of government to operate in close coordination and ensure 
+their advice is consistent.
+
+MDB appears for now to be more of a planning concept than a concept providing guidance 
+on how to adopt an integrated, holistic approach to IHL application and interpretation. 
+Does existing IHL, together with general international law, already provide an adequate 
+body of rules and principles for evaluating and advising on armed conflict occurring in 
+multiple domains? The reality of contemporary warfare is of operations frequently 
+conducted simultaneously in multiple domains; therefore, applying IHL already requires 
+lawyers to be conversant in multiple sets of rules and principles and to understand how 
+they interact. Applying IHL always relies on the lawyers interpretive and legal reasoning 
+toolsand these are all that are available in the absence of binding law applicable 
+specifically to new environments or means or methods of armed conflict. An emerging 
+question though may be whether the existing legal reasoning tools continue to be fit for 
+purpose for navigating these challenges in IHL.
+
+The division of IHL into specialized sub-sets reflects the broader trend of fragmentation in 
+international law, with the growing number of fields of particular expertise and practice, 
+and the need for interpretative approaches that help navigate the relationships between 
+them.167 The issue of norm and regime interaction is therefore not new in international 
+law168 and certainly not new to IHLas illustrated by the ongoing, extensive debates about 
+
+168
+
+167
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+the relationships between IHL and other bodies of international law that also apply in 
+169
+armed conflict (including international human rights law and international criminal law).169
+
+(p. 97) General international law already provides several legal tools for managing 
+challenges of coordination and interpretation (including the lex specialis principle, among 
+others). Although one might argue that there are no gaps in IHL application because of the 
+lawyers tools of applying existing law by analogy, it could also be argued that the existing 
+organization of sources of IHL according to specific domains of armed conflict is not 
+sufficiently sophisticated to cater for the increasing complexity of contemporary warfare. 
+Looking to specific domains of armed conflict and domains of IHL may certainly be useful as 
+a first step for an international lawyer to help identify which rules and principles may be 
+most appropriate to apply to a particular situation. However, answering the basic question, 
+Is a particular action or set of actions permissible or not permissible within existing IHL? 
+might not always be answerable simply by recourse to existing domain-specific sources of 
+law or non-binding instruments. Instead, it may potentially require more sophisticated 
+analysis and reasoning. A siloed, source-focused approach may need to be supplemented in 
+the future by more holistic, integrated approaches, perhaps drawing more on systems 
+analysis.
+
+These issues of regime interaction and regulatory fragmentation are faced by multiple areas 
+of law. Several other areas of international law may be further ahead than IHL in 
+developing deeper reflections on these issues, for example in international environmental 
+law, resource management, and climate change, which call for more holistic, integrated 
+approaches to avoid legal silos, and which are sometimes underpinned by systems 
+theory.170 One illustration is the ecosystem approach, seen as a new paradigm for 
+integrated environmental and biodiversity management.171 As our conceptualization of the 
+battlefield changes, our legal analytical processes may also need to evolveperhaps 
+drawing on insights and lessons from these other areas of international law. It may also 
+require recognition that sometimes, legal reasoning will be insufficient to answer particular 
+172
+questions, and that resolution may need to take the form of practical policy decisions.172
+
+171
+
+170
+
+9. Conclusion
+
+Much of the military and academic discourse about contemporary armed conflict 
+demonstrates a continued heavy reliance on the concept of a domain. It serves as a 
+fundamental organizing idea, reflecting the way we conceptualize the battlefield and 
+categorize actions taking place during armed conflict. For much of history, the concept has 
+reflected a fairly simple delineation of different physical battlefield environments, mirrored 
+in the traditional division of states armed forces into the army, navy, and air force. The 
+domain concept has also exerted a powerful influence in shaping the way we think about, 
+organize, and apply IHL. While much of IHL, including its fundamental principles, applies 
+generally across all armed conflict, it has been supplemented over time by the development 
+of specialized rules (p. 98) and principles tailored to particular domains. Over the past 
+decades however, major evolutions in warfighting capabilities have caused the emergence 
+of significant challenges to the traditional understanding of the domain and changes in the 
+way the term is used.
+
+The concepts of domains of armed conflict and of specialized sub-sets of IHL still continue 
+to serve us well to the extent that it is possible to isolate certain actions in armed conflict as 
+occurring in a particular physical environment, and to identify what sources of IHL may be 
+applicable to those actions. However, these concepts are less useful in relation to activities 
+occurring in non-physical environments, and to activities occurring across multiple 
+environments, when there are potentially several sub-sets of rules applying simultaneously. 
+Contemporary armed conflict therefore calls for a broader, looser approach to the idea of a 
+domain. When domain is understood less as a physical environment for armed conflict and 
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+more broadly as a set of activities that are subject to the application of IHL, then the 
+concept can continue to have some utility in describing new and emerging capabilities.
+
+This chapter has shown that new domains of armed conflict can, over time, sometimes lead 
+to the development of new sub-sets of IHL. However, in the current multilateral 
+environment, many states appear reluctant to develop treaty law to address IHL issues. This 
+means that in the near-to-medium future it is unlikely there will be new treaties with 
+detailed IHL provisions regarding armed conflict in outer space or new warfighting 
+capabilities and technologiesor even amendments to update existing IHL regarding land, 
+sea, and air warfare. Development through customary international law is also likely to be 
+challenging.
+
+It is therefore more likely that many new capabilities would be addressed through non- 
+binding, less-than-treaty status instruments, interpretation, and analysis. This raises 
+fundamental questions about whether such processes can truly be said to constitute 
+development of IHL, or just clarification and interpretation, and what the differences 
+are between these concepts (including debates about the relationships between lex lata and 
+de lege ferenda). In the absence of detailed binding law, one can only apply existing IHL by 
+analogy, informed by the growing number of non-binding sources of interpretation. In this 
+context, the skills of international lawyers in interpreting and applying IHL will have 
+heightened importancewhich invites greater attentiveness to the legal reasoning tools, 
+the terminology, and the concepts we deploy as part of those interpretative processes. As 
+this chapter has discussed, the domain concept may no longer be so well adapted or fit for 
+purpose to assess some aspects of contemporary warfare. This suggests there may be value 
+in exploring the potential for more sophisticated analytical approaches for evaluating armed 
+conflict and its compliance with IHL.
+
+Footnotes:
+
+* The views expressed in this chapter are those of the author in her personal capacity and 
+do not reflect the views of any organization or other entity. The author is grateful to 
+Matthew Teh for his excellent research assistance, to Chris Hanna for his very helpful 
+feedback on an earlier draft of the chapter, and to Bruce Oswald for his valuable comments 
+in early discussions.
+
+1 Hersch Lauterpacht (ed), Oppenheims International Law, Vol II: Disputes, War and 
+Neutrality (7th edn, David McKay 1952) (Oppenheim) 23644.
+
+2 Christopher Greenwood, Scope of Application of Humanitarian Law, in Dieter Fleck, 
+The Handbook of International Humanitarian Law (2nd edn, OUP 2008) 45, 59 para 216.
+
+3 ibid 53 para 220; Oppenheim (above n 1) 237.
+
+4 Australian Army, Land Warfare Doctrine 3-0, Operations (2018) 13 www.army.gov.au/ 
+sites/default/files/lwd_3-0_operations_full.pdf.
+
+5 Yves Sandoz, Land Warfare in Andrew Clapham and Paolo Gaeta (eds), The Oxford 
+Handbook of International Law in Armed Conflict (OUP 2014) 91, 91.
+
+6 Instructions for Government of Armies in the United States in the Field, General Orders 
+No 100 (24 April 1863). Another early instruments was the Institute of International Laws 
+Oxford Manual on the Laws of War on Land (1880), and both were influential in the 
+negotiations at the 1899 and 1907 Hague peace conferences.
+
+7 (signed 29 July 1899, entered into force 4 September 1900).
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+8 Leslie Green, Conduct of Hostilities: Maritime in Leslie Green, The Contemporary Law 
+of Armed Conflict (3rd edn, Manchester UP 2008) 188, 188.
+
+9 Dietrich Schindler and Ji Toman, The Laws of Armed Conflicts (4th edn, Martinus 
+Nijhoff 2004) 55.
+
+10 (signed 18 October 1907, entered into force 26 January 1910), USTS 538.
+
+11 (signed 18 October 1907, entered into force 26 January 1910), USTS 540.
+
+12 (signed 18 October 1907, entered into force 26 January 1910), USTS 542.
+
+13 Geneva Convention (I) for the Amelioration of the Condition of Wounded and Sick in 
+Armed Forces in the Field (adopted 12 August 1949, entered into force 21 October 1950) 75 
+UNTS 31 (GCI); Geneva Convention (III) Relative to the Treatment of Prisoners of War 
+(adopted 12 August 1949, entered into force 21 October 1950) 75 UNTS 135 (GCIII); 
+Geneva Convention (IV) Relative to the Protection of Civilian Persons in Time of War 
+(adopted 12 August 1949, entered into force 21 October 1950) 75 UNTS 287 (GCIV).
+
+14 Protocol Additional to the Geneva Conventions of 12 August 1949, and Relating to the 
+Protection of Victims of International Armed Conflicts (adopted 8 June 1977, entered into 
+force 7 December 1978) 1125 UNTS 3 (API); Protocol Additional to the Geneva Conventions 
+of 12 August 1949, and Relating to the Protection of Victims of Non-International Armed 
+Conflicts (adopted 8 June 1977, entered into force 7 December 1978), 1125 UNTS 609 
+(APII).
+
+15 Leslie Green, Conduct of Hostilities: Land, in Green, The Contemporary Law of Armed 
+Conflict (above n 8) 147, 147 (internal footnotes omitted).
+
+16 The San Remo Manual on International Law Applicable to Armed Conflicts at Sea 
+(adopted 1994, reproduced 1995) No 309 IRRC 583 (San Remo Manual); Louise Doswald- 
+Beck (ed), San Remo Manual on International Law Applicable to Armed Conflicts at Sea 
+(CUP 1995) para 10ff.
+
+17 Natalino Ronzitti, Naval Warfare, in Frauke Lachenmann and Rudiger Wolfrum, The 
+Law of Armed Conflict and the Use of Force: The Max Planck Encyclopedia of Public 
+International Law, Thematic Series, Vol II (OUP 2017) 757, 758.
+
+18 San Remo Manual (above n 16).
+
+19 Ronzitti Naval Warfare (above n 17) 7612.
+
+20 Warship is defined in the Convention on the High Seas (done 29 April 1958, entered 
+into force 30 September 1962), 450 UNTS 11 article 8(2) and the United Nations 
+Convention on the Law of the Sea (adopted 10 December 1982, entered into force 16 
+November 1994), 1833 UNTS 3 (UNCLOS) article 29; see also W Heintschel von Heinegg, 
+Warships, in Lachenmann and Wolfrum (above n 17) 1358.
+
+21 David Letts and Rob McLaughlin, Law of Naval Warfare, in Rain Liivoja and Tim 
+McCormack (eds), Routledge Handbook of the Law of Armed Conflict (Routledge 2016) 264, 
+266.
+
+22 Paris Declaration Respecting Maritime Law (signed and entered into force 16 April 
+1856, 115 CTS 1); Hague Convention (III) for the Adaptation to Maritime Warfare of the 
+Principles of the Geneva Convention of 22 August 1864 (adopted 29 July 1899, entered into 
+force 4 September 1900).
+
+23 See further Schindler and Toman (above n 9) 105993; W Heintschel von Heinegg, 
+Maritime Warfare, in Clapham and Gaeta (above n 5) 145; Marco Sassli, Antoine Bouvier, 
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+and Anne Quintin, How Does Law Protect in War? Vol 1 (ICRC 2011), ch 10 Letts and 
+McLaughlin (above n 21) 26973.
+
+24 Hague Convention (VIII) Relative to the Laying of Automatic Submarine Contact Mines 
+(adopted 18 October 1907, entered into force 26 January 1910) 205 CTS 331; Convention 
+(IX) concerning Bombardment by Naval Forces in Time of War (adopted 18 October 1907, 
+entered into force 26 January 1910) 205 CTS 345; Convention (X) concerning the 
+Adaptation to Maritime Warfare of the Principles of the Geneva Convention (adopted 18 
+October 1907, entered into force 26 January 1910) 15 LNTS 340.
+
+25 Convention (VI) Relating to the Status of Enemy Merchant Ships at the Outbreak of 
+Hostilities (adopted 18 October 1907, entered into force 26 January 1910) 205 CTS 305; 
+Convention (VII) Relating to the Conversion of Merchant Ships into War-Ships (adopted 18 
+October 1907, entered into force 26 January 1910) 205 CTS 319.
+
+26 Convention (XI) Relative to Certain Restrictions with Regard to the Exercise of the 
+Right of Capture in Naval War (adopted 18 October 1907, entered into force 26 January 
+1910) 205 CTS 367; and Convention (XII) Relative to the Creation of an International Prize 
+Court (adopted 18 October 1907, entered into force 26 January 1910) 205 CTS 381.
+
+27 Convention (XIII) concerning the Rights and Duties of Neutral Powers in Naval War 
+(adopted 18 October 1907, entered into force 26 January 1910) 205 CTS 395.
+
+28 Signed 26 February 1909 [190809] 208 CTS 341; Schindler and Toman (above n 9) 
+1111.
+
+29 The Oxford Manual of Naval Warfare (9 August 1913) [1913] 26 AnnIDI 610; in D. 
+Schindler and J. Toman, The Laws of Armed Conflicts (Martinus Nijhoff 1988), 85875.
+
+30 Treaty for the Limitation of Naval Armament (6 February 1922), 25 LNTS 202; Treaty 
+Relating to the Use of Submarines and Noxious Gases in Warfare (6 February 1922, not in 
+force), 16 AJIL Supp 57.
+
+31 Treaty for the Limitation and Reduction of Naval Armaments (Part IV) (22 April 1930), 
+112 LNTS 88; Procs-Verbal Relating to the Rules of Submarine Warfare set forth in Part IV 
+of the Treaty of London of 22 April 1930 (signed and entered into force 6 November 1936), 
+173 LNTS 353; Green, The Contemporary Law of Armed Conflict (above n 8) 45, citing 
+Schindler and Toman (above n 9) 113949.
+
+32 Geneva Convention (II) for the Amelioration of the Condition of Wounded, Sick and 
+Shipwrecked Members of Armed Forces at Sea (adopted 12 August 1949, entered into force 
+21 October 1950), 75 UNTS 85 (GCII).
+
+33 Letts and McLaughlin (above n 21) 274. API contains provisions concerning naval 
+attacks on land targets (arts 5060), but otherwise just states that the provisions 
+concerning protection against the effects of hostilities similarly apply to naval operations 
+which may affect civilians: API article 49(3).
+
+34 Ronzitti Naval Warfare (above n 17) 767; eg UK Ministry of Defence, Joint Service 
+Manual of the Law of Armed Conflict JSM 383 (Ministry of Defence 2004) (as updated to 21 
+May 2014) (UK Manual) 34761 www.ihlresearch.org/amw.
+
+35 San Remo Manual (above n 16); Sassli et al (above n 23) 302.
+
+36 eg the UK, German, and US military manuals: Sassli et al (above n 23) 302, n 289.
+
+37 Green, The Contemporary Law of Armed Conflict (above n 8) 45.
+
+38 Vaughan Lowe and Antonios Tzanakopoulos, Ships, Visit and Search, in Lachenmann 
+and Wolfrum (above n 17) 1153, 1158.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+39 Bruno Demeyere, Jean-Marie Henckaerts, Heleen Hiemstra, and Ellen Nohle, The 
+Updated ICRC Commentary on the Second Geneva Convention: Demystifying the Law of 
+Armed Conflict at Sea (2016) 98 IRRC 401, 417.
+
+40 Heintschel von Heinegg Maritime Warfare (above n 23) 146.
+
+41 ibid 146, 1801.
+
+42 eg through the Convention on the High Seas 1958 (above n 20) and UNCLOS; see 
+Ronzitti Naval Warfare (above n 17) 758.
+
+43 Letts and McLaughlin (above n 21) 265.
+
+44 Michael Schmitt, Air Warfare, in Clapham and Gaeta (above n 5) 118, 119, 144. See 
+also Javier Guisndez Gmez, The Law of Air Warfare (1998) 323 IRRC 347; UK Manual 
+(above n 34) ch 12 (Air Operations).
+
+45 Yoram Dinstein, Air Warfare, in Lachenmann and Wolfrum (above n 17) 13, 14.
+
+46 Ian Henderson and Patrick Keane, Air and Missile Warfare, in Liivoja and McCormack 
+(above n 21) 282; GCI ch VI; API articles 2431.
+
+47 Schmitt Air Warfare (above n 44) 119, 144.
+
+48 Henderson and Keane (above n 46) 28298.
+
+49 Sassli et al (above n 23) 314.
+
+50 San Remo Manual (above n 16) rules 125158; Harvard University Program on 
+Humanitarian Policy and Conflict Research, Manual on International Law applicable to Air 
+and Missile Warfare (2009) www.ihlresearch.org/amw; Yoram Dinstein, Bruno Demeyere, 
+and Claude Bruderlein (eds), Harvard Manual on International Law Applicable to Air and 
+Missile Warfare (CUP 2010) (Harvard Manual) rules 37, 38, 40, 41, 55, 57, 70, and 13446.
+
+51 Convention on International Civil Aviation (7 December 1944), 15 UNTS 295 articles 1 
+2; Military and Paramilitary Activities in and against Nicaragua (Nicaragua v US) [1986] ICJ 
+Rep 14 para 251.
+
+52 Henderson and Keane (above n 46) 288; Gbenga Oduntan, The Never Ending Dispute: 
+Legal Theories on the Spatial Demarcation Boundary Plane between Airspace and Outer 
+Space (2003) 1 Hertfordshire LJ 64.
+
+53 eg UK Manual (above n 34) para 12.13.
+
+54 Harvard Manual (above n 50) rule 1(a).
+
+55 Schmitt Air Warfare (above n 44) 125; UK Manual (above n 34) para 12.14.
+
+56 UK Manual (above n 34) para 12.4.
+
+57 Dinstein (above n 45) 14.
+
+58 ibid 15.
+
+59 Schmitt Air Warfare (above n 44) 120.
+
+60 Declaration (IV, 1) to Prohibit for the Term of Five Years the Launching of Projectiles 
+and Explosives from Balloons, and Other New Methods of a Similar Nature (20 July 1899); 
+Green, The Contemporary Law of Armed Conflict (above n 8) 40, citing Schindler and 
+Toman (above n 9) 95.
+
+61 Declaration (XIV) Prohibiting the Discharge of Projectiles and Explosives from Balloons 
+(18 October 1907).
+
+62 Schmitt Air Warfare (above n 44) 121.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+63 Commission of Jurists, The Hague, Rules concerning the Control of Wireless Telegraphy 
+in Time of War and Air Warfare (drafted December 1922February 1923), Parliamentary 
+Papers, Cmd 2201, (Hague Rules of Air Warfare) Miscellaneous No 14 (1924); Schmitt Air 
+Warfare (above n 44) 1212.
+
+64 Sassli et al (above n 23) 314; Schmitt Air Warfare (above n 44) 1223; Prosecutor v 
+Gali, IT-98-29-A, ICTY Appeals Chamber (30 November 2006) n 275; UK Manual (above n 
+34) para 1.26.3. Their customary status is debated by some: see Green, The Contemporary 
+Law of Armed Conflict (above n 8) 467.
+
+65 Hague Rules of Air Warfare (above n 63) articles 22 and 24; API articles 51 and 52; 
+Schmitt Air Warfare (above n 44) 122.
+
+66 UK Manual (above n 34) para 1.28.1.
+
+67 Dinstein (above n 45) 13.
+
+68 ibid 14.
+
+69 GCI articles 13, 36, 37; GCII articles 12, 13, 15, 39, 40; GCIII articles 4, 75; GCIV 
+articles 22, 111.
+
+70 eg the Convention on Prohibitions or Restrictions on the Use of Certain Conventional 
+Weapons which may be Deemed to be Excessively Injurious or to Have Indiscriminate 
+Effects (adopted 10 April 1981, entered into force 2 December 1983), 1342 UNTS 137; 
+Convention on Cluster Munitions (adopted 3 December 2008, entered into force 1 August 
+2010), 2688 UNTS 39; Schmitt Air Warfare (above n 44) 123.
+
+71 API articles 8(f)(g) and (i) 2431.
+
+72 Schmitt Air Warfare (above n 44) 124, citing API article 49(3); Michael Bothe, Karl 
+Josef Partsch, and Waldemar A Solf, New Rules for Victims of Armed Conflicts: Commentary 
+on the Two 1977 Protocols Additional to the Geneva Conventions of 1949 (Martinus Nijhoff 
+1982) 290.
+
+73 Schmitt Air Warfare (above n 44) 125.
+
+74 Sassli et al (above n 23) 315.
+
+75 (above n 50).
+
+76 Schmitt Air Warfare (above n 44) 125; Henderson and Keane (above n 46) 283.
+
+77 Harvard University Program on Humanitarian Policy and Conflict Research, 
+Commentary on the Manual on International Law Applicable to Air and Missile Warfare 
+(2010) www.ihlresearch.org/amw/manual; Schmitt Air Warfare (above n 44) 125.
+
+78 Sassli et al (above n 23) 314.
+
+79 The Harvard Manual divides the definition of RPAS into Unmanned Aerial 
+Vehicles (unmanned aircraft of any size which does not carry a weapon and which cannot 
+control a weapon (rule 1(dd)) (commonly referred to as a drone) and Unmanned Combat 
+Aerial Vehicle which carries and launches a weapon, or which can use on-board technology 
+to direct such a weapon to a target (rule 1(ee)).
+
+80 See eg New Zealand Defence Force, Manual of Armed Forces Law: Vol 4, Law of Armed 
+Conflict, DM 69 (2nd edn, New Zealand Defence Force 1982) (NZDF Manual) para 10.7.2 
+10.7.3.
+
+81 Henderson and Keane (above n 46) 2856; Harvard Manual (above n 50) rule 1(x) para 
+6; see Markus Wagner, Unmanned Aerial Vehicles, in Lachenmann and Wolfrum (above n 
+17) 12806.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+82 Dinstein (above n 45) 24.
+
+83 As noted earlier in section 5 Air, there is no treaty law definition of outer space, but it 
+is understood to mean the space beyond the upper atmosphere: eg NZDF Manual (above n 
+80) para 8.11.8.
+
+84 eg the US refers to space as a warfighting domain in its 2018 National Defense 
+Strategy: US, Summary of the 2018 National Defense Strategy of the USA (2018) 6 https:// 
+dod.defense.gov/Portals/1/Documents/pubs/2018-National-Defense-Strategy-Summary.pdf. 
+See also Sean Hall, Cyberspace at the Operational Level: Warfighting in all Five 
+Domains (2016) 5 https://apps.dtic.mil/dtic/tr/fulltext/u2/1045557.pdf.
+
+85 See eg Dale Stephens and Cassandra Steer, Conflicts in Space: International 
+Humanitarian Law and its Application to Space Warfare (2015) XL Annals of Air and Space 
+Law 1.
+
+86 Adelaide Law School, The Woomera Manual: Legal Framework and Context https:// 
+law.adelaide.edu.au/woomera/legal-framework.
+
+87 Hall (above n 84) 5; Manfred Lachs, The International Law of Outer Space (1964) 
+113(3) Recueil des Cours 1.
+
+88 UN Office for Outer Space Affairs, Committee on the Peaceful Uses of Outer Space 
+www.unoosa.org/oosa/en/ourwork/copuos/index.html.
+
+89 Treaty on Principles Governing the Activities of States in the Exploration and Use of 
+Outer Space, including the Moon and Other Celestial Bodies (opened for signature 27 
+January 1967, entered into force 10 October 1967), 610 UNTS 205 (Outer Space Treaty) 
+article V; Agreement on the Rescue of Astronauts, the Return of Astronauts and the Return 
+of Objects Launched into Outer Space (opened for signature 22 April 1968, entered into 
+force 3 December 1968); Convention on International Liability for Damage Caused by Space 
+Objects (opened for signature 29 March 1972, entered into force on 1 September 1972); 
+Convention on Registration of Objects Launched into Outer Space (opened for signature on 
+14 January 1975, entered into force on 15 September 1976); Agreement Governing the 
+Activities of States on the Moon and Other Celestial Bodies (opened for signature 18 
+December 1979, entered into force 11 July 1984), 1363 UNTS 21 (Moon Treaty) articles 3 
+4.
+
+90 eg Declaration of Legal Principles Governing the Activities of States in the Exploration 
+and Use of Outer Space, UNGA Resolution 1962 (XVIII) (13 December 1963); Declaration 
+on International Cooperation in the Exploration and Use of Outer Space for the Benefit and 
+in the Interest of All States, Taking into Particular Account the Needs of Developing 
+Countries, UNGA Resolution 51/122 (13 December 1996). The other three sets of principles 
+concern broadcasting, remote sensing, and nuclear power sources.
+
+91 Outer Space Treaty articles 3 and 4; Moon Treaty articles 3(1)(2).
+
+92 Outer Space Treaty article 4; Moon Treaty article 3(4).
+
+93 See Colleen Sullivan, The Prevention of an Arms Race in Outer Space: An Emerging 
+Principle of International Law (1990) 2 Temple Intl Comp LJ 211.
+
+94 See Christopher Dixon, Jessica Clarence, Amelia Meurant-Tompkinson, and Melissa 
+Liberatore, The Five-Domains Update Australian Strategic Policy Institute (29 May 2018) 
+www.aspistrategist.org.au/the-five-domains-update-16/#.
+
+95 University of Adelaide, The Woomera Manual https://law.adelaide.edu.au/woomera/ 
+home; eg in 2019 the US directed the creation of a US Space Force: US Presidential 
+Memoranda, Space Policy Directive-4: Establishment of the United States Space Force (19 
+February 2019) www.whitehouse.gov/presidential-actions/text-space-policy-directive-4- 
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+establishment-united-states-space-force; Joan Johnson-Freese, Space Warfare in the 21st 
+Century: Among the Heavens (Routledge 2017).
+
+96 Rob McLaughlin, cited in Conflict in Outer Space will Happen: Legal Experts, Adelaide 
+Law School Blog (20 April 2018) https://blogs.adelaide.edu.au/law/2018/04/20/conflict-in- 
+outer-space-will-happen-legal-experts.
+
+97 Hall (above n 84) 6.
+
+98 See Ram Jakhu, Cassandra Steer, and Kuan-Wei Chen, Conflicts in Space and the Rule 
+of Law (2016) Space Policy 1.
+
+99 <www.mcgill.ca/milamos>.
+
+100 University of Adelaide (above n 95).
+
+101 John Goehring, International Law Manuals for Military Operations in Space, Guest 
+Post (10 October 2018) Lawfire https://sites.duke.edu/lawfire/2018/10/10/guest-post-john- 
+goehring-on-international-law-manuals-for-military-operations-in-space.
+
+102 UN Office of Disarmament Affairs, Outer Space www.un.org/disarmament/topics/ 
+outerspace.
+
+103 Steven Haines, The Developing Law of Weapons: Humanity, Distinction, and 
+Precautions in Attack, in Liivorja and McCormack (above n 21) 273, 275.
+
+104 Rain Liivoja, Technological Change and the Evolution of the Law of War (2015) 97 
+IRRC 1157, 1173.
+
+105 Michael Schmitt, Rewired Warfare: Rethinking the Law of Cyber Attack (2014) 96 
+IRRC 189 190.
+
+106 John R Wilson, Cyber Warfare Ushers in 5th Dimension of Human Conflict (2014) 
+25(12) Military & Aerospace Electronics 815.
+
+107 US Department of Defense, Strategy for Operating in Cyberspace (2011) 56 https:// 
+csrc.nist.gov/CSRC/media/Projects/ISPAB/documents/DOD-Strategy-for-Operating-in- 
+Cyberspace.pdf.
+
+108 US Office of the Chairman of the Joint Chiefs of Staff, Cyberspace Operations: Joint 
+Publication 312 (CJCS 8 June 2018) Glossary, 4 and main text, vii https://fas.org/irp/doddir/ 
+dod/jp3_12.pdf.
+
+109 Matthew H Swartz, Director, Communications & Networks Division and Task Force 
+Cyber Awakening Lead, Office of the Deputy Chief of Naval Operations for Information 
+Dominance, Media Roundtable (31 October 2014), cited in George I Seffers, Task Force 
+Cyber Awakening Recommendations Due, Signal (3 November 2014) www.afcea.org/ 
+content/task-force-cyber-awakening-recommendations-due.
+
+110 Schmitt Rewired Warfare (above n 105) 190.
+
+111 NATO Secretary General J Stoltenberg, Press Conference: following the North Atlantic 
+Council meeting at the level of NATO Defence Ministers (14 June 2006) www.nato.int/cps/ 
+en/natohq/opinions_132349.htm?selectedLocale=en.
+
+112 Liivoja (above n 104) 1158, citing Fergus Hanson, Waging War in Peacetime: Cyber 
+Attacks and International Norms, The Lowy Interpreter (20 October 2015) 
+www.lowyinterpreter.org/post/2015/10/20/Waging-war-in-peacetime-Cyber-attacks-and- 
+international-norms.aspx.
+
+113 Hall (above n 84) 910.
+
+114 ibid 1, 12.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+115 NZDF Manual (above n 80) para 5.2.23; Michael Schmitt (gen ed), Tallinn Manual on 
+the International Law Applicable to Cyber Warfare (CUP 2013) (Tallinn Manual) rule 20.
+
+116 ICRC, International Humanitarian Law and the Challenges of Contemporary Armed 
+Conflicts, Report No 32IC/15/11 (October 2015) 39.
+
+117 Respectively: NZDF Manual (above n 80) para 5.2.22; , Tallinn Manual 2.0 on the 
+International Law Applicable to Cyber Operations (Cambridge: CUP 2017) (Tallinn Manual 
+2.0) Rule 92; Tallinn Manual 2.0 Rule 100.
+
+118 Martin C Libicki, Cyberspace is Not a Warfighting Domain (2012) 8(2) I/S: A Journal 
+of Law and Policy for the Information Society 321, 322.
+
+119 ICRC, Cyber Warfare (29 October 2010) www.icrc.org/en/document/cyber-warfare. 
+See eg Report of the Group of Governmental Experts on Developments in the Field of 
+Information and Telecommunications in the Context of International Security, UN Doc A/ 
+68/98 (24 June 2013) paras 19, 2023 and report of same name UN Doc A/70/174 (22 July 
+2015) para 28.
+
+120 See eg Rain Liivoja, Kobi Leins, and Tim McCormack, Emerging Technologies of 
+Warfare, in Liivorja and McCormack (above n 21) 603, 60511; Schmitt Rewired 
+Warfare (above n 105) 189; Cordula Droege, Get Off My Cloud: Cyber Warfare, 
+International Humanitarian Law, and the Protection of Civilians (2012) 94 IRRC 533.
+
+121 Tallinn Manual (above n 115).
+
+122 NATO Cooperative Cyber Defence Centre of Excellence, Tallinn Manual 2.0 https:// 
+ccdcoe.org/research/tallinn-manual.
+
+123 Elaine Korzak, UN GGE on Cybersecurity: The End of an Era? The Diplomat (31 July 
+2017) https://thediplomat.com/2017/07/un-gge-on-cybersecurity-have-china-and-russia-just- 
+made-cyberspace-less-safe.
+
+124 Eg Stefan Soesanto and Fosca Incau, The UNGGE is Dead: Time to Fall Forward, 
+European Council on Foreign Relations, Commentary (15 August 2017) www.ecfr.eu/article/ 
+commentary_time_to_fall_forward_on_cyber_governance; Michelle Markoff, US Deputy 
+Coordinator for Cyber Issues, Explanation of Position at the Conclusion of the 20162017 
+UNGGE on Developments in the Field of Information and Telecommunications in the 
+Context of International Security (23 June 2017) paras 2, 5 https://www.state.gov/ 
+explanation-of-position-at-the-conclusion-of-the-2016-2017-un-group-of-governmental- 
+experts-gge-on-developments-in-the-field-of-information-and-telecommunications-in-the- 
+context-of-international-sec/.
+
+125 Ann Vljataga, Tracing Opinio Juris in National Cyber Security Strategy 
+Documents (NATO CCD COE, Tallinn 2018) 3, 4 https://ccdcoe.org/library/publications/ 
+tracing-opinio-juris-in-national-cyber-security-strategy-documents; Michael Schmitt and 
+Sean Watts, The Decline of International Humanitarian Law Opinio Juris and the Law of 
+Cyber Warfare (2015) 50 Texas Intl LJ 189, 217.
+
+126 ICRC Cyber Warfare (above n 119).
+
+127 US Defense Advanced Research Projects Agency (DARPA), Electromagnetic Spectrum 
+and Bandwidth www.darpa.mil/tag-list?tt=61.
+
+128 DARPA, Congested Frequencies: How to Improve Bandwidth Access for Military and 
+Commercial Use (2 August 2013) www.darpa.mil/news-events/2013-02-08.
+
+129 DARPA, Electronic Warfare www.darpa.mil/tag-list?tt-=21.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+130 Patrick Tucker, How the Army Plans to Fight a War across the Electromagnetic 
+Spectrum, Defense One (26 February 2014) www.defenseone.com/technology/2014/02/ 
+inside-armys-first-field-manual-cyber-electromagnetic-war/79498; US Army, Field Manual 
+on Cyber Electromagnetic Activities, FM 3-38 (12 February 2014) iv https://fas.org/irp/ 
+doddir/army/fm3-38.pdf; Sydney J Freedberg, DoD CIO Says Spectrum May Become 
+Warfighting Domain, Breaking Defense (9 December 2015) www.afcea.org/content/task- 
+force-cyber-awakening-recommendations-due.
+
+131 Australian Army (above n 4) 13.
+
+132 DARPA, The Sixth Domain of Warfare: DARPA Excerpt from DARPA-SN-16-59, MTO 
+Office-wide Proposers Day, 20 September 2016 https://alphabetics.info/2016/09/13/the- 
+sixth-domain-of-warfare-darpa (DARPA 2016); Sandra Jontz, DoD Tinkering with Making 
+EMS New Warfare Domain, Signal (28 January 2016) www.afcea.org/content/Article-dod- 
+tinkering-making-ems-new-warfare-domain.
+
+133 DARPA 2016 (above n 132).
+
+134 US Department of the Navy, Chief Information Officer, SECNAV Instruction 2400.3 
+Recognizes the Electromagnetic Spectrum Environment as a Warfighting Battle Space (12 
+October 2018) https://www.doncio.navy.mil/ContentView.aspx?id=10869; see also US Under 
+Secretary of the Navy, Thomas B. Modley, SECNAV Instruction 2400.3 Electromagnetic 
+Battle Space (5 October 2018) https://www.secnav.navy.mil/doni/Directives/ 
+02000%20Telecommunications%20and%20Digital%20Systems%20Support/ 
+02-400%20Visual%20Information%20Services/2400.3.pdf; Lauren C Williams Navy 
+Declares EMS a Full-Fledged Warfighting Domain (23 October 2018), Defense Systems 
+https://defensesystems.com/articles/2018/10/24/navy-electronic-warfare-williams.aspx.
+
+135 US Congressional Research Service, Defense Primer: Electronic Warfare (30 
+December 2019) https://fas.org/sgp/crs/natsec/IF11118.pdf.
+
+136 Chloe Diggins and Clint Arizmendi, Hacking the Human Brain: The Next Domain of 
+Warfare: Opinion, Wired (12 November 2012) www.wired.com/2012/12/the-next-warfare- 
+domain-is-your-brain; Jonathan D Moreno, Mind Wars: Brain Science and the Military in the 
+21st Century (Bellevue Literary Press 2012).
+
+137 Diggins and Arizmendi (above n 136) 1.
+
+138 ibid.
+
+139 ibid.
+
+140 eg ICRC, Special Issue: New Technologies and Warfare (2002) 94 IRRC 457; Hitoshi 
+Nasu and Rob McLaughlin (eds), New Technologies and the Law of Armed Conflict (Asser 
+Press 2014); Dan Saxon (ed), International Humanitarian Law and the Changing Technology 
+of War (Martinus Nijhoff 2013).
+
+141 ICRC International Humanitarian Law and the Challenges of Contemporary Armed 
+Conflicts (above n 116) 38.
+
+142 ibid.
+
+143 API article 1(2); NZDF Manual (above n 80) para 8.10.23; ICRC, Commentary on the 
+First Geneva Convention (2nd edn, CUP 2016) para 3296.
+
+144 API, article 36; see generally ICRC, A Guide to the Legal Review of New Weapons, 
+Means and Methods of Warfare (2006) 88 IRRC 931.
+
+145 Legality of the Threat or Use of Nuclear Weapons (Advisory Opinion) [1996] ICJ Rep 
+266 para 86.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+146 Lachs (above n 87) 19.
+
+147 For discussion of this increase in activity, see eg Knut Drmann, The Role of Nonstate 
+Entities in Developing and Promoting International Humanitarian Law (2018) 51 Vanderbilt 
+J Transnl L 713; Michael Schmitt and Sean Watts, State Opinio Juris and International 
+Humanitarian Law Pluralism, (2015) 91 Intl Legal Stud 171, 1757.
+
+148 Statute of the International Court of Justice, as annexed to the Charter of the United 
+Nations (26 June 1945) 1 UNTS xvi, article 38(1)(d).
+
+149 This point is underscored throughout the UK Manual (above n 34), eg paras 12.1; 
+13.1; NZDF Manual (above n 80) para 1.3.1.
+
+150 Haines (above n 103) 292. See also Jelena Pejic, Extraterritorial Targeting by Means 
+of Armed Drones: Some Legal Implications (2014) 96 IRRC 67.
+
+151 Vincent Bernard, Editorial: Delineating the Boundaries of Violence (2014) 96 IRRC 5.
+
+152 See Cordula Droege and David Tuck, Fighting Together: Obligations and 
+Opportunities in Partnered Warfare, ICRC Hum Law & Pol (26 March 2017) https:// 
+medium.com/law-and-policy/fighting-together-obligations-and-opportunities-in-partnered- 
+warfare-362c9dfb741a.
+
+153 Laurie Blank, Defining the Battlefield in Contemporary Conflict and 
+Counterterrorism: Understanding the Parameters of the Zone of Combat (2010) 39 Georgia 
+J Intl Comp L 1.
+
+154 Kelly McCoy, The Road to Multi-Domain Battle: An Origin Story, Modern War 
+Institute at West Point (27 October 2018) https://mwi.usma.edu/road-multi-domain-battle- 
+origin-story.
+
+155 See eg General SJ Townsend (US Army) Accelerating Multi-Domain Operations: 
+Evolution of an Idea: Military Rev (September-October 2018) Army University Press 
+www.armyupress.army.mil/Journals/Military-Review/English-Edition-Archives/September- 
+October-2018/Townsend-Multi-Domain-Operations.
+
+156 Kevin Woods and Thomas Greenwood, Multi-Domain Battle: Joint Experiments 
+Needed, The Australian Naval Institute (31 March 2018) https://navalinstitute.com.au/ 
+multi-domain-battle-joint-experiments-needed. See also David Perkins and James Holmes, 
+Multidomain Battle: Converging Concepts Toward a Joint Solution (2018) 88 Joint Force Q 
+54.
+
+157 Amos Fox, Multi-Domain Battle: A Perspective on the Salient Features of an Emerging 
+Operational Doctrine, Small Wars Journal (21 May 2017) (emphasis added).
+
+158 Woods and Greenwood (above n 156).
+
+159 Kris Osborn, The Air Force is Creating a System to Manage the Militarys Forces in 
+War, The National Interest (1 March 2018) https://nationalinterest.org/blog/the-buzz/the- 
+air-force-creating-system-manage-the-militarys-forces-24701M.
+
+160 ibid.
+
+161 ibid.
+
+162 David Perkins, Multi-Domain Battle: The Advent of Twenty-First Century War, US 
+Army Military Rev (NovDec 2017) www.armyupress.army.mil/Journals/Military-Review/ 
+English-Edition-Archives/November-December-2017/Multi-Domain-Battle-The-Advent-of- 
+Twenty-First-Century-War.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
+
+163 Richard Hart Sinnreich, Multi-Domain Battle: Old Wine in a New Bottle, The Lawton 
+Constitution (30 October 2016); Shmuel Shmuel, Multi-Domain Battle: Airland Battle, Once 
+More, With Feeling, War on the Rocks (20 June 2017) https://warontherocks.com/2017/06/ 
+multi-domain-battle-airland-battle-once-more-with-feeling.
+
+164 Erik Heftye, Multi-Domain Confusion: All Domains are Not Created Equal, Real Clear 
+Defense (26 May 2017).
+
+165 ibid.
+
+166 Woods and Greenwood (above n 156) text before n 2.
+
+167 See M Koskenniemi, Fragmentation of International Law: Difficulties Arising from the 
+Diversification and Expansion of International Law, Report of the Study Group of the 
+International Law Commission, UN Doc A/CN.4/L.682 (13 April 2006).
+
+168 Margaret Young (ed), Regime Interaction in International Law: Facing Fragmentation 
+(CUP 2012); Margaret Young, Climate Change Law and Regime Interaction (2011) 5 
+Carbon and Climate LR 147.
+
+169 See Roberta Arnold and Noelle Quenivet (eds), International Humanitarian Law and 
+Human Rights Law: Towards a New Merger in International Law (Martinus Nijoff 2008); 
+Marko Milanovic, A Norm Conflict Perspective on the Relationship between International 
+Humanitarian Law and Human Rights Law (2009) 14 J Conflict & Security L 459; Sarah 
+McCosker, The Interoperability of International Humanitarian Law and Human Rights 
+Law: Evaluating the Legal Tools Available to Negotiate their Relationship, in Andrew 
+Byrnes, Mika Hayashi, and Christopher Michaelsen (eds), International Law in the New Age 
+of Globalization (Martinus Nijhoff 2013). This is a key reason why some states prefer the 
+terminology law of armed conflict rather than IHL, to recognize that there are multiple 
+bodies of law potentially applicable in armed conflict.
+
+170 Janice Gray, Cameron Holley, and Rosemary Rayfuse, Trans-Jurisdictional Water Law 
+and Governance (Routledge 2016) 26, citing Lee Godden, Raymond Ison, and Philip Wallis, 
+Water Governance in a Climate Change World: Appraising Systemic and Adaptive 
+Effectiveness (2011) 25 Water Resources Management 3971.
+
+171 Vito De Lucia, The Ecosystem Approach in International Environmental Law: 
+Genealogy and Biopolitics (Routledge 2019).
+
+172 Milanovic (above n 169); Sarah McCosker, The Limitations of Legal Reasoning: 
+Negotiating the Relationships between International Humanitarian Law and Human Rights 
+Law in Detention Situations, in Gregory Rose and Bruce Oswald (eds), Detention of Non- 
+State Actors Engaged in Hostilities: The Future Law (Brill/Martinus Nijhoff 2016) 23.
+
+From: Oxford Public International Law (http://opil.ouplaw.com). (c) Oxford University Press, 2021. All Rights Reserved. 
+
+Subscriber: UiT The Arctic University of Norway; date: 11 April 2021
