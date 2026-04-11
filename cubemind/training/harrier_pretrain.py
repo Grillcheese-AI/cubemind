@@ -240,83 +240,94 @@ def train(config: HarrierPretrainConfig | None = None):
                 1 + math.cos(math.pi * progress)
             )
 
-        # ── Loss function: CE + KL (same as moqe_distillation) ────────────
-        # Simulate: random hidden state → adapter → student logits
-        # Then measure KL divergence against teacher distribution
-        def compute_loss(A_mat, B_mat):
-            """CE + KL loss for a given adapter."""
-            # Random hidden state (simulates intermediate activation)
-            h = rng.standard_normal((config.seq_len, config.teacher_d_model)).astype(np.float32) * 0.1
-            # Apply LoRA: student_out = h + scale * (h @ A.T @ B.T)
-            lora_out = (h @ A_mat.T @ B_mat.T).astype(np.float32)
-            student_logits = h + forge.scale * lora_out  # (seq, d_model)
+        # ── CE + KL loss with direct error-driven update ──────────────────
+        # Same approach as vsa_lm.py: compute error, update weights directly.
+        # No random hidden states — use teacher logits as both input and target.
 
-            # Project to logit space: use first top_k dims as proxy logits
-            s_logits = student_logits[:, :config.top_k_logits]
-            s_scaled = s_logits / config.temperature
-            s_shifted = s_scaled - np.max(s_scaled, axis=-1, keepdims=True)
-            s_exp = np.exp(s_shifted)
-            s_probs = s_exp / (np.sum(s_exp, axis=-1, keepdims=True) + 1e-8)
-            s_probs = np.clip(s_probs, 1e-7, 1.0)
+        # Teacher probs as target distribution: (seq, top_k)
+        # Student: forge adapter, apply to teacher's mean hidden state estimate
+        # The adapter should learn to project the input toward teacher's output dist.
 
-            # KL divergence: teacher || student
-            kl = float(np.mean(np.sum(
-                teacher_probs * (np.log(teacher_probs) - np.log(s_probs)),
-                axis=-1,
-            ))) * (config.temperature ** 2)
+        # Use teacher logits mean as a proxy for the hidden state at this layer
+        teacher_mean = teacher_logits.mean(axis=0).astype(np.float32)  # (top_k,)
 
-            # CE on hard labels (use token IDs mod top_k as proxy)
-            ce = 0.0
-            for t in range(min(len(labels), config.seq_len)):
-                tok = int(labels[t]) % config.top_k_logits
-                ce -= math.log(max(float(s_probs[t, tok]), 1e-8))
-            ce /= max(config.seq_len, 1)
+        # Pad/truncate to d_target for adapter application
+        d = config.teacher_d_model
+        tk = len(teacher_mean)
+        if tk >= d:
+            h_input = teacher_mean[:d]
+        else:
+            h_input = np.zeros(d, dtype=np.float32)
+            h_input[:tk] = teacher_mean
 
-            return 0.3 * ce + 0.6 * kl
+        # Apply LoRA adapter: output = h + scale * h @ A.T @ B.T
+        lora_out = (h_input @ A.T @ B.T).astype(np.float32)  # (d,)
+        student_out = h_input + forge.scale * lora_out
 
-        # Baseline loss
-        loss = compute_loss(A, B)
+        # Project student output to logit-sized space
+        s_logits = student_out[:tk]
+        s_scaled = s_logits / config.temperature
+        s_shifted = s_scaled - np.max(s_scaled)
+        s_exp = np.exp(s_shifted)
+        s_probs = (s_exp / (np.sum(s_exp) + 1e-8)).astype(np.float32)
+        s_probs = np.clip(s_probs, 1e-7, 1.0)
 
-        # ── EGGROLL: rank-1 ES on basis adapters ─────────────────────────
-        n_workers = 8
-        top_k_keep = 2
+        # Teacher target (average across sequence positions)
+        t_probs = teacher_probs.mean(axis=0).astype(np.float32)
+        t_probs = np.clip(t_probs, 1e-7, 1.0)
 
-        basis_idx = int(rng.integers(0, forge.n_basis))
-        orig_A = forge.A_basis[basis_idx].copy()
-        orig_B = forge.B_basis[basis_idx].copy()
+        # KL divergence: teacher || student
+        kl = float(np.sum(t_probs * (np.log(t_probs) - np.log(s_probs)))) * (config.temperature ** 2)
 
-        perturbations = []
-        losses_p = []
+        # CE on hard labels
+        ce = 0.0
+        for t in range(min(len(labels), config.seq_len)):
+            tok = int(labels[t]) % tk
+            ce -= math.log(max(float(s_probs[tok]), 1e-8))
+        ce /= max(config.seq_len, 1)
 
-        for _ in range(n_workers):
-            dA = (rng.standard_normal((forge.rank, 1)) @ rng.standard_normal((1, forge.d_target))
-                  ).astype(np.float32) * 0.01
-            dB = (rng.standard_normal((forge.d_target, 1)) @ rng.standard_normal((1, forge.rank))
-                  ).astype(np.float32) * 0.01
+        loss = 0.3 * ce + 0.6 * kl
 
-            forge.A_basis[basis_idx] = orig_A + dA
-            forge.B_basis[basis_idx] = orig_B + dB
-            A_p, B_p = forge.forge(context, layer_id)
-            loss_p = compute_loss(A_p, B_p)
-            perturbations.append((dA, dB))
-            losses_p.append(loss_p)
+        # ── Direct error-driven update (like vsa_lm.py) ──────────────────
+        # Error: gradient of CE+KL w.r.t. student logits = s_probs - t_probs
+        grad_logits = (s_probs - t_probs).astype(np.float32)  # (top_k,)
 
-        forge.A_basis[basis_idx] = orig_A
-        forge.B_basis[basis_idx] = orig_B
+        # Backprop through output projection: grad w.r.t. lora_out
+        grad_lora = np.zeros(d, dtype=np.float32)
+        grad_lora[:tk] = grad_logits / config.temperature
 
-        ranked = np.argsort(losses_p)[:top_k_keep]
-        avg_dA = np.zeros_like(orig_A)
-        avg_dB = np.zeros_like(orig_B)
-        total_w = 0.0
-        for idx in ranked:
-            merit = max(0.0, loss - losses_p[idx]) * 10.0 + 1.0
-            avg_dA += merit * perturbations[idx][0]
-            avg_dB += merit * perturbations[idx][1]
-            total_w += merit
+        # Backprop through LoRA: lora_out = h @ A.T @ B.T
+        # grad_A ≈ outer(B @ grad_lora, h) → (rank, d)
+        # grad_B ≈ outer(h, A @ grad_lora) → (d, rank)
+        grad_A_direct = np.outer(grad_lora[:forge.rank], h_input)  # (rank, d)
+        grad_B_direct = np.outer(h_input, grad_lora[:forge.rank])  # (d, rank)
 
-        if total_w > 0:
-            forge.A_basis[basis_idx] += lr * (avg_dA / total_w)
-            forge.B_basis[basis_idx] += lr * (avg_dB / total_w)
+        # Get softmax coefficients for this context+layer
+        ctx_flat = bc.to_flat(context).astype(np.float32)
+        ctx_proj = (ctx_flat @ forge.W_proj.T).astype(np.float32)
+        layer_emb = forge.layer_embeddings[layer_id]
+        combined = np.concatenate([ctx_proj, layer_emb])
+        from cubemind.execution.mindforge import gelu
+        h_hidden = np.asarray(gelu(combined @ forge.W_h.T + forge.b_h), dtype=np.float32)
+        coeffs_raw = h_hidden @ forge.W_coeff.T + forge.b_coeff
+        coeffs_exp = np.exp(coeffs_raw - np.max(coeffs_raw))
+        coeffs_soft = (coeffs_exp / np.sum(coeffs_exp)).astype(np.float32)
+
+        # Update each basis adapter proportional to its coefficient
+        for i in range(forge.n_basis):
+            w = float(coeffs_soft[i])
+            if w < 0.01:
+                continue
+            forge.A_basis[i] -= lr * w * np.clip(grad_A_direct, -0.1, 0.1).astype(np.float32)
+            forge.B_basis[i] -= lr * w * np.clip(grad_B_direct, -0.1, 0.1).astype(np.float32)
+
+        # Update output projection (W_proj) — scatter-add style
+        grad_proj = np.outer(
+            (grad_lora[:forge.W_proj.shape[0]]),
+            ctx_flat[:forge.W_proj.shape[1]],
+        )
+        if grad_proj.shape == forge.W_proj.shape:
+            forge.W_proj -= lr * 0.01 * np.clip(grad_proj, -0.01, 0.01).astype(np.float32)
 
         # Track loss
         loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
