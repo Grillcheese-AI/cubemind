@@ -50,16 +50,16 @@ _ROLE_SEEDS = {
     "STATE": 1000008,
 }
 
-# Populated lazily on first access (needs a BlockCodes instance)
+# Populated per-VM instance (depends on k, l dimensions)
 ROLES: dict[str, np.ndarray] = {}
 
 
-def _init_roles(bc: BlockCodes) -> None:
-    """Initialize universal role vectors (called once by VSAVM.__init__)."""
-    if ROLES:
-        return
+def _init_roles(bc: BlockCodes) -> dict[str, np.ndarray]:
+    """Generate universal role vectors for a specific BlockCodes instance."""
+    roles = {}
     for name, seed in _ROLE_SEEDS.items():
-        ROLES[name] = bc.random_discrete(seed=seed)
+        roles[name] = bc.random_discrete(seed=seed)
+    return roles
 
 
 # ── Cleanup Memory ───────────────────────────────────────────────────────
@@ -253,11 +253,17 @@ class VSAVM:
         # Cleanup memory (associative store for snapping noisy vectors to clean ones)
         self.cleanup_mem = CleanupMemory(bc)
 
+        # MindForge JIT (optional — set via vm.forge = MindForge(...))
+        self.forge: Any | None = None
+
         # Position vectors for SEQ (deterministic circular shifts)
         self._pos_cache: dict[int, np.ndarray] = {}
 
-        # Initialize universal role vectors
-        _init_roles(bc)
+        # Initialize universal role vectors (instance-level, dimension-specific)
+        self._roles = _init_roles(bc)
+        # Update global ROLES for backward compat (last-created VM wins)
+        global ROLES
+        ROLES = self._roles
 
     # ── Role Vectors ─────────────────────────────────────────────────────
 
@@ -346,6 +352,11 @@ class VSAVM:
             # ── Cleanup ─────────────────────────────────────────────
             case "CLEANUP":
                 return self._cleanup(*args)
+            # ── MindForge (JIT adapter generation) ──────────────────
+            case "FORGE":
+                return self._forge_adapter(*args)
+            case "FORGE_ALL":
+                return self._forge_all_adapters(*args)
             case _:
                 logger.warning("Unknown opcode: %s", opcode)
                 return None
@@ -538,7 +549,7 @@ class VSAVM:
         if register_name not in self.registers:
             return
 
-        role_vec = ROLES[role_name]
+        role_vec = self._roles[role_name]
 
         # Encode the filler as a block-code
         if isinstance(filler, int):
@@ -736,6 +747,26 @@ class VSAVM:
         name, clean = self.cleanup_mem.cleanup(self.registers[register_name])
         self.registers[register_name] = clean
         return name
+
+    # ── MindForge (JIT Adapter Generation) ─────────────────────────────
+
+    def _forge_adapter(
+        self, register_name: str, layer_id: int,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """FORGE reg layer_id — generate LoRA adapter from register context."""
+        if self.forge is None or register_name not in self.registers:
+            return None
+        context = self.registers[register_name]
+        return self.forge.forge(context, layer_id)
+
+    def _forge_all_adapters(
+        self, register_name: str,
+    ) -> list[tuple[np.ndarray, np.ndarray]] | None:
+        """FORGE_ALL reg — generate LoRA adapters for all layers."""
+        if self.forge is None or register_name not in self.registers:
+            return None
+        context = self.registers[register_name]
+        return self.forge.forge_all_layers(context)
 
     # ── Rule Learning ────────────────────────────────────────────────────
 

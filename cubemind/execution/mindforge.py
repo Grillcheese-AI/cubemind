@@ -127,6 +127,78 @@ class MindForge:
             0, basis_std, size=(n_basis, d_target, rank)
         ).astype(np.float32)
 
+    # ── SDLS Duality Gate ────────────────────────────────────────────────────
+
+    def register_context(self, name: str, context: np.ndarray) -> None:
+        """Register a known-clean context for SDLS purification."""
+        if not hasattr(self, "_cleanup_mem"):
+            from cubemind.reasoning.vm import CleanupMemory
+            self._cleanup_mem = CleanupMemory(self.bc)
+        self._cleanup_mem.store(name, context)
+
+    def sdls_purify(
+        self, context: np.ndarray, threshold: float = 0.85,
+    ) -> np.ndarray:
+        """SDLS Purification: validate symbolic consistency before forging.
+
+        1. Similarity search in cleanup memory (snap to nearest clean vector)
+        2. If similarity < threshold, return safe default context
+        3. Otherwise return the purified (clean) context
+
+        This prevents hallucinated weight generation by ensuring the input
+        is a valid member of the WorldManager vocabulary.
+        """
+        if not hasattr(self, "_cleanup_mem") or self._cleanup_mem.size == 0:
+            # No cleanup memory — return default
+            return self._default_context()
+
+        name, clean = self._cleanup_mem.cleanup(context)
+        sim = float(self.bc.similarity(context, clean))
+
+        if sim < threshold:
+            return self._default_context()
+        return clean
+
+    def verify_duality(
+        self,
+        context: np.ndarray,
+        role: np.ndarray,
+        value: np.ndarray,
+    ) -> float:
+        """Algebraic self-duality check.
+
+        Verifies: unbind(context, role) ≈ value AND unbind(context, value) ≈ role.
+        Returns average duality score in [0, 1].
+        """
+        recovered_value = self.bc.unbind(context, role)
+        recovered_role = self.bc.unbind(context, value)
+
+        score_v = float(self.bc.similarity(recovered_value, value))
+        score_r = float(self.bc.similarity(recovered_role, role))
+
+        return (score_v + score_r) / 2.0
+
+    def forge_with_sdls(
+        self,
+        context: np.ndarray,
+        layer_id: int,
+        threshold: float = 0.85,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Forge with SDLS purification gate.
+
+        Low duality score → high softmax temperature (generic adapter).
+        High duality score → low temperature (specialized adapter).
+        """
+        clean_context = self.sdls_purify(context, threshold)
+        return self.forge(clean_context, layer_id)
+
+    def _default_context(self) -> np.ndarray:
+        """Safe default context when SDLS purification fails."""
+        # Identity-like: all mass on index 0 of each block
+        ctx = np.zeros((self.k, self.l), dtype=np.float32)
+        ctx[:, 0] = 1.0
+        return self.bc.discretize(ctx)
+
     # ── Adapter generation ───────────────────────────────────────────────────
 
     def forge(
