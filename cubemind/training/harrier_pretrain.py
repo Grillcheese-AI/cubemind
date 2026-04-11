@@ -84,11 +84,11 @@ class HarrierPretrainConfig:
     # Training
     seq_len: int = 128
     n_ctx: int = 1024
-    lr: float = 2e-3
+    lr: float = 4e-3
     lr_min: float = 3e-4
     train_steps: int = 50000
     log_every: int = 100
-    save_every: int = 5000
+    save_every: int = 1000
     warmup_steps: int = 500
 
     # Distillation
@@ -113,7 +113,7 @@ class TeacherExtractor:
         self.model = Llama(
             model_path=config.teacher_path,
             n_ctx=config.n_ctx,
-            n_gpu_layers=n_gpu,
+            n_gpu_layers=-1,
             verbose=False,
             logits_all=True,
         )
@@ -121,7 +121,7 @@ class TeacherExtractor:
         self.top_k = config.top_k_logits
         logger.info("Teacher loaded: vocab={}, d_model={}", self.vocab_size, config.teacher_d_model)
 
-    def extract_from_text(self, text: str, max_tokens: int = 128) -> tuple[np.ndarray, np.ndarray]:
+    def extract_from_text(self, text: str, max_tokens: int = 512) -> tuple[np.ndarray, np.ndarray]:
         """Tokenize text with teacher's tokenizer and extract logits.
 
         Args:
@@ -428,7 +428,7 @@ def main():
     parser = argparse.ArgumentParser(description="Harrier 0.6B MindForge pre-training")
     parser.add_argument("--steps", type=int, default=50000)
     parser.add_argument("--seq-len", type=int, default=64)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--save-every", type=int, default=5000)
     parser.add_argument("--log-every", type=int, default=100)
     args = parser.parse_args()
@@ -439,6 +439,8 @@ def main():
         lr=args.lr,
         save_every=args.save_every,
         log_every=args.log_every,
+        k=16,
+        l=32
     )
     train(config)
 
