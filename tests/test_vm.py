@@ -1192,3 +1192,171 @@ class TestDebate:
         ]
         vm.run(program)
         assert vm.step_count > 0
+
+
+# ── DECODE ───────────────────────────────────────────────────────────────
+
+
+class TestDecode:
+    """DECODE maps a block-code → discrete answer from a codebook."""
+
+    def test_decode_finds_exact_match(self, vm, bc):
+        codebook = bc.codebook_discrete(n=5, seed=42)
+        vm.execute("CREATE", "answer", "result")
+        vm.registers["answer"] = codebook[2].copy()
+
+        label, confidence = vm.execute("DECODE", "answer", codebook)
+        assert label == 2
+        assert confidence > 0.9
+
+    def test_decode_returns_best_match(self, vm, bc):
+        codebook = bc.codebook_discrete(n=5, seed=42)
+        vm.execute("CREATE", "answer", "result")
+        # Slightly noisy version of codebook[3]
+        noisy = bc.discretize(
+            codebook[3].astype(np.float32)
+            + np.random.default_rng(99).normal(0, 0.05, codebook[3].shape).astype(np.float32)
+        )
+        vm.registers["answer"] = noisy
+
+        label, confidence = vm.execute("DECODE", "answer", codebook)
+        assert label == 3
+
+    def test_decode_with_labels(self, vm, bc):
+        codebook = bc.codebook_discrete(n=3, seed=42)
+        labels = ["cat", "dog", "fish"]
+        vm.execute("CREATE", "x", "thing")
+        vm.registers["x"] = codebook[1].copy()
+
+        label, _ = vm.execute("DECODE", "x", codebook, labels)
+        assert label == "dog"
+
+
+# ── SCORE (CVL value estimation) ─────────────────────────────────────────
+
+
+class TestScore:
+    """SCORE evaluates candidate answers via contrastive value estimation."""
+
+    def test_score_returns_array(self, vm, bc):
+        d = K * L
+        cvl = vm._get_or_create_cvl(d)
+        vm.execute("CREATE", "state", "context")
+        vm.execute("ASSIGN", "state", 1)
+        candidates = [bc.random_discrete(seed=i) for i in range(4)]
+
+        scores = vm.execute("SCORE", "state", candidates)
+        assert isinstance(scores, np.ndarray)
+        assert len(scores) == 4
+
+    def test_score_returns_finite(self, vm, bc):
+        """Scores should be finite floats (CVL untrained = near-zero is OK)."""
+        d = K * L
+        vm._get_or_create_cvl(d)
+        vm.execute("CREATE", "state", "context")
+        vm.execute("ASSIGN", "state", 1)
+        candidates = [bc.random_discrete(seed=i) for i in range(4)]
+
+        scores = vm.execute("SCORE", "state", candidates)
+        assert np.all(np.isfinite(scores))
+
+
+# ── SPECIALIZE (WorldManager) ────────────────────────────────────────────
+
+
+class TestSpecialize:
+    """SPECIALIZE finds or creates a specialist domain in WorldManager."""
+
+    def test_specialize_creates_new(self, vm, bc):
+        before = bc.random_discrete(seed=42)
+        after = bc.random_discrete(seed=43)
+        result = vm.execute("SPECIALIZE", before, after)
+        assert result is not None
+        assert "world_id" in result
+
+    def test_specialize_consolidates_similar(self, vm, bc):
+        before = bc.random_discrete(seed=42)
+        after = bc.random_discrete(seed=43)
+        r1 = vm.execute("SPECIALIZE", before, after)
+
+        # Same transition should consolidate
+        r2 = vm.execute("SPECIALIZE", before, after)
+        assert r1["world_id"] == r2["world_id"]
+
+    def test_specialize_spawns_for_different(self, vm, bc):
+        r1 = vm.execute("SPECIALIZE", bc.random_discrete(seed=10), bc.random_discrete(seed=11))
+        r2 = vm.execute("SPECIALIZE", bc.random_discrete(seed=20), bc.random_discrete(seed=21))
+        # Different transitions should spawn different specialists
+        assert r1["world_id"] != r2["world_id"]
+
+
+# ── EXPLORE (bandit strategy selection) ──────────────────────────────────
+
+
+class TestExplore:
+    """EXPLORE selects which strategy/rule to try via UCB bandit."""
+
+    def test_explore_returns_index(self, vm):
+        idx = vm.execute("EXPLORE", 4)  # 4 arms
+        assert isinstance(idx, int)
+        assert 0 <= idx < 4
+
+    def test_explore_then_reward(self, vm):
+        idx = vm.execute("EXPLORE", 4)
+        # Reward the selected arm
+        vm.execute("REWARD", idx, 1.0)
+        # Should not crash
+
+    def test_explore_converges(self, vm):
+        """After many rewards on arm 2, EXPLORE should prefer arm 2."""
+        # Initialize bandit by first EXPLORE
+        vm.execute("EXPLORE", 4)
+
+        for _ in range(50):
+            vm.execute("REWARD", 2, 1.0)
+            vm.execute("REWARD", 0, 0.1)
+            vm.execute("REWARD", 1, 0.1)
+            vm.execute("REWARD", 3, 0.1)
+
+        # Sample 20 times, arm 2 should be selected most often
+        counts = [0] * 4
+        for _ in range(20):
+            idx = vm.execute("EXPLORE", 4)
+            counts[idx] += 1
+        assert counts[2] > max(counts[0], counts[1], counts[3]), (
+            f"Arm 2 should be preferred: {counts}"
+        )
+
+
+# ── REMEMBER / FORGET (hippocampal episodic) ─────────────────────────────
+
+
+class TestEpisodicMemory:
+    """REMEMBER stores episodes, FORGET removes old ones."""
+
+    def test_remember_stores_episode(self, vm, bc):
+        v = bc.random_discrete(seed=42)
+        vm.execute("CREATE", "ctx", "episode")
+        vm.registers["ctx"] = v
+
+        vm.execute("REMEMBER", "ctx")
+        # Should be findable via RECALL
+        result = vm.execute("RECALL", "ctx")
+        assert result is not None
+
+    def test_remember_multiple(self, vm, bc):
+        for i in range(5):
+            vm.execute("CREATE", f"ep_{i}", "episode")
+            vm.registers[f"ep_{i}"] = bc.random_discrete(seed=i)
+            vm.execute("REMEMBER", f"ep_{i}")
+
+        # All should be stored
+        assert vm.cleanup_mem.size >= 5 or len(vm._memory) >= 5
+
+    def test_forget_clears_register(self, vm, bc):
+        vm.execute("CREATE", "temp", "episode")
+        vm.execute("ASSIGN", "temp", 42)
+        vm.execute("REMEMBER", "temp")
+
+        vm.execute("FORGET", "temp")
+        assert "temp" not in vm.registers

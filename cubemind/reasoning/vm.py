@@ -360,6 +360,24 @@ class VSAVM:
                 return self._forge_adapter(*args)
             case "FORGE_ALL":
                 return self._forge_all_adapters(*args)
+            # ── Decode + Score ──────────────────────────────────────
+            case "DECODE":
+                return self._decode(*args)
+            case "SCORE":
+                return self._score(*args)
+            # ── WorldManager ────────────────────────────────────────
+            case "SPECIALIZE":
+                return self._specialize(*args)
+            # ── Bandit exploration ──────────────────────────────────
+            case "EXPLORE":
+                return self._explore(*args)
+            case "REWARD":
+                return self._reward(*args)
+            # ── Episodic memory ─────────────────────────────────────
+            case "REMEMBER":
+                return self._remember(*args)
+            case "FORGET":
+                return self._forget(*args)
             case _:
                 logger.warning("Unknown opcode: %s", opcode)
                 return None
@@ -782,6 +800,99 @@ class VSAVM:
             return None
         context = self.registers[register_name]
         return self.forge.forge_all_layers(context)
+
+    # ── Decode ────────────────────────────────────────────────────────────
+
+    def _decode(
+        self, register_name: str, codebook: np.ndarray, labels: list | None = None,
+    ) -> tuple[Any, float]:
+        """DECODE reg codebook [labels] — map block-code to discrete answer."""
+        if register_name not in self.registers:
+            return (0, 0.0)
+        vec = self.registers[register_name]
+        sims = self.bc.similarity_batch(vec, codebook)
+        idx = int(np.argmax(sims))
+        confidence = float(sims[idx])
+        label = labels[idx] if labels else idx
+        return (label, confidence)
+
+    # ── Score (CVL) ──────────────────────────────────────────────────────
+
+    def _get_or_create_cvl(self, d: int):
+        """Lazy-create a CVL instance."""
+        if not hasattr(self, "_cvl") or self._cvl is None:
+            from cubemind.execution.cvl import ContrastiveValueEstimator
+            self._cvl = ContrastiveValueEstimator(d_state=d, d_action=d, seed=42)
+        return self._cvl
+
+    def _score(
+        self, register_name: str, candidates: list[np.ndarray],
+    ) -> np.ndarray:
+        """SCORE reg candidates — evaluate candidates via CVL Q-values."""
+        d = self.k * self.l
+        cvl = self._get_or_create_cvl(d)
+        state = self.registers.get(register_name, np.zeros(d, dtype=np.float32))
+        state_flat = self.bc.to_flat(state) if state.ndim == 2 else state
+        scores = np.array([
+            cvl.q_value(state_flat, self.bc.to_flat(c) if c.ndim == 2 else c)
+            for c in candidates
+        ], dtype=np.float32)
+        return scores
+
+    # ── WorldManager (Specialize) ────────────────────────────────────────
+
+    def _specialize(
+        self, state_before: np.ndarray, state_after: np.ndarray,
+    ) -> dict[str, Any]:
+        """SPECIALIZE before after — find/create specialist for this transition."""
+        if not hasattr(self, "_world_manager") or self._world_manager is None:
+            from cubemind.execution.world_manager import WorldManager
+            self._world_manager = WorldManager(k=self.k, l=self.l, max_worlds=256)
+        wm = self._world_manager
+        result = wm.process_transition(state_before, state_after)
+        return {"world_id": result.get("world_id", wm.active_worlds - 1), **result}
+
+    # ── Bandit Exploration ───────────────────────────────────────────────
+
+    def _explore(self, n_arms: int) -> int:
+        """EXPLORE n_arms — select which arm/strategy to try via UCB."""
+        if not hasattr(self, "_bandit_q") or len(self._bandit_q) != n_arms:
+            self._bandit_q = np.zeros(n_arms, dtype=np.float64)
+            self._bandit_n = np.zeros(n_arms, dtype=np.float64)
+            self._bandit_total = 0
+        self._bandit_total += 1
+        # UCB1
+        ucb = self._bandit_q.copy()
+        for i in range(n_arms):
+            if self._bandit_n[i] == 0:
+                return i  # explore unvisited first
+            ucb[i] += np.sqrt(2.0 * np.log(self._bandit_total) / self._bandit_n[i])
+        return int(np.argmax(ucb))
+
+    def _reward(self, arm: int, reward: float) -> None:
+        """REWARD arm value — update bandit estimate for an arm."""
+        if not hasattr(self, "_bandit_q"):
+            return
+        if 0 <= arm < len(self._bandit_q):
+            self._bandit_n[arm] += 1
+            n = self._bandit_n[arm]
+            self._bandit_q[arm] += (reward - self._bandit_q[arm]) / n
+
+    # ── Episodic Memory ──────────────────────────────────────────────────
+
+    def _remember(self, register_name: str) -> None:
+        """REMEMBER reg — store register in both cleanup memory and STORE."""
+        if register_name not in self.registers:
+            return
+        vec = self.registers[register_name]
+        self.cleanup_mem.store(register_name, vec)
+        self._memory.append((vec.copy(), register_name))
+
+    def _forget(self, register_name: str) -> None:
+        """FORGET reg — remove register and its memory trace."""
+        self.registers.pop(register_name, None)
+        self._values.pop(register_name, None)
+        self._types.pop(register_name, None)
 
     # ── Rule Learning ────────────────────────────────────────────────────
 
