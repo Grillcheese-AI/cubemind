@@ -286,3 +286,174 @@ class TestRuleLearning:
         # Store the trace as a named rule
         vm.store_rule("addition_pattern")
         assert "addition_pattern" in vm.rules
+
+
+# ── UNIVERSAL ROLES ──────────────────────────────────────────────────────
+
+
+class TestUniversalRoles:
+    """Test that the VM provides universal role vectors for structured binding."""
+
+    def test_roles_exist(self, vm):
+        """VM should expose universal role vectors."""
+        from cubemind.reasoning.vm import ROLES
+        expected = ["AGENT", "ACTION", "OBJECT", "QUANTITY", "SOURCE",
+                    "DESTINATION", "CONTEXT", "STATE"]
+        for role in expected:
+            assert role in ROLES
+            assert ROLES[role].shape == (K, L)
+
+    def test_roles_are_dissimilar(self, vm, bc):
+        """Universal roles should be near-orthogonal (low similarity)."""
+        from cubemind.reasoning.vm import ROLES
+        names = list(ROLES.keys())
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                sim = float(bc.similarity(ROLES[names[i]], ROLES[names[j]]))
+                assert abs(sim) < 0.3, (
+                    f"Roles {names[i]} and {names[j]} too similar: {sim:.3f}"
+                )
+
+    def test_bind_agent_object_quantity(self, vm, bc):
+        """BIND_ROLE creates structured representation from role-filler pairs."""
+        vm.execute("CREATE", "john", "person")
+        vm.execute("BIND_ROLE", "john", "AGENT", "john_entity")
+        vm.execute("BIND_ROLE", "john", "OBJECT", "apple")
+        vm.execute("BIND_ROLE", "john", "QUANTITY", 5)
+
+        # Should be able to unbind and recover
+        result = vm.execute("UNBIND_ROLE", "john", "QUANTITY")
+        assert result == 5
+
+    def test_unbind_agent(self, vm, bc):
+        """UNBIND_ROLE recovers the filler from a role-bound register."""
+        vm.execute("CREATE", "event", "action")
+        vm.execute("BIND_ROLE", "event", "AGENT", "mary")
+        vm.execute("BIND_ROLE", "event", "ACTION", "gives")
+
+        agent = vm.execute("UNBIND_ROLE", "event", "AGENT")
+        assert agent == "mary"
+
+    def test_structured_state_bundle(self, vm, bc):
+        """Multiple role bindings bundle into a single structured state."""
+        vm.execute("CREATE", "state", "snapshot")
+        vm.execute("BIND_ROLE", "state", "AGENT", "john")
+        vm.execute("BIND_ROLE", "state", "OBJECT", "apple")
+        vm.execute("BIND_ROLE", "state", "QUANTITY", 5)
+        vm.execute("BIND_ROLE", "state", "ACTION", "has")
+
+        # All fillers recoverable from the same register
+        assert vm.execute("UNBIND_ROLE", "state", "AGENT") == "john"
+        assert vm.execute("UNBIND_ROLE", "state", "OBJECT") == "apple"
+        assert vm.execute("UNBIND_ROLE", "state", "QUANTITY") == 5
+        assert vm.execute("UNBIND_ROLE", "state", "ACTION") == "has"
+
+
+# ── PATTERN DISCOVERY ────────────────────────────────────────────────────
+
+
+class TestPatternDiscovery:
+    """Test that the VM discovers patterns in sequences of block-codes
+    without knowing what the attributes mean."""
+
+    def test_diff_detects_change(self, vm, bc):
+        """DIFF(a, b) returns a delta vector representing what changed."""
+        v0 = bc.random_discrete(seed=10)
+        v1 = bc.random_discrete(seed=20)
+
+        delta = vm.execute("DIFF", v0, v1)
+        assert delta.shape == (K, L)
+        # Delta should not be zero (vectors are different)
+        assert not np.allclose(delta, 0)
+
+    def test_diff_same_vectors_is_identity(self, vm, bc):
+        """DIFF of identical vectors should be close to identity/zero-change."""
+        v0 = bc.random_discrete(seed=10)
+        delta = vm.execute("DIFF", v0, v0)
+        # Binding a vector with itself → identity-like (high self-sim)
+        assert delta.shape == (K, L)
+
+    def test_detect_constant_pattern(self, vm, bc):
+        """DETECT_PATTERN on identical vectors → 'constant'."""
+        v = bc.random_discrete(seed=42)
+        sequence = [v, v, v]
+        pattern = vm.execute("DETECT_PATTERN", sequence)
+        assert pattern["type"] == "constant"
+
+    def test_detect_progression_pattern(self, vm, bc):
+        """DETECT_PATTERN on vectors with consistent deltas → 'progression'."""
+        # Create a progression: v0, v0⊕δ, v0⊕δ⊕δ
+        v0 = bc.random_discrete(seed=10)
+        delta = bc.random_discrete(seed=99)
+        v1 = bc.bind(v0, delta)
+        v2 = bc.bind(v1, delta)
+        sequence = [v0, v1, v2]
+
+        pattern = vm.execute("DETECT_PATTERN", sequence)
+        assert pattern["type"] == "progression"
+        assert pattern["delta"].shape == (K, L)
+
+    def test_predict_next_constant(self, vm, bc):
+        """PREDICT on a constant sequence returns the same vector."""
+        v = bc.random_discrete(seed=42)
+        sequence = [v, v, v]
+        predicted = vm.execute("PREDICT", sequence)
+        sim = float(bc.similarity(predicted, v))
+        assert sim > 0.9, f"Constant prediction should match: sim={sim:.3f}"
+
+    def test_predict_next_progression(self, vm, bc):
+        """PREDICT on a progression applies the delta one more time."""
+        v0 = bc.random_discrete(seed=10)
+        delta = bc.random_discrete(seed=99)
+        v1 = bc.bind(v0, delta)
+        v2 = bc.bind(v1, delta)
+        expected = bc.bind(v2, delta)  # v3 = v2 ⊕ δ
+
+        sequence = [v0, v1, v2]
+        predicted = vm.execute("PREDICT", sequence)
+
+        sim = float(bc.similarity(predicted, expected))
+        assert sim > 0.9, f"Progression prediction should match: sim={sim:.3f}"
+
+    def test_match_selects_best_candidate(self, vm, bc):
+        """MATCH finds the candidate most similar to the target."""
+        target = bc.random_discrete(seed=42)
+        candidates = [
+            bc.random_discrete(seed=100),
+            bc.random_discrete(seed=200),
+            target.copy(),  # this one should win
+            bc.random_discrete(seed=300),
+        ]
+        best_idx = vm.execute("MATCH", target, candidates)
+        assert best_idx == 2
+
+    def test_full_raven_style_solve(self, vm, bc):
+        """End-to-end: detect pattern in 3 panels, predict 4th, match answer.
+
+        This is the RAVEN solving pipeline — without knowing what the
+        'attributes' are. The VM just sees block-codes and finds structure.
+        """
+        # Create a progression pattern
+        v0 = bc.random_discrete(seed=10)
+        delta = bc.random_discrete(seed=50)
+        v1 = bc.bind(v0, delta)
+        v2 = bc.bind(v1, delta)
+        v3_expected = bc.bind(v2, delta)
+
+        # Create answer candidates (one correct, rest random)
+        candidates = [
+            bc.random_discrete(seed=200),
+            bc.random_discrete(seed=300),
+            v3_expected.copy(),
+            bc.random_discrete(seed=400),
+            bc.random_discrete(seed=500),
+        ]
+
+        # The VM program to solve it
+        program = [
+            ("DETECT_PATTERN", [v0, v1, v2]),
+            ("PREDICT", [v0, v1, v2]),
+            ("MATCH", None, candidates),  # None = use last predicted
+        ]
+        result = vm.run(program)
+        assert result == 2  # index of correct answer
