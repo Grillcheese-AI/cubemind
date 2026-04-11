@@ -581,13 +581,13 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
                 param = getattr(model.forge, fk)
                 opt.step(param, fg)
 
-            # ── Embedding gradients (scatter-add + AdamW) ────────────
+            # ── Embedding gradients (sparse SGD — per-token, can't batch) ─
             for t in range(S):
                 tok = int(ids[t])
                 if 0 <= tok < cfg.vocab_size:
-                    opt.step(model.embed[tok], dx[t])
+                    model.embed[tok] -= cfg.lr * np.clip(dx[t], -0.1, 0.1)
                     dcaps = (dx[t] @ model.capsule_proj).astype(np.float32)
-                    opt.step(model.capsule_embed[tok], dcaps)
+                    model.capsule_embed[tok] -= cfg.lr * np.clip(dcaps, -0.1, 0.1)
 
             # ── Re-upload to GPU if active ───────────────────────────
             if model._gpu_handle is not None:
