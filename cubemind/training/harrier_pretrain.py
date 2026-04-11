@@ -277,9 +277,8 @@ def train(config: HarrierPretrainConfig | None = None):
             elapsed = time.time() - t0
             sps = (step + 1) / elapsed if elapsed > 0 else 0
             logger.info(
-                "step={:6d} | loss={:.4f} | ema={:.4f} | entropy={:.3f} | "
-                "adapter_var={:.4f} | lr={:.6f} | {:.1f} stp/s",
-                step, loss, loss_ema, teacher_entropy, adapter_var, lr, sps,
+                "step={:6d} | loss={:.4f} | ema={:.4f} | lr={:.6f} | {:.1f} stp/s",
+                step, loss, loss_ema, lr, sps,
             )
 
         if step % config.save_every == 0 and step > 0:
