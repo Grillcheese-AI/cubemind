@@ -1,146 +1,246 @@
-# CubeMind VSA Virtual Machine — Design Spec
+# CubeMind VSA Virtual Machine — Architecture & Reference
 
 ## Overview
 
 A virtual machine where registers are hypervectors, instructions are VSA operations,
-and programs are sequences of block-code transformations. Language-independent by design —
-the encoder maps any natural language to block-codes, then the VM executes purely in VSA space.
+and programs are sequences of block-code transformations. Language-independent — the
+encoder maps any natural language to block-codes, then the VM reasons purely in VSA space.
 
-## Architecture
+**Key property: the VM discovers rules from examples (DISCOVER), it doesn't need
+hardcoded instruction sequences.** Show it (input, output) pairs and it figures out
+what happened, stores the rule, and replays it on new data.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        VSA-VM Runtime                           │
-│                                                                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │ Registers │  │  Stack   │  │   ALU    │  │ Inst. Decoder │  │
-│  │ (named   │  │ (Hippo-  │  │ (Block   │  │ (Primitive    │  │
-│  │  block-  │  │  campal  │  │  Codes)  │  │  Detector)    │  │
-│  │  codes)  │  │  memory) │  │          │  │               │  │
-│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘  │
-│                                                                 │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
-│  │  Cache   │  │  Memory  │  │ Program  │  │     JIT       │  │
-│  │ (VSA     │  │ (World   │  │ Counter  │  │ (MindForge    │  │
-│  │  Cache)  │  │ Manager) │  │ (Liquid  │  │  adapter      │  │
-│  │          │  │          │  │  Cell)   │  │  forge)       │  │
-│  └──────────┘  └──────────┘  └──────────┘  └───────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-## Instruction Set (~15 primitives)
-
-All instructions operate on block-code vectors of shape (k, l).
+## Instruction Set (45 opcodes)
 
 ### State Operations
-| Opcode | Args | VSA Operation | NL Examples |
-|--------|------|---------------|-------------|
-| ASSIGN | var, val | bind(role, val) | "X is 5", "X = 5" |
-| TRANSFER | src, dst, n | unbind(src, n) + bind(dst, n) | "gives to", "moves from" |
-| CREATE | var, type | alloc register + bind(type_role, type) | "there is a basket" |
-| DESTROY | var | zero register | "is gone", "disappears" |
+| Opcode | Args | Description |
+|--------|------|-------------|
+| CREATE | var, type | Allocate register with type binding |
+| DESTROY | var | Deallocate register |
+| ASSIGN | var, val | Bind integer value into register |
 
 ### Arithmetic
-| Opcode | Args | VSA Operation | NL Examples |
-|--------|------|---------------|-------------|
-| ADD | var, n | bundle(var, n_vec) | "gets more", "receives" |
-| SUB | var, n | unbind(var, n_vec) | "loses", "gives away" |
-| MUL | var, factor | repeated bundle / scale | "doubles", "triples" |
-| DIV | var, divisor | partition bundle | "split equally", "shared among" |
+| Opcode | Args | Description |
+|--------|------|-------------|
+| ADD | var, n | Increment by n |
+| SUB | var, n | Decrement by n |
+| MUL | var, n | Multiply by n |
+| DIV | var, n | Integer divide (div by 0 → 0) |
+| TRANSFER | src, dst, n | Move n from src to dst |
 
-### Relations
-| Opcode | Args | VSA Operation | NL Examples |
-|--------|------|---------------|-------------|
-| COMPARE | a, b, op | similarity(a, b) vs threshold | "more than", "less than" |
-| CONTAINS | container, item | similarity(unbind(container, item_role)) | "is in", "has" |
+### Data Movement
+| Opcode | Args | Description |
+|--------|------|-------------|
+| COPY | src, dst | Copy register (block-code + value) |
+| PUSH | reg | Save register to LIFO stack |
+| POP | reg | Restore register from stack |
 
 ### Control Flow
-| Opcode | Args | VSA Operation | NL Examples |
-|--------|------|---------------|-------------|
-| SEQ | op1, op2 | permute (position encoding) | temporal order |
-| COND | test, then, else | gate = sim(test, true); blend | "if", "when" |
-| LOOP | cond, body | repeat until similarity drops | "while", "for each" |
-| QUERY | var | unbind(state, query_role) | "how many", "how much" |
+| Opcode | Args | Description |
+|--------|------|-------------|
+| COND | var, target, then, [else] | If var==target: run then, else: run else |
+| LOOP | var, target, cond, body, [max_iter] | While cond holds: run body |
+| JMP | label | Jump to named label (forward or backward) |
+| LABEL | name | No-op marker for jump targets |
+| CALL | rule_name | Execute a stored rule (subroutine) |
+| SKIP / PASS | — | Explicit no-op (confounder detected) |
+
+### Relations
+| Opcode | Args | Description |
+|--------|------|-------------|
+| COMPARE | a, b | Compare values → "equal"/"less"/"greater" |
+| QUERY | var | Return integer value of register |
 
 ### Memory
-| Opcode | Args | VSA Operation | NL Examples |
-|--------|------|---------------|-------------|
-| STORE | pattern, rule | bind(signature, solution) → WorldManager | learn rule |
-| RECALL | pattern | similarity_search → Hippocampus | reuse rule |
+| Opcode | Args | Description |
+|--------|------|-------------|
+| STORE | var, rule_name | Store block-code in memory |
+| RECALL | var | Find most similar stored memory |
+| CLEANUP | reg | Snap register to nearest clean vector |
+| REMEMBER | reg | Store in cleanup memory + memory store |
+| FORGET | reg | Remove register and memory trace |
 
-## Register File
+### Universal Roles (8 roles)
+| Opcode | Args | Description |
+|--------|------|-------------|
+| BIND_ROLE | reg, role, filler | Bind role-filler pair into register |
+| UNBIND_ROLE | reg, role | Recover filler from role binding |
 
-Named registers, each a (k, l) block-code:
-- R0..Rn — general purpose (entities in the problem)
-- ACC — accumulator (current computation result)
-- CTX — context register (problem type signature)
-- PC — program counter (LiquidCell hidden state)
-- FLAGS — comparison results (similarity scores)
+Roles: AGENT, ACTION, OBJECT, QUANTITY, SOURCE, DESTINATION, CONTEXT, STATE
 
-## Execution Model
+### Pattern Discovery
+| Opcode | Args | Description |
+|--------|------|-------------|
+| DIFF | a, b | Compute delta between two block-codes |
+| DETECT_PATTERN | [v0, v1, ...] | Classify: constant/progression/unknown |
+| PREDICT | [v0, v1, ...] | Apply detected pattern to predict next |
+| MATCH | target, candidates | Find best candidate by similarity |
 
-```python
-class VSAVM:
-    def __init__(self, bc: BlockCodes):
-        self.bc = bc
-        self.registers = {}          # name → (k, l) block-code
-        self.acc = bc.zero()         # accumulator
-        self.ctx = bc.zero()         # context
-        self.pc = LiquidCell(...)    # program counter (temporal state)
-        self.stack = HippocampalFormation(...)  # episodic stack
-        self.memory = WorldManager(...)         # long-term knowledge
-        self.cache = VSACache(...)              # working memory
-        self.forge = MindForge(...)             # JIT adapter generation
+### Rule Discovery (HDR Algorithm)
+| Opcode | Args | Description |
+|--------|------|-------------|
+| DISCOVER | input, output | Induce rule from single (in, out) pair |
+| DISCOVER_SEQUENCE | [(in,out), ...] | Induce rules from multiple examples with clustering |
 
-    def execute(self, instruction: str, *args):
-        """Dispatch a single VSA primitive."""
-        match instruction:
-            case "ASSIGN":  self._assign(*args)
-            case "TRANSFER": self._transfer(*args)
-            case "ADD":     self._add(*args)
-            case "SUB":     self._sub(*args)
-            case "COMPARE": self._compare(*args)
-            case "QUERY":   return self._query(*args)
-            case "STORE":   self._store(*args)
-            case "RECALL":  return self._recall(*args)
-            ...
+### Sequence (Position-Aware)
+| Opcode | Args | Description |
+|--------|------|-------------|
+| SEQ | [v0, v1, ...] | Encode ordered sequence (order matters) |
+| UNSEQ | seq_vec, position | Recover element at position |
 
-    def run(self, program: list[tuple]):
-        """Execute a sequence of (opcode, *args) tuples."""
-        for instr in program:
-            result = self.execute(instr[0], *instr[1:])
-            self.pc.step(self.acc)  # advance temporal state
-        return self.acc
+### Reasoning
+| Opcode | Args | Description |
+|--------|------|-------------|
+| DEBATE | [candidates] | HD-GoT consensus (spike diffusion + message passing) |
+| ASK | objects, question | VQA via spatial semantic pointers |
+
+### JIT Compiler (MindForge)
+| Opcode | Args | Description |
+|--------|------|-------------|
+| FORGE | reg, layer_id | Generate LoRA adapter from context |
+| FORGE_ALL | reg | Generate adapters for all layers |
+
+### Decode & Score
+| Opcode | Args | Description |
+|--------|------|-------------|
+| DECODE | reg, codebook, [labels] | Block-code → discrete answer |
+| SCORE | reg, candidates | CVL contrastive value estimation |
+
+### Specialists (WorldManager)
+| Opcode | Args | Description |
+|--------|------|-------------|
+| SPECIALIZE | before, after | Find/create domain specialist |
+
+### Exploration (Bandit)
+| Opcode | Args | Description |
+|--------|------|-------------|
+| EXPLORE | n_arms | UCB1 bandit arm selection |
+| REWARD | arm, value | Update bandit estimate |
+
+## Key Components
+
+### HyperSeed (Fractional Power Encoding)
+
+Encodes integers as block-codes with two properties:
+- **Similarity gradient**: sim(v[n], v[n+1]) > sim(v[n], v[n+100])
+- **VSA arithmetic**: bind(v[a], v[b]) ≈ v[a+b]
+
+Uses continuous-domain fractional phase rotation before discretization.
+
+Reference: Rachkovskij et al. "Analogical Mapping with VSA" (HyperSeed),
+Plate (2003) FPE for continuous data.
+
+### CleanupMemory (Associative Denoiser)
+
+Stores known-clean block-codes and snaps noisy vectors to nearest match.
+Essential for HDR rule discovery — after bundling/binding accumulates noise,
+cleanup projects back to a valid symbolic primitive.
+
+Maps to SDLS (Self-Dual Latent Space) purification in MindForge.
+
+### Rule Discovery (DISCOVER / DISCOVER_SEQUENCE)
+
+The brain of the VM — discovers transformation rules from examples WITHOUT
+hardcoded opcodes.
+
+**Algorithm (HDR — Hypervector Discover Rule):**
+1. For each (input, output) pair: delta = unbind(output, input)
+2. Check if delta is identity (constant rule) or a transformation (bind rule)
+3. Cluster deltas by similarity (greedy nearest-neighbor)
+4. Each cluster = one discovered rule with centroid delta
+5. Rule confidence = cluster size (count)
+
+**Confounder detection:**
+- Real rules cluster well (high count per cluster)
+- Confounders scatter (low count, many clusters)
+- The VM tests each attribute independently and picks the one with highest confidence
+
+**Self-programming cycle:**
+1. DISCOVER_SEQUENCE on examples → find rules
+2. REMEMBER the discovered deltas
+3. On new input → RECALL matching rule → apply delta → MATCH answer
+
+### SDLS Duality Gate (MindForge Integration)
+
+Before MindForge forges LoRA adapters, the context block-code passes through:
+1. CleanupMemory lookup → snap to nearest known context
+2. Duality check: unbind(bind(role, val), role) ≈ val in both directions
+3. If duality score < threshold → use safe default (generic adapter)
+4. If high → forge specialized adapter (sharp softmax temperature)
+
+Prevents hallucinated weight generation from noisy/invalid contexts.
+
+### Position-Aware Sequence (SEQ/UNSEQ)
+
+Encodes ordered sequences via per-position binding:
+```
+seq = Σ bind(v[i], pos[i])
+```
+This ensures 'A then B' ≠ 'B then A' — position vectors use per-block
+prime-shifted impulses for maximum discrimination.
+
+## Module Integration Map
+
+```
+Existing Module                    VM Opcode           Status
+──────────────────                 ─────────           ──────
+ops/block_codes.py                 ALU (all ops)       ✅
+reasoning/hd_got.py + vs_graph.py  DEBATE              ✅
+execution/mindforge.py             FORGE, FORGE_ALL    ✅ + SDLS gate
+execution/decoder.py               DECODE              ✅
+execution/cvl.py                   SCORE               ✅
+execution/world_manager.py         SPECIALIZE          ✅
+experimental/bandits.py            EXPLORE, REWARD     ✅
+reasoning/vqa.py                   ASK                 ✅
+memory (cleanup + store)           REMEMBER, FORGET    ✅
+reasoning/vm.py                    DISCOVER*           ✅ (core innovation)
 ```
 
-## The Primitive Detector
+## Safety Guards
 
-Maps VSA context → opcode. This is the "decoder" that figures out which
-primitive to execute from a block-code representation of the input.
+- **max_instructions** (default 10000) prevents runaway programs
+- **max_iter** on LOOP prevents infinite while-loops
+- **JMP to unknown label** is a no-op (not a crash)
+- **POP on empty stack** is a no-op
+- **CALL on unknown rule** is a no-op
+- **DIV by zero** returns 0 (not exception)
+- **SDLS duality gate** prevents hallucinated MindForge weights
+- **CleanupMemory** snaps noisy vectors to valid primitives
 
-Two approaches (composable):
-1. **HMM-based**: HMMRule detects operation patterns from sequence of block-codes
-2. **Forged**: MindForge generates a classifier adapter per problem type
+## Performance Notes
 
-The detector doesn't need to be language-specific — it operates on block-codes
-that are already language-independent (the encoder handled that).
+At production dims (k=80, l=128, d=10240):
+- CleanupMemory linear scan → needs C++ with grilly's `hamming_topk`
+- HyperSeed decode brute-force → needs C++ with `faiss_topk`
+- DISCOVER_SEQUENCE clustering → O(n²) similarity → batch via grilly GPU
+- DEBATE (HD-GoT) → spike diffusion + message passing → grilly GPU
 
-## Rule Learning (Self-Programming)
+The Python VM gets the semantics right. The C++ port (cubemind/cpp/) will
+optimize the hot paths using the grilly Vulkan backend.
 
-When the VM solves a new problem type:
-1. Record the instruction trace (sequence of primitives)
-2. Bind the trace to the problem signature: bind(problem_type, trace)
-3. Store in WorldManager
-4. Next time a similar problem appears: RECALL → get the trace → replay
+## I-RAVEN-X Integration
 
-This is how the VM programs itself — it discovers rules from examples
-and stores them as reusable "programs" in VSA space.
+The VM solves I-RAVEN-X problems via:
+1. Encode integer attributes (Type, Size, Color) via HyperSeed
+2. DISCOVER_SEQUENCE per attribute from example rows
+3. Identify real rule (highest cluster count) vs confounders (scattered)
+4. SKIP confounders
+5. Apply discovered delta to predict missing panel
+6. MATCH against candidates
 
-## Properties
+Current accuracy at k=8, l=64: limited (FPE resolution too low).
+Path to production accuracy:
+- k=80, l=128 → more resolution for integer encoding
+- Wire integer-domain detectors (rule_detectors.py) as fallback
+- Image pipeline (iravenx_image.py) for visual RAVEN problems
+- C++ port for 10240-dim operations
 
-- **Language-independent**: Encoder maps NL → block-codes; VM operates purely in VSA space
-- **Continuous**: All operations are differentiable (can train end-to-end)
-- **Compositional**: New programs built from combinations of ~15 primitives
-- **Self-programming**: Learns rules from examples, stores for reuse
-- **Fault-tolerant**: VSA operations degrade gracefully with noise
-- **Hardware-friendly**: Block-code ops map directly to grilly Vulkan shaders
+## References
+
+- Rachkovskij et al. — HyperSeed algorithm, Fractional Power Encoding
+- Poursiami et al. — VS-Graph: spike diffusion + associative message passing
+- Plate (2003) — Holographic Reduced Representations
+- Hersche et al. — NVSA: Neuro-Vector-Symbolic Architecture
+- Penzkofer et al. — VSA4VQA: spatial semantic pointers
+- HDR — Hypervector Discover Rule (DystoHD, arXiv:2402.17572)
+- SDLS — Self-Dual Latent Space purification
