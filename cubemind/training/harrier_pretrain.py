@@ -217,37 +217,16 @@ def train(config: HarrierPretrainConfig | None = None):
             pos_shift = np.roll(tok_vec, t_idx, axis=-1)
             context = bc.discretize(context.astype(np.float32) + pos_shift.astype(np.float32))
 
-        # Teacher target: project logits to d_model-sized target vector
-        # Use top-K logit values as a compact supervision signal
+        # Teacher soft targets: (seq, top_k) → probabilities
         teacher_probs = np.asarray(
             softmax(teacher_logits / config.temperature), dtype=np.float32,
         )
-        # Mean over sequence → (top_k,) target distribution
-        target_dist = teacher_probs.mean(axis=0)
-        # Project to d_model size via tiling/truncation
-        d = config.teacher_d_model
-        if len(target_dist) >= d:
-            target_vec = target_dist[:d].astype(np.float32)
-        else:
-            repeats = d // len(target_dist) + 1
-            target_vec = np.tile(target_dist, repeats)[:d].astype(np.float32)
-        # Normalize to unit vector
-        target_vec = target_vec / (np.linalg.norm(target_vec) + 1e-8)
+        teacher_probs = np.clip(teacher_probs, 1e-7, 1.0)
+        labels = tokens[start + 1:start + config.seq_len + 1].astype(np.int32)
 
         # Forge adapter for one random layer
         layer_id = int(rng.integers(0, config.teacher_n_layers))
-        A, B = forge.forge(context, layer_id)
-
-        # Apply adapter to target_vec itself (self-reconstruction)
-        # The adapter should learn to preserve/enhance the teacher's signal
-        adapted = (target_vec @ A.T @ B.T).astype(np.float32)
-        adapted_norm = np.linalg.norm(adapted)
-        if adapted_norm > 1e-8:
-            adapted = adapted / adapted_norm
-
-        # Loss: negative cosine similarity (want adapted ≈ target direction)
-        cosine_sim = float(np.dot(adapted, target_vec))
-        loss = 1.0 - cosine_sim  # range [0, 2], 0 = perfect alignment
+        A, B = forge.forge(context, layer_id)  # A: (rank, d), B: (d, rank)
 
         # LR schedule: cosine with warmup
         lr = config.lr
@@ -261,10 +240,46 @@ def train(config: HarrierPretrainConfig | None = None):
                 1 + math.cos(math.pi * progress)
             )
 
-        # ── EGGROLL: rank-1 ES on basis adapters (backprop-free) ──────────
-        # Generate N perturbations, evaluate each, keep top-k, update.
-        n_workers = 16
-        top_k_keep = 4
+        # ── Loss function: CE + KL (same as moqe_distillation) ────────────
+        # Simulate: random hidden state → adapter → student logits
+        # Then measure KL divergence against teacher distribution
+        def compute_loss(A_mat, B_mat):
+            """CE + KL loss for a given adapter."""
+            # Random hidden state (simulates intermediate activation)
+            h = rng.standard_normal((config.seq_len, config.teacher_d_model)).astype(np.float32) * 0.1
+            # Apply LoRA: student_out = h + scale * (h @ A.T @ B.T)
+            lora_out = (h @ A_mat.T @ B_mat.T).astype(np.float32)
+            student_logits = h + forge.scale * lora_out  # (seq, d_model)
+
+            # Project to logit space: use first top_k dims as proxy logits
+            s_logits = student_logits[:, :config.top_k_logits]
+            s_scaled = s_logits / config.temperature
+            s_shifted = s_scaled - np.max(s_scaled, axis=-1, keepdims=True)
+            s_exp = np.exp(s_shifted)
+            s_probs = s_exp / (np.sum(s_exp, axis=-1, keepdims=True) + 1e-8)
+            s_probs = np.clip(s_probs, 1e-7, 1.0)
+
+            # KL divergence: teacher || student
+            kl = float(np.mean(np.sum(
+                teacher_probs * (np.log(teacher_probs) - np.log(s_probs)),
+                axis=-1,
+            ))) * (config.temperature ** 2)
+
+            # CE on hard labels (use token IDs mod top_k as proxy)
+            ce = 0.0
+            for t in range(min(len(labels), config.seq_len)):
+                tok = int(labels[t]) % config.top_k_logits
+                ce -= math.log(max(float(s_probs[t, tok]), 1e-8))
+            ce /= max(config.seq_len, 1)
+
+            return 0.3 * ce + 0.6 * kl
+
+        # Baseline loss
+        loss = compute_loss(A, B)
+
+        # ── EGGROLL: rank-1 ES on basis adapters ─────────────────────────
+        n_workers = 8
+        top_k_keep = 2
 
         basis_idx = int(rng.integers(0, forge.n_basis))
         orig_A = forge.A_basis[basis_idx].copy()
@@ -274,30 +289,21 @@ def train(config: HarrierPretrainConfig | None = None):
         losses_p = []
 
         for _ in range(n_workers):
-            # Rank-1 perturbation
             dA = (rng.standard_normal((forge.rank, 1)) @ rng.standard_normal((1, forge.d_target))
-                  ).astype(np.float32) * 0.02
+                  ).astype(np.float32) * 0.01
             dB = (rng.standard_normal((forge.d_target, 1)) @ rng.standard_normal((1, forge.rank))
-                  ).astype(np.float32) * 0.02
+                  ).astype(np.float32) * 0.01
 
             forge.A_basis[basis_idx] = orig_A + dA
             forge.B_basis[basis_idx] = orig_B + dB
-
             A_p, B_p = forge.forge(context, layer_id)
-            out_p = (target_vec @ A_p.T @ B_p.T).astype(np.float32)
-            n_p = np.linalg.norm(out_p)
-            if n_p > 1e-8:
-                out_p /= n_p
-            loss_p = 1.0 - float(np.dot(out_p, target_vec))
-
+            loss_p = compute_loss(A_p, B_p)
             perturbations.append((dA, dB))
             losses_p.append(loss_p)
 
-        # Restore
         forge.A_basis[basis_idx] = orig_A
         forge.B_basis[basis_idx] = orig_B
 
-        # Select top-k lowest loss, merit-weighted update
         ranked = np.argsort(losses_p)[:top_k_keep]
         avg_dA = np.zeros_like(orig_A)
         avg_dB = np.zeros_like(orig_B)
