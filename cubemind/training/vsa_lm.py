@@ -419,7 +419,7 @@ def compute_ppl(model: VSALM, x_data, y_data, max_samples: int = 100) -> float:
 
 
 def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
-         seq_len: int = 64):
+         seq_len: int = 64, data_dir: str = "sandbox/vsa_lm/data_sp"):
     cfg = VSALMConfig(
         train_steps=train_steps, n_layers=n_layers, seq_len=seq_len,
         val_every=50, d_model=d_model, d_ffn=d_model * 3,
@@ -427,7 +427,7 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
         n_place=32, n_time=16, n_grid=24, lr=5e-4,
     )
 
-    train_x, train_y, val_x, val_y, actual_vocab = load_data(cfg)
+    train_x, train_y, val_x, val_y, actual_vocab = load_data(cfg, data_dir=data_dir)
     cfg.vocab_size = actual_vocab
 
     model = VSALM(cfg)

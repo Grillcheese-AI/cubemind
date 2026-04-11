@@ -172,11 +172,12 @@ def train() -> None:
 @click.option("--layers", default=6, help="Number of VSA layers.")
 @click.option("--d-model", default=256, help="Model dimension.")
 @click.option("--seq-len", default=64, help="Sequence length.")
-@click.option("--data-dir", default="sandbox/vsa_lm/data", help="Tokenized data directory.")
+@click.option("--data-dir", default="sandbox/vsa_lm/data_sp", help="Tokenized data directory.")
 def train_vsa_lm(steps, layers, d_model, seq_len, data_dir) -> None:
     """Train VSA-LM on TinyStories."""
     from cubemind.training.vsa_lm import main as vsa_lm_main
-    vsa_lm_main(train_steps=steps, n_layers=layers, d_model=d_model, seq_len=seq_len)
+    vsa_lm_main(train_steps=steps, n_layers=layers, d_model=d_model,
+                seq_len=seq_len, data_dir=data_dir)
 
 
 @train.command("mindforge")
