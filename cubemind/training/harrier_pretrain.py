@@ -82,10 +82,10 @@ class HarrierPretrainConfig:
             self.teacher_gpu = p["gpu"]
 
     # Training
-    seq_len: int = 64
-    n_ctx: int = 256
-    lr: float = 1e-3
-    lr_min: float = 1e-5
+    seq_len: int = 128
+    n_ctx: int = 1024
+    lr: float = 2e-3
+    lr_min: float = 3e-4
     train_steps: int = 50000
     log_every: int = 100
     save_every: int = 5000
