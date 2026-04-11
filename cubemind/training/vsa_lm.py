@@ -197,12 +197,18 @@ class VSALayer:
         self.forge.backward(d_A, d_B, self.layer_id, forge_cache)
 
         # 3. FFN backward (STE for SignActivation)
-        d_h_ffn = d_y * ffn_scale
-        self.grads["ffn_down_w"] += (h_up.T @ d_h_ffn) / S
-        d_h_up = d_h_ffn @ self.ffn_down.weight_patterns.T
-        d_h_up_pre = d_h_up  # STE
-        self.grads["ffn_up_w"] += (h.T @ d_h_up_pre) / S
-        d_h_from_ffn = d_h_up_pre @ self.ffn_up.weight_patterns.T
+        # ffn_down: (out=d, in=d_ffn), forward ≈ h_up @ W.T → (S, d)
+        # ffn_up:   (out=d_ffn, in=d), forward ≈ h @ W.T → (S, d_ffn)
+        d_h_ffn = d_y * ffn_scale  # (S, d)
+        # grad_down_w = d_h_ffn.T @ h_up → (d, S) @ (S, d_ffn) = (d, d_ffn) ✓ matches (256, 768)
+        self.grads["ffn_down_w"] += (d_h_ffn.T @ h_up) / S
+        # d_h_up = d_h_ffn @ W_down → (S, d) @ (d, d_ffn) = (S, d_ffn)
+        d_h_up = d_h_ffn @ self.ffn_down.weight_patterns
+        d_h_up_pre = d_h_up  # STE through SignActivation
+        # grad_up_w = d_h_up.T @ h → (d_ffn, S) @ (S, d) = (d_ffn, d) ✓ matches (768, 256)
+        self.grads["ffn_up_w"] += (d_h_up_pre.T @ h) / S
+        # d_h = d_h_up @ W_up → (S, d_ffn) @ (d_ffn, d) = (S, d) ✓
+        d_h_from_ffn = d_h_up_pre @ self.ffn_up.weight_patterns
 
         # 4. LayerNorm backward
         d_h_total = d_h_from_lora + d_h_from_ffn
