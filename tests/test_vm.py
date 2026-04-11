@@ -594,3 +594,168 @@ class TestPatternDiscovery:
         ]
         result = vm.run(program)
         assert result == 2  # index of correct answer
+
+
+# ── CLEANUP MEMORY ───────────────────────────────────────────────────────
+
+
+class TestCleanupMemory:
+    """Test the associative cleanup memory that snaps noisy vectors
+    back to the nearest known clean block-code primitive.
+
+    Without cleanup, bundling accumulates noise and after 5-6 ops
+    the signal degrades below recognition. Cleanup memory fixes this.
+    """
+
+    def test_cleanup_memory_exists(self, vm):
+        """VM should have a cleanup memory."""
+        from cubemind.reasoning.vm import CleanupMemory
+        cm = CleanupMemory(vm.bc)
+        assert cm is not None
+
+    def test_store_and_retrieve_exact(self, vm, bc):
+        """Storing a vector and querying it back returns the same vector."""
+        from cubemind.reasoning.vm import CleanupMemory
+        cm = CleanupMemory(bc)
+
+        v = bc.random_discrete(seed=42)
+        cm.store("apple", v)
+        name, cleaned = cm.cleanup(v)
+        assert name == "apple"
+        np.testing.assert_array_equal(cleaned, v)
+
+    def test_cleanup_noisy_vector(self, vm, bc):
+        """A noisy version of a stored vector should snap back to the clean one."""
+        from cubemind.reasoning.vm import CleanupMemory
+        cm = CleanupMemory(bc)
+
+        clean = bc.random_discrete(seed=42)
+        cm.store("target", clean)
+
+        # Add noise: flip some values
+        noisy = clean.copy().astype(np.float32)
+        rng = np.random.default_rng(99)
+        noise = rng.normal(0, 0.3, noisy.shape).astype(np.float32)
+        noisy = bc.discretize(noisy + noise)
+
+        name, cleaned = cm.cleanup(noisy)
+        assert name == "target"
+        np.testing.assert_array_equal(cleaned, clean)
+
+    def test_cleanup_after_bundle(self, vm, bc):
+        """Bundling multiple vectors and cleaning up recovers the dominant one."""
+        from cubemind.reasoning.vm import CleanupMemory
+        cm = CleanupMemory(bc)
+
+        v_apple = bc.random_discrete(seed=10)
+        v_banana = bc.random_discrete(seed=20)
+        v_cherry = bc.random_discrete(seed=30)
+        cm.store("apple", v_apple)
+        cm.store("banana", v_banana)
+        cm.store("cherry", v_cherry)
+
+        # Bundle with apple dominant (3x weight)
+        bundled = (3 * v_apple.astype(np.float32)
+                   + v_banana.astype(np.float32)
+                   + v_cherry.astype(np.float32))
+        noisy = bc.discretize(bundled)
+
+        name, _ = cm.cleanup(noisy)
+        assert name == "apple"
+
+    def test_cleanup_distinguishes_stored_items(self, vm, bc):
+        """Cleanup correctly distinguishes between multiple stored vectors."""
+        from cubemind.reasoning.vm import CleanupMemory
+        cm = CleanupMemory(bc)
+
+        vectors = {}
+        for i, name in enumerate(["cat", "dog", "fish", "bird"]):
+            v = bc.random_discrete(seed=100 + i)
+            cm.store(name, v)
+            vectors[name] = v
+
+        for name, v in vectors.items():
+            result_name, _ = cm.cleanup(v)
+            assert result_name == name, f"Expected {name}, got {result_name}"
+
+    def test_vm_has_cleanup_memory(self, vm, bc):
+        """The VM should have a built-in cleanup memory."""
+        assert hasattr(vm, "cleanup_mem")
+        assert vm.cleanup_mem is not None
+
+    def test_cleanup_opcode(self, vm, bc):
+        """CLEANUP opcode should snap a register to nearest clean vector."""
+        v = bc.random_discrete(seed=42)
+        vm.cleanup_mem.store("known_vec", v)
+
+        vm.execute("CREATE", "test", "thing")
+        # Corrupt the register with noise
+        noisy = v.copy().astype(np.float32)
+        noisy += np.random.default_rng(99).normal(0, 0.2, noisy.shape).astype(np.float32)
+        vm.registers["test"] = bc.discretize(noisy)
+
+        result = vm.execute("CLEANUP", "test")
+        assert result == "known_vec"
+
+
+# ── POSITION-AWARE SEQUENCE (SEQ) ───────────────────────────────────────
+
+
+class TestSequence:
+    """Test position-aware sequence encoding.
+
+    SEQ uses per-position circular permutation so that
+    'A then B' ≠ 'B then A' in VSA space.
+    """
+
+    def test_seq_encodes_order(self, vm, bc):
+        """SEQ(A, B) should produce a different vector than SEQ(B, A)."""
+        va = bc.random_discrete(seed=10)
+        vb = bc.random_discrete(seed=20)
+
+        seq_ab = vm.execute("SEQ", [va, vb])
+        seq_ba = vm.execute("SEQ", [vb, va])
+
+        assert seq_ab.shape == (K, L)
+        assert seq_ba.shape == (K, L)
+
+        sim = float(bc.similarity(seq_ab, seq_ba))
+        assert sim < 0.5, f"SEQ(A,B) and SEQ(B,A) should differ: sim={sim:.3f}"
+
+    def test_seq_single_element(self, vm, bc):
+        """SEQ of one element returns that element (permuted at position 0)."""
+        va = bc.random_discrete(seed=10)
+        result = vm.execute("SEQ", [va])
+        assert result.shape == (K, L)
+
+    def test_seq_recovers_element_by_position(self, vm, bc):
+        """Can unbind position to recover the element at that position."""
+        va = bc.random_discrete(seed=10)
+        vb = bc.random_discrete(seed=20)
+        vc = bc.random_discrete(seed=30)
+
+        seq_vec = vm.execute("SEQ", [va, vb, vc])
+
+        # UNSEQ at position 1 should recover something correlated with vb
+        # Note: at small dims (k=4) recovery is noisy — threshold is lenient
+        recovered = vm.execute("UNSEQ", seq_vec, 1)
+        sim = float(bc.similarity(recovered, vb))
+        assert sim > 0.15, f"UNSEQ at pos 1 should recover B: sim={sim:.3f}"
+
+    def test_seq_preserves_length(self, vm, bc):
+        """SEQ of N elements produces a single (k, l) vector."""
+        vectors = [bc.random_discrete(seed=i) for i in range(5)]
+        result = vm.execute("SEQ", vectors)
+        assert result.shape == (K, L)
+
+    def test_seq_different_lengths_different_vectors(self, vm, bc):
+        """SEQ(A, B) ≠ SEQ(A, B, C)."""
+        va = bc.random_discrete(seed=10)
+        vb = bc.random_discrete(seed=20)
+        vc = bc.random_discrete(seed=30)
+
+        seq2 = vm.execute("SEQ", [va, vb])
+        seq3 = vm.execute("SEQ", [va, vb, vc])
+
+        sim = float(bc.similarity(seq2, seq3))
+        assert sim < 0.8, f"Different length seqs should differ: sim={sim:.3f}"

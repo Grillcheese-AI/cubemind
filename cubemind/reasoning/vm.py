@@ -62,6 +62,55 @@ def _init_roles(bc: BlockCodes) -> None:
         ROLES[name] = bc.random_discrete(seed=seed)
 
 
+# ── Cleanup Memory ───────────────────────────────────────────────────────
+
+
+class CleanupMemory:
+    """Associative memory that snaps noisy vectors to the nearest clean primitive.
+
+    VSA operations (especially bundle/ADD) accumulate noise. After several
+    operations, the signal degrades. CleanupMemory stores known-clean vectors
+    and projects any noisy input to the nearest stored vector via similarity.
+
+    This is essential for HDR rule discovery: when the resonator/bundling
+    produces a noisy superposition, cleanup snaps it to a valid primitive.
+    """
+
+    def __init__(self, bc: BlockCodes) -> None:
+        self.bc = bc
+        self._items: dict[str, np.ndarray] = {}
+
+    def store(self, name: str, vec: np.ndarray) -> None:
+        """Store a clean vector with a name."""
+        self._items[name] = vec.copy()
+
+    def cleanup(self, noisy: np.ndarray) -> tuple[str, np.ndarray]:
+        """Find the nearest stored vector to the noisy input.
+
+        Returns:
+            (name, clean_vector) of the best match.
+        """
+        best_name = ""
+        best_vec = noisy
+        best_sim = -1.0
+
+        for name, clean in self._items.items():
+            sim = float(self.bc.similarity(noisy, clean))
+            if sim > best_sim:
+                best_sim = sim
+                best_name = name
+                best_vec = clean
+
+        return best_name, best_vec.copy()
+
+    @property
+    def size(self) -> int:
+        return len(self._items)
+
+    def names(self) -> list[str]:
+        return list(self._items.keys())
+
+
 # ── HyperSeed Value Encoding ─────────────────────────────────────────────
 
 
@@ -198,6 +247,12 @@ class VSAVM:
         # Last predicted vector (for MATCH after PREDICT)
         self._last_predicted: np.ndarray | None = None
 
+        # Cleanup memory (associative store for snapping noisy vectors to clean ones)
+        self.cleanup_mem = CleanupMemory(bc)
+
+        # Position vectors for SEQ (deterministic circular shifts)
+        self._pos_cache: dict[int, np.ndarray] = {}
+
         # Initialize universal role vectors
         _init_roles(bc)
 
@@ -258,6 +313,14 @@ class VSAVM:
                 return self._predict(*args)
             case "MATCH":
                 return self._match(*args)
+            # ── Sequence ────────────────────────────────────────────
+            case "SEQ":
+                return self._seq(*args)
+            case "UNSEQ":
+                return self._unseq(*args)
+            # ── Cleanup ─────────────────────────────────────────────
+            case "CLEANUP":
+                return self._cleanup(*args)
             case _:
                 logger.warning("Unknown opcode: %s", opcode)
                 return None
@@ -466,6 +529,55 @@ class VSAVM:
                 best_sim = sim
                 best_idx = i
         return best_idx
+
+    # ── Sequence (Position-Aware) ───────────────────────────────────────
+
+    def _pos_vec(self, position: int) -> np.ndarray:
+        """Get a deterministic position vector via per-block circular shift.
+
+        Each position is encoded by shifting a base impulse by a unique amount
+        per block. This ensures bind(A, pos[0]) ≠ bind(A, pos[1]),
+        so 'A then B' ≠ 'B then A'.
+        """
+        if position not in self._pos_cache:
+            pos = np.zeros((self.k, self.l), dtype=np.float32)
+            for b in range(self.k):
+                shift = (position * (b + 2)) % self.l
+                pos[b, shift] = 1.0
+            self._pos_cache[position] = self.bc.discretize(pos)
+        return self._pos_cache[position]
+
+    def _seq(self, vectors: list[np.ndarray]) -> np.ndarray:
+        """SEQ [v0, v1, ...] — encode an ordered sequence.
+
+        Each element is bound with its position vector, then all are bundled:
+            seq = sum( bind(v[i], pos[i]) )
+
+        Order matters: SEQ(A, B) ≠ SEQ(B, A).
+        """
+        bundled = np.zeros((self.k, self.l), dtype=np.float32)
+        for i, v in enumerate(vectors):
+            bound = self.bc.bind(v, self._pos_vec(i))
+            bundled += bound.astype(np.float32)
+        return self.bc.discretize(bundled)
+
+    def _unseq(self, seq_vec: np.ndarray, position: int) -> np.ndarray:
+        """UNSEQ seq_vec position — recover element at given position.
+
+        Unbinds the position vector from the sequence bundle.
+        Result is noisy — use cleanup memory after for best results.
+        """
+        return self.bc.unbind(seq_vec, self._pos_vec(position))
+
+    # ── Cleanup ──────────────────────────────────────────────────────────
+
+    def _cleanup(self, register_name: str) -> str | None:
+        """CLEANUP reg — snap register to nearest clean vector in cleanup memory."""
+        if register_name not in self.registers:
+            return None
+        name, clean = self.cleanup_mem.cleanup(self.registers[register_name])
+        self.registers[register_name] = clean
+        return name
 
     # ── Rule Learning ────────────────────────────────────────────────────
 
