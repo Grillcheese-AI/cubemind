@@ -1,22 +1,56 @@
-"""
-CubeMind v2.1 — Oja-Plastic NVSA Architecture.
-Fixed: Reshape ValueError for contexts smaller than bucket_size.
+"""CubeMind — Integrated Neuro-Vector-Symbolic Cognitive Architecture.
+
+Perception (vision + hearing + text)
+    ↓
+SNN Processing (GIFNeuron + Synapsis + STDP)
+    ↓
+Neurochemistry (5-hormone ODE modulates routing)
+    ↓
+HippocampalFormation (store/retrieve episodic memories)
+    ↓
+Neurogenesis (grow/prune neurons based on residual error)
+    ↓
+Output (VSA block-code answer)
+
+All modules are independent and fault-isolated. If any module fails at
+init or runtime, CubeMind degrades gracefully — the pipeline continues
+without the failed module. This is enforced via try/except boundaries
+around every module call.
+
+All ops route through grilly when available.
+
+Usage:
+    # Via DI container (recommended):
+    from cubemind.container import CubeMindContainer
+    container = CubeMindContainer()
+    container.config.from_dict({"k": 8, "l": 64, "d_hidden": 64})
+    brain = container.cubemind()
+
+    # Via factory (quick):
+    from cubemind.model import create_cubemind
+    brain = create_cubemind(k=8, l=64)
+
+    # Direct (full control):
+    brain = CubeMind(bc=my_bc, text_encoder=my_enc, ...)
 """
 
 from __future__ import annotations
+
+import logging
+from typing import Any
+
 import numpy as np
-import math
+
 from cubemind.core import K_BLOCKS, L_BLOCK
-from cubemind.execution.cvl import ContrastiveValueEstimator
-from cubemind.execution.decoder import Decoder
-from cubemind.execution.hyla import HYLA
-from cubemind.memory.cache import VSACache
-from cubemind.memory.hippocampal import HippocampalMemory
-from cubemind.ops.block_codes import BlockCodes
-from cubemind.perception.encoder import Encoder
-from cubemind.reasoning.hmm_rule import HMMEnsemble
+
+# Re-export Oja-plastic attention engine (used by tests and reasoning pipeline)
+from cubemind._archive.model_v2 import HyperAxialAttention, PlasticCodebook  # noqa: F401
+
+logger = logging.getLogger(__name__)
+
 
 # ── Oja Plasticity Kernels ──────────────────────────────────────────────────
+
 
 def oja_update(m: np.ndarray, x: np.ndarray, eta: float = 0.01) -> np.ndarray:
     m_flat = m.ravel().astype(np.float32)
@@ -25,205 +59,424 @@ def oja_update(m: np.ndarray, x: np.ndarray, eta: float = 0.01) -> np.ndarray:
     m_flat = m_flat + (eta * y) * (x_flat - y * m_flat)
     return m_flat.reshape(m.shape)
 
-def oja_update_batch(memories: np.ndarray, inputs: np.ndarray, eta: float = 0.01) -> np.ndarray:
+
+def oja_update_batch(
+    memories: np.ndarray, inputs: np.ndarray, eta: float = 0.01,
+) -> np.ndarray:
     y = np.sum(memories * inputs, axis=-1, keepdims=True)
     updated = memories + (eta * y) * (inputs - y * memories)
     return updated.astype(np.float32)
 
-# ── O(L) Attention Engine ──────────────────────────────────────────────────
 
-class HyperAxialAttention:
-    def __init__(self, d_model, heads=4, bucket_size=32, sample_size=16, rank=128):
-        self.d_model = d_model
-        self.n_h = heads
-        self.d_h = d_model // heads
-        self.bucket_size = bucket_size
-        self.sample_size = sample_size
-        self.rank = rank
-        self.rng = np.random.default_rng(42)
-        self.projections = self.rng.standard_normal((self.d_h, 32)).astype(np.float32)
+# ── CubeMind Orchestrator ──────────────────────────────────────────────────
 
-        # Low-rank Q/K/V projections: d_model → rank → d_model
-        # Full-rank W_Q would be (10240, 10240) = 400MB each.
-        # Low-rank: (10240, 128) + (128, 10240) = 2.5MB each. 480x smaller.
-        std = 1.0 / math.sqrt(rank)
-        self.W_Q_down = self.rng.normal(0, std, (d_model, rank)).astype(np.float32)
-        self.W_Q_up = self.rng.normal(0, std, (rank, d_model)).astype(np.float32)
-        self.W_K_down = self.rng.normal(0, std, (d_model, rank)).astype(np.float32)
-        self.W_K_up = self.rng.normal(0, std, (rank, d_model)).astype(np.float32)
-        self.W_V_down = self.rng.normal(0, std, (d_model, rank)).astype(np.float32)
-        self.W_V_up = self.rng.normal(0, std, (rank, d_model)).astype(np.float32)
-
-    def _hash(self, x):
-        return np.sum((x @ self.projections > 0) * (2 ** np.arange(32)), axis=-1)
-
-    def forward(self, X, causal=True, refine=True):
-        L, d = X.shape
-        scale = math.sqrt(self.d_h)
-
-        # 1. SDLS Noise Removal: orthogonal projection onto null-space of mean
-        # Instead of crude X - 0.99*mean, project out the mean axis properly
-        mean = np.mean(X, axis=0)
-        mean_norm = np.linalg.norm(mean)
-        if mean_norm > 1e-8:
-            noise_axis = mean / mean_norm
-            projections = X @ noise_axis  # (L,)
-            X_clean = X - np.outer(projections, noise_axis)
-        else:
-            X_clean = X
-
-        # Low-rank projections: X @ W_down @ W_up  (d → rank → d)
-        def proj_q(x): return (x @ self.W_Q_down) @ self.W_Q_up
-        def proj_k(x): return (x @ self.W_K_down) @ self.W_K_up
-        def proj_v(x): return (x @ self.W_V_down) @ self.W_V_up
-
-        # Early exit for small docs — standard scaled dot-product attention
-        if L <= self.bucket_size:
-            Q = proj_q(X_clean)
-            K = proj_k(X_clean)
-            V = proj_v(X)  # Values from original (not denoised)
-            scores = (Q @ K.T) / scale
-            if causal:
-                mask = np.tril(np.ones((L, L), dtype=bool))
-                scores = np.where(mask, scores, -1e9)
-            m = np.max(scores, axis=-1, keepdims=True)
-            ex = np.exp(scores - m)
-            return (ex / (ex.sum(axis=-1, keepdims=True) + 1e-6)) @ V
-
-        # Multi-head split: Q,K from denoised, V from original
-        Q_all = proj_q(X_clean).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
-        K_all = proj_k(X_clean).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
-        V_all = proj_v(X).reshape(L, self.n_h, self.d_h).transpose(1, 0, 2)
-
-        out_heads = []
-        orig_indices = np.arange(L)
-
-        for h in range(self.n_h):
-            # LSH bucketing via SimHash
-            q_idx = np.argsort(self._hash(Q_all[h]))
-            k_idx = np.argsort(self._hash(K_all[h]))
-            qs, ks, vs = Q_all[h][q_idx], K_all[h][k_idx], V_all[h][k_idx]
-            qp, kp = orig_indices[q_idx], orig_indices[k_idx]
-
-            num_b = int(math.ceil(L / self.bucket_size))
-            L_padded = num_b * self.bucket_size
-
-            # Pad to uniform bucket size
-            pad_len = L_padded - L
-            if pad_len > 0:
-                qs = np.pad(qs, ((0, pad_len), (0, 0)))
-                ks = np.pad(ks, ((0, pad_len), (0, 0)))
-                vs = np.pad(vs, ((0, pad_len), (0, 0)))
-                qp = np.pad(qp, (0, pad_len), constant_values=-1)
-                kp = np.pad(kp, (0, pad_len), constant_values=L + 1)
-
-            qb = qs.reshape(num_b, self.bucket_size, -1)
-            kb = ks.reshape(num_b, self.bucket_size, -1)
-            vb = vs.reshape(num_b, self.bucket_size, -1)
-
-            # Oja refinement: sharpen bucket centroids (optional)
-            if refine:
-                p = np.mean(qb, axis=1)
-                for _ in range(3):
-                    p = oja_update_batch(p, np.mean(kb, axis=1), eta=0.3)
-                # Soft suppression: scale V by alignment (not hard zero)
-                alignment = np.sum(
-                    vb * p[:, np.newaxis, :], axis=-1, keepdims=True,
-                )
-                align_mean = np.mean(
-                    alignment, axis=1, keepdims=True,
-                )
-                # Sigmoid gate: smoothly suppress weak alignments
-                gate = 1.0 / (1.0 + np.exp(-(alignment - align_mean) * 5.0))
-                vb = vb * gate
-
-            # Standard scaled dot-product attention within buckets
-            scores_b = (qb @ kb.transpose(0, 2, 1)) / scale
-
-            # Causal mask
-            if causal:
-                mask = qp.reshape(num_b, -1, 1) >= kp.reshape(num_b, 1, -1)
-                scores_b = np.where(mask, scores_b, -1e9)
-
-            # Stable softmax
-            m_b = np.max(scores_b, axis=-1, keepdims=True)
-            exp_b = np.exp(scores_b - m_b)
-            out_b = (exp_b / (exp_b.sum(axis=-1, keepdims=True) + 1e-6)) @ vb
-
-            # Unsort back to original order
-            out_local_flat = out_b.reshape(L_padded, -1)[:L]
-            out_heads.append(out_local_flat[np.argsort(q_idx)])
-
-        return np.concatenate(out_heads, axis=-1)
-
-# ── Main CubeMind Orchestrator ──────────────────────────────────────────────
-
-class PlasticCodebook:
-    def __init__(self, bc, n_entries=16, eta=0.005, seed=42):
-        self.bc = bc
-        self.eta = eta
-        self.entries = bc.codebook_discrete(n_entries, seed=seed)
-        self.access_count = np.zeros(n_entries, dtype=np.int64)
-
-    def adapt_nearest(self, observation):
-        sims = self.bc.similarity_batch(observation, self.entries)
-        idx = int(np.argmax(sims))
-        self.entries[idx] = oja_update(self.entries[idx], observation.ravel(), self.eta).reshape(observation.shape)
-        self.access_count[idx] += 1
-        return idx, float(sims[idx])
 
 class CubeMind:
-    def __init__(self, k=K_BLOCKS, l=L_BLOCK, n_codebook=128, oja_eta=0.01):
-        self.k, self.l, self.d_vsa = k, l, k*l
-        self.oja_eta = oja_eta
-        self.bc = BlockCodes(k, l)
-        self.encoder = Encoder(k=k, l=l)
-        self.plastic_codebook = PlasticCodebook(self.bc, n_entries=n_codebook)
-        self.codebook = self.plastic_codebook.entries
-        self.hmm = HMMEnsemble(self.codebook)
-        self.decoder = Decoder(self.codebook)
-        self.hyla = HYLA(d_vsa=self.d_vsa, d_hidden=128, d_out=self.d_vsa, k=k, l=l)
-        self.cvl = ContrastiveValueEstimator(d_state=self.d_vsa, d_action=self.d_vsa)
-        self.cache = VSACache(max_size=10000, d_vsa=self.d_vsa)
-        self.hippocampal = HippocampalMemory(d_model=self.d_vsa)
-        # Init with small bucket_size so the 59 segments document actually triggers the LSH path
-        self.combiner = HyperAxialAttention(d_model=self.d_vsa, bucket_size=32)
+    """Integrated cognitive architecture with fault-isolated modules.
 
-    def forward(self, text=None, phi=None, context=None):
-        if phi is None:
-            phi = self.encoder.encode(text) if text else self.bc.random_discrete()
-        phi_flat = phi.ravel().astype(np.float32)
+    Every module is optional and independently recoverable. If a module
+    is None or raises at runtime, that pipeline stage is skipped and
+    the system continues with degraded output.
 
-        surprise = self.cache.surprise(phi_flat)
-        if self.cache.size > 0:
-            sims, _, idxs = self.cache.lookup(phi_flat, k=1)
-            if sims[0,0] > 0.8:
-                i = int(idxs[0,0])
-                self.cache.keys[i] = np.sign(oja_update(self.cache.keys[i].astype(np.float32), phi_flat, self.oja_eta)).astype(np.int8)
+    Args:
+        bc: BlockCodes VSA ops (required).
+        text_encoder: Text → VSA encoder (required).
+        harrier_encoder: Harrier embedding encoder (optional, None = skip).
+        vision_encoder: Bio-vision encoder (optional, None = skip).
+        audio_encoder: Audio encoder (optional, None = skip).
+        snn_ffn: Hybrid SNN/FFN processor (required).
+        hippocampus: HippocampalFormation memory (required).
+        neurochemistry: Neurochemistry ODE modulator (optional, None = skip).
+        neurogenesis: NeurogenesisController (required).
+        spike_bridge: Spike↔VSA bridge (required).
+        k: VSA block count.
+        l: VSA block length.
+        d_hidden: Hidden dimension for SNN/FFN layers.
+        seed: Random seed.
+    """
 
-        self.cache.add(phi_flat, np.array([surprise, 0.1]))
+    def __init__(
+        self,
+        bc: Any,
+        text_encoder: Any,
+        snn_ffn: Any,
+        hippocampus: Any,
+        neurogenesis: Any,
+        spike_bridge: Any,
+        harrier_encoder: Any | None = None,
+        vision_encoder: Any | None = None,
+        audio_encoder: Any | None = None,
+        neurochemistry: Any | None = None,
+        k: int = K_BLOCKS,
+        l: int = L_BLOCK,
+        d_hidden: int = 128,
+        seed: int = 42,
+    ) -> None:
+        self.k = k
+        self.l = l
+        self.d_vsa = k * l
+        self.d_hidden = d_hidden
 
-        if context:
-            history = np.stack([c.ravel() for c in context] + [phi_flat])
-            phi_integrated = self.combiner.forward(history)[-1]
+        # Required modules
+        self.bc = bc
+        self.text_encoder = text_encoder
+        self.snn_ffn = snn_ffn
+        self.hippocampus = hippocampus
+        self.neurogenesis = neurogenesis
+        self.spike_bridge = spike_bridge
+
+        # Optional modules (None = disabled)
+        self._harrier = harrier_encoder
+        self._vision = vision_encoder
+        self._audio = audio_encoder
+        self._neurochemistry = neurochemistry
+
+        # Projections: d_vsa ↔ d_hidden
+        rng = np.random.default_rng(seed)
+        std_in = np.sqrt(2.0 / (self.d_vsa + d_hidden))
+        std_out = np.sqrt(2.0 / (d_hidden + self.d_vsa))
+        self._proj_in = rng.normal(0, std_in, (d_hidden, self.d_vsa)).astype(np.float32)
+        self._proj_out = rng.normal(0, std_out, (self.d_vsa, d_hidden)).astype(np.float32)
+
+        # LLM (attached later via attach_llm)
+        self._llm = None
+        self._injector = None
+
+        # State
+        self._step_count = 0
+        self._last_output = None
+
+    # ── Forward Pass ─────────────────────────────────────────────────────
+
+    def forward(
+        self,
+        text: str | None = None,
+        image: np.ndarray | None = None,
+        audio: np.ndarray | None = None,
+        phi: np.ndarray | None = None,
+        location: np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """Full forward pass through the cognitive architecture.
+
+        Each module is wrapped in its own error boundary. If any module
+        fails, the pipeline continues — that stage is skipped and a
+        warning is logged.
+
+        Args:
+            text: Input text.
+            image: Image frame (BGR, any size).
+            audio: Audio chunk (float32 PCM).
+            phi: Pre-encoded VSA block-code (k, l). Overrides text/image.
+            location: Spatial location (2D) for hippocampal context.
+
+        Returns:
+            Dict with: output_hv, confidence, input_hv, hidden,
+            memories_retrieved, neurogenesis, neurochemistry,
+            spatial_context, temporal_context, step.
+        """
+        self._step_count += 1
+
+        # ── 1. Perception: each modality in its own error boundary ───────
+        modality_hvs: list[np.ndarray] = []
+
+        if phi is not None:
+            modality_hvs.append(phi)
+
+        if text is not None:
+            hv = self._safe_call(
+                "harrier_encoder",
+                lambda: self._harrier.encode(text) if self._harrier else None,
+            )
+            if hv is None:
+                hv = self._safe_call(
+                    "text_encoder",
+                    lambda: self.text_encoder.encode(text),
+                )
+            if hv is not None:
+                modality_hvs.append(hv)
+
+        if image is not None:
+            hv = self._safe_call(
+                "vision_encoder",
+                lambda: self._vision.encode(image) if self._vision else None,
+            )
+            if hv is not None:
+                modality_hvs.append(hv)
+
+        if audio is not None:
+            hv = self._safe_call(
+                "audio_encoder",
+                lambda: self._audio.encode_audio(audio) if self._audio else None,
+            )
+            if hv is not None:
+                modality_hvs.append(hv)
+
+        # Fuse modalities
+        if not modality_hvs:
+            input_hv = self.bc.random_discrete(seed=self._step_count)
+        elif len(modality_hvs) == 1:
+            input_hv = modality_hvs[0]
         else:
-            phi_integrated = phi_flat
+            bundled = np.zeros((self.k, self.l), dtype=np.float32)
+            for hv in modality_hvs:
+                bundled += np.asarray(hv, dtype=np.float32)
+            input_hv = self.bc.discretize(bundled)
 
-        hyla_out = self.hyla.forward(phi_integrated, phi_integrated)
-        output_bc = self.bc.discretize(self.bc.from_flat(hyla_out, self.k))
-        answer, confidence, _ = self.decoder.decode(output_bc)
-        self.hippocampal.store(phi_flat, content_tag=text or "")
+        input_flat = self.bc.to_flat(input_hv).astype(np.float32)
 
-        return {"answer": answer, "confidence": confidence, "phi_integrated": phi_integrated}
+        # ── 2. Project to hidden dim ─────────────────────────────────────
+        h = (self._proj_in @ input_flat).astype(np.float32)
 
-    def visualize_manifold(self, context_vectors):
-        if len(context_vectors) < 2:
-            return
-        data = np.stack([c.ravel() for c in context_vectors])
-        from sklearn.decomposition import PCA
-        import matplotlib.pyplot as plt
-        coords = PCA(n_components=2).fit_transform(data)
-        plt.figure(figsize=(10, 6))
-        plt.scatter(coords[:,0], coords[:,1], c=range(len(coords)), cmap='winter', edgecolors='k')
-        plt.title("CubeMind Plastic Manifold")
-        plt.show()
+        # ── 3. Hippocampal spatial/temporal context ──────────────────────
+        spatial_ctx = {}
+        temporal_ctx = {}
+        if location is not None:
+            self._safe_call(
+                "hippocampus.spatial",
+                lambda: self.hippocampus.update_spatial_state(location),
+            )
+        spatial_ctx = self._safe_call(
+            "hippocampus.spatial_ctx",
+            lambda: self.hippocampus.get_spatial_context(),
+        ) or {}
+        temporal_ctx = self._safe_call(
+            "hippocampus.temporal_ctx",
+            lambda: self.hippocampus.get_temporal_context(),
+        ) or {}
+
+        # ── 4. Memory retrieval ──────────────────────────────────────────
+        retrieved = self._safe_call(
+            "hippocampus.retrieve",
+            lambda: self.hippocampus.retrieve_similar_memories(h, k=5),
+        ) or []
+
+        if retrieved:
+            for mem_id, score in retrieved[:3]:
+                try:
+                    if mem_id in self.hippocampus.id_to_idx:
+                        idx = self.hippocampus.id_to_idx[mem_id]
+                        mem_feat = self.hippocampus.memory_features[idx]
+                        h = h + score * 0.1 * mem_feat
+                except Exception:
+                    pass
+
+        # ── 5. SNN processing ────────────────────────────────────────────
+        h_processed = self._safe_call(
+            "snn_ffn",
+            lambda: self.snn_ffn.forward(h.reshape(1, 1, -1)).reshape(-1),
+        )
+        if h_processed is None:
+            h_processed = h  # fallback: pass through
+
+        # ── 6. Neurochemistry modulation ─────────────────────────────────
+        neuro_state: dict[str, Any] = {}
+        if self._neurochemistry is not None:
+            neuro_state = self._safe_call("neurochemistry", lambda: self._neuro_step(
+                h_processed, retrieved,
+            )) or {}
+
+        # ── 7. Neurogenesis ──────────────────────────────────────────────
+        neuro_info = self._safe_call(
+            "neurogenesis",
+            lambda: self.neurogenesis.step(h_processed),
+        ) or {}
+
+        # ── 8. Store in hippocampal memory ───────────────────────────────
+        self._safe_call(
+            "hippocampus.store",
+            lambda: self.hippocampus.create_episodic_memory(features=h_processed),
+        )
+
+        # ── 9. Project back to VSA space ─────────────────────────────────
+        output_flat = (self._proj_out @ h_processed).astype(np.float32)
+        output_hv = self.bc.discretize(self.bc.from_flat(output_flat, self.k))
+
+        # ── 10. Confidence ───────────────────────────────────────────────
+        confidence = float(self.bc.similarity(input_hv, output_hv))
+
+        self._last_output = output_hv
+
+        return {
+            "output_hv": output_hv,
+            "confidence": confidence,
+            "input_hv": input_hv,
+            "hidden": h_processed,
+            "memories_retrieved": len(retrieved),
+            "neurogenesis": neuro_info,
+            "neurochemistry": neuro_state,
+            "spatial_context": spatial_ctx,
+            "temporal_context": temporal_ctx,
+            "step": self._step_count,
+        }
+
+    # ── Recall ───────────────────────────────────────────────────────────
+
+    def recall(self, query: str | np.ndarray, k: int = 5) -> list:
+        """Recall memories by text query or block-code."""
+        if isinstance(query, str):
+            if self._harrier:
+                hv = self._harrier.encode(query)
+            else:
+                hv = self.text_encoder.encode(query)
+            flat = self.bc.to_flat(hv)
+            h = (self._proj_in @ flat).astype(np.float32)
+        else:
+            h = np.asarray(query, dtype=np.float32).ravel()
+            if len(h) == self.d_vsa:
+                h = (self._proj_in @ h).astype(np.float32)
+        return self.hippocampus.retrieve_similar_memories(h, k=k)
+
+    # ── LLM Attachment ───────────────────────────────────────────────────
+
+    def attach_llm(
+        self,
+        model_path: str | None = None,
+        api_url: str | None = None,
+        api_key: str | None = None,
+        inject_layers: bool = True,
+        injection_strength: float = 0.1,
+        use_mindforge: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Attach an LLM for language generation with brain-state injection."""
+        from cubemind._archive.brain.llm_interface import LLMInterface
+        self._llm = LLMInterface(
+            model_path=model_path, api_url=api_url,
+            api_key=api_key, **kwargs,
+        )
+        if inject_layers:
+            from cubemind._archive.brain.llm_injector import LLMInjector
+            self._injector = LLMInjector(
+                brain=self, n_layers=32, d_model=4096,
+                d_brain=self.d_hidden,
+                injection_strength=injection_strength,
+                use_mindforge=use_mindforge,
+                k=self.k, l=self.l,
+            )
+            self._llm.attach_injector(self._injector)
+
+    # ── Think (perceive → reason → speak) ────────────────────────────────
+
+    def think(
+        self,
+        prompt: str,
+        text: str | None = None,
+        image: np.ndarray | None = None,
+        audio: np.ndarray | None = None,
+        location: np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """Full cognitive cycle: perceive → reason → remember → speak."""
+        result = self.forward(
+            text=text or prompt, image=image,
+            audio=audio, location=location,
+        )
+        if self._injector is not None:
+            self._safe_call("llm_injector", lambda: self._injector.update_brain_state(
+                brain_hidden=result.get("hidden"),
+                brain_hv=result.get("input_hv"),
+                neurochemistry=result.get("neurochemistry"),
+            ))
+
+        response = ""
+        if self._llm is not None and self._llm.available:
+            response = self._safe_call("llm_generate", lambda: self._llm.generate(
+                prompt=prompt, context=result,
+                memories=[f"Memory {m} (score={s:.2f})" for m, s in self.recall(prompt, k=3)],
+                neurochemistry=result.get("neurochemistry"),
+            )) or ""
+        result["response"] = response
+        return result
+
+    # ── Training ─────────────────────────────────────────────────────────
+
+    def train_step(
+        self,
+        text: str | None = None,
+        image: np.ndarray | None = None,
+        audio: np.ndarray | None = None,
+        target_hv: np.ndarray | None = None,
+        location: np.ndarray | None = None,
+    ) -> dict[str, Any]:
+        """One training step — forward + STDP + neurogenesis + memory."""
+        result = self.forward(text=text, image=image, audio=audio, location=location)
+        loss = 0.0
+        similarity = 0.0
+        if target_hv is not None:
+            similarity = float(self.bc.similarity(result["output_hv"], target_hv))
+            loss = 1.0 - similarity
+        result["loss"] = loss
+        result["similarity"] = similarity
+        return result
+
+    # ── Stats ────────────────────────────────────────────────────────────
+
+    def stats(self) -> dict[str, Any]:
+        return {
+            "step": self._step_count,
+            "hippocampus": self._safe_call("hippocampus.stats",
+                                           lambda: self.hippocampus.stats()) or {},
+            "neurogenesis": self._safe_call("neurogenesis.stats",
+                                            lambda: self.neurogenesis.stats()) or {},
+            "d_vsa": self.d_vsa,
+            "d_hidden": self.d_hidden,
+            "harrier": self._harrier is not None,
+            "vision": self._vision is not None,
+            "audio": self._audio is not None,
+            "neurochemistry": self._neurochemistry is not None,
+        }
+
+    # ── Fault Isolation ──────────────────────────────────────────────────
+
+    def _safe_call(self, module_name: str, fn, default=None):
+        """Call fn() in an error boundary. Log and return default on failure."""
+        try:
+            return fn()
+        except Exception as e:
+            logger.warning("Module %s failed: %s", module_name, e)
+            return default
+
+    def _neuro_step(self, h: np.ndarray, retrieved: list) -> dict:
+        """Run neurochemistry step. Isolated from forward() for clarity."""
+        novelty = float(1.0 - max(s for _, s in retrieved) if retrieved else 1.0)
+        intensity = float(np.linalg.norm(h))
+        self._neurochemistry.step(
+            novelty=novelty, threat=0.0,
+            focus=min(intensity / 10.0, 1.0),
+            valence=0.5, dt=0.05,
+        )
+        return self._neurochemistry.get_state()
+
+
+# ── Factory Function ─────────────────────────────────────────────────────
+
+
+def create_cubemind(
+    k: int = K_BLOCKS,
+    l: int = L_BLOCK,
+    d_hidden: int = 128,
+    seed: int = 42,
+    **config_overrides: Any,
+) -> CubeMind:
+    """Create a CubeMind with default wiring via DI container.
+
+    This is the simplest way to get a working CubeMind instance.
+    Pass config_overrides to customize any container config value.
+
+    Args:
+        k: VSA block count.
+        l: VSA block length.
+        d_hidden: Hidden dimension.
+        seed: Random seed.
+        **config_overrides: Additional config values (e.g., enable_vision=False).
+
+    Returns:
+        Fully wired CubeMind instance.
+    """
+    from cubemind.container import CubeMindContainer
+
+    config = {"k": k, "l": l, "d_hidden": d_hidden, "seed": seed}
+    config.update(config_overrides)
+
+    container = CubeMindContainer()
+    container.config.from_dict(config)
+    return container.cubemind()

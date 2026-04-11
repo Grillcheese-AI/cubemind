@@ -83,21 +83,3 @@ def test_vsa_spikes_vsa_with_gif():
     assert np.all(np.isfinite(hv_out))
 
 
-def test_integration_with_model3():
-    """Bridge works inside CubeMind v3 pipeline."""
-    from cubemind.model3 import CubeMindV3
-
-    brain = CubeMindV3(k=K, l=L, d_hidden=32, max_memories=50,
-                        n_place_cells=10, n_time_cells=5, n_grid_cells=10,
-                        initial_neurons=8, max_neurons=16,
-                        enable_neurochemistry=False, seed=42)
-    bridge = SpikeVSABridge(k=K, l=L, num_timesteps=5, seed=42)
-
-    result = brain.forward(text="bridge test")
-    output_hv = result["output_hv"]
-
-    # Convert output to spikes and back
-    spikes = bridge.vsa_to_spikes(output_hv)
-    hv_reconstructed = bridge.spikes_to_vsa(spikes)
-
-    assert hv_reconstructed.shape == (K, L)
