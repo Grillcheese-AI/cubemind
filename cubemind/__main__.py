@@ -33,7 +33,7 @@ def cli() -> None:
 def demo(camera, width, height, k, l_block, d_hidden, llm) -> None:
     """Live brain demo — webcam + audio + keyboard teaching."""
     try:
-        import cv2
+        import cv2 # pyright: ignore[reportMissingImports]
     except ImportError:
         click.echo("Error: opencv-python required. Install with: pip install opencv-python")
         sys.exit(1)
@@ -177,6 +177,22 @@ def train_vsa_lm(steps, layers, d_model, seq_len, data_dir) -> None:
     """Train VSA-LM on TinyStories."""
     from cubemind.training.vsa_lm import main as vsa_lm_main
     vsa_lm_main()
+
+
+@train.command("harrier")
+@click.option("--steps", default=50000, help="Training steps.")
+@click.option("--seq-len", default=64, help="Sequence length.")
+@click.option("--lr", type=float, default=1e-3, help="Learning rate.")
+@click.option("--save-every", default=5000, help="Save checkpoint every N steps.")
+@click.option("--log-every", default=100, help="Log every N steps.")
+def train_harrier(steps, seq_len, lr, save_every, log_every) -> None:
+    """Pre-train MindForge on Harrier 0.6B teacher logits."""
+    from cubemind.training.harrier_pretrain import HarrierPretrainConfig, train
+    config = HarrierPretrainConfig(
+        train_steps=steps, seq_len=seq_len, lr=lr,
+        save_every=save_every, log_every=log_every,
+    )
+    train(config)
 
 
 @cli.command()
