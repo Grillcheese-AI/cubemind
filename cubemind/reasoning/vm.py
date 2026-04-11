@@ -352,6 +352,11 @@ class VSAVM:
             # ── Cleanup ─────────────────────────────────────────────
             case "CLEANUP":
                 return self._cleanup(*args)
+            # ── Rule discovery ──────────────────────────────────────
+            case "DISCOVER":
+                return self._discover(*args)
+            case "DISCOVER_SEQUENCE":
+                return self._discover_sequence(*args)
             # ── Reasoning ───────────────────────────────────────────
             case "DEBATE":
                 return self._debate(*args)
@@ -772,6 +777,141 @@ class VSAVM:
         return name
 
     # ── Reasoning (HD Graph-of-Thoughts) ────────────────────────────────
+
+    # ── Rule Discovery (HDR Algorithm) ─────────────────────────────────
+
+    def _discover(
+        self, input_vec: np.ndarray, output_vec: np.ndarray,
+    ) -> dict[str, Any]:
+        """DISCOVER input output — induce the rule that transforms input → output.
+
+        The HDR (Hypervector Discover Rule) algorithm:
+        1. Check if input ≈ output → constant rule
+        2. Unbind: delta = unbind(output, input) → the transformation vector
+        3. Check delta against known rules in cleanup memory
+        4. If new, store as discovered rule
+
+        Returns:
+            {"rule_type": "constant"|"bind", "delta": np.ndarray|None,
+             "similarity": float, "known_rule": str|None}
+        """
+        sim_io = float(self.bc.similarity(input_vec, output_vec))
+
+        # Constant: input ≈ output
+        if sim_io > 0.9:
+            return {
+                "rule_type": "constant",
+                "delta": None,
+                "similarity": sim_io,
+                "known_rule": None,
+            }
+
+        # Unbind to discover the transformation
+        delta = self.bc.unbind(output_vec, input_vec)
+
+        # Check if this delta matches a known rule
+        known_rule = None
+        if self.cleanup_mem.size > 0:
+            name, clean = self.cleanup_mem.cleanup(delta)
+            match_sim = float(self.bc.similarity(delta, clean))
+            if match_sim > 0.7:
+                known_rule = name
+
+        return {
+            "rule_type": "bind",
+            "delta": delta,
+            "similarity": sim_io,
+            "known_rule": known_rule,
+        }
+
+    def _discover_sequence(
+        self, pairs: list[tuple[np.ndarray, np.ndarray]],
+    ) -> dict[str, Any]:
+        """DISCOVER_SEQUENCE [(in, out), ...] — discover rules from example pairs.
+
+        Clusters the transformation vectors (deltas) to find how many
+        distinct rules are present, then returns each unique rule.
+
+        Algorithm:
+        1. For each (input, output) pair, compute delta = unbind(out, in)
+        2. Cluster deltas by similarity
+        3. Each cluster = one discovered rule (centroid is the rule's delta)
+
+        Returns:
+            {"n_rules": int, "rules": [{"rule_type": str, "delta": ndarray, "count": int}, ...]}
+        """
+        if not pairs:
+            return {"n_rules": 0, "rules": []}
+
+        # Step 1: compute all deltas
+        deltas = []
+        for inp, out in pairs:
+            disc = self._discover(inp, out)
+            deltas.append(disc)
+
+        # Separate constants from binds
+        constants = [d for d in deltas if d["rule_type"] == "constant"]
+        binds = [d for d in deltas if d["rule_type"] == "bind"]
+
+        rules = []
+
+        # Add constant rule if any
+        if constants:
+            rules.append({
+                "rule_type": "constant",
+                "delta": None,
+                "count": len(constants),
+            })
+
+        # Step 2: cluster bind deltas by similarity
+        if binds:
+            clusters = self._cluster_deltas([b["delta"] for b in binds])
+            for centroid, count in clusters:
+                rules.append({
+                    "rule_type": "bind",
+                    "delta": centroid,
+                    "count": count,
+                })
+
+        return {"n_rules": len(rules), "rules": rules}
+
+    def _cluster_deltas(
+        self, deltas: list[np.ndarray], threshold: float = 0.6,
+    ) -> list[tuple[np.ndarray, int]]:
+        """Cluster delta vectors by similarity (greedy nearest-neighbor).
+
+        Returns list of (centroid, count) for each cluster.
+        """
+        if not deltas:
+            return []
+
+        clusters: list[tuple[np.ndarray, int]] = []
+
+        for delta in deltas:
+            # Find nearest existing cluster
+            best_idx = -1
+            best_sim = -1.0
+            for i, (centroid, _) in enumerate(clusters):
+                sim = float(self.bc.similarity(delta, centroid))
+                if sim > best_sim:
+                    best_sim = sim
+                    best_idx = i
+
+            if best_sim >= threshold and best_idx >= 0:
+                # Consolidate into existing cluster (running average)
+                old_centroid, old_count = clusters[best_idx]
+                new_count = old_count + 1
+                # Weighted average in continuous space, then discretize
+                blended = (old_centroid.astype(np.float32) * old_count
+                           + delta.astype(np.float32)) / new_count
+                clusters[best_idx] = (self.bc.discretize(blended), new_count)
+            else:
+                # New cluster
+                clusters.append((delta.copy(), 1))
+
+        return clusters
+
+    # ── VQA ──────────────────────────────────────────────────────────────
 
     def _ask(self, objects: list, question: str):
         """ASK objects question — visual question answering via VSA scene memory."""
