@@ -759,3 +759,204 @@ class TestSequence:
 
         sim = float(bc.similarity(seq2, seq3))
         assert sim < 0.8, f"Different length seqs should differ: sim={sim:.3f}"
+
+
+# ── MUL / DIV ───────────────────────────────────────────────────────────
+
+
+class TestMulDiv:
+
+    def test_mul_doubles(self, vm):
+        """ASSIGN 4, MUL 2 → QUERY = 8."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 4)
+        vm.execute("MUL", "x", 2)
+        assert vm.execute("QUERY", "x") == 8
+
+    def test_mul_triples(self, vm):
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 3)
+        vm.execute("MUL", "x", 3)
+        assert vm.execute("QUERY", "x") == 9
+
+    def test_mul_by_zero(self, vm):
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 5)
+        vm.execute("MUL", "x", 0)
+        assert vm.execute("QUERY", "x") == 0
+
+    def test_mul_by_one_is_noop(self, vm):
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 7)
+        vm.execute("MUL", "x", 1)
+        assert vm.execute("QUERY", "x") == 7
+
+    def test_div_halves(self, vm):
+        """ASSIGN 10, DIV 2 → QUERY = 5."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+        vm.execute("DIV", "x", 2)
+        assert vm.execute("QUERY", "x") == 5
+
+    def test_div_integer_truncation(self, vm):
+        """7 / 2 = 3 (integer division)."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 7)
+        vm.execute("DIV", "x", 2)
+        assert vm.execute("QUERY", "x") == 3
+
+    def test_div_by_one_is_noop(self, vm):
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 9)
+        vm.execute("DIV", "x", 1)
+        assert vm.execute("QUERY", "x") == 9
+
+    def test_div_by_zero_returns_zero(self, vm):
+        """Division by zero should not crash — returns 0."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 5)
+        vm.execute("DIV", "x", 0)
+        assert vm.execute("QUERY", "x") == 0
+
+    def test_mul_div_program(self, vm):
+        """'Start with 6. Triple it. Split equally among 9. What's left?'"""
+        program = [
+            ("CREATE", "x", "number"),
+            ("ASSIGN", "x", 6),
+            ("MUL", "x", 3),
+            ("DIV", "x", 9),
+            ("QUERY", "x"),
+        ]
+        assert vm.run(program) == 2
+
+
+# ── COND (conditional) ──────────────────────────────────────────────────
+
+
+class TestCond:
+
+    def test_cond_true_branch(self, vm):
+        """COND with true condition executes then-program."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+        vm.execute("CREATE", "flag", "number")
+        vm.execute("ASSIGN", "flag", 1)
+
+        # If flag == 1, add 5 to x
+        vm.execute("COND", "flag", 1,
+                    [("ADD", "x", 5)],
+                    [("SUB", "x", 5)])
+        assert vm.execute("QUERY", "x") == 15
+
+    def test_cond_false_branch(self, vm):
+        """COND with false condition executes else-program."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+        vm.execute("CREATE", "flag", "number")
+        vm.execute("ASSIGN", "flag", 0)
+
+        # If flag == 1, add 5; else sub 5
+        vm.execute("COND", "flag", 1,
+                    [("ADD", "x", 5)],
+                    [("SUB", "x", 5)])
+        assert vm.execute("QUERY", "x") == 5
+
+    def test_cond_no_else(self, vm):
+        """COND with no else branch does nothing when false."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+        vm.execute("CREATE", "flag", "number")
+        vm.execute("ASSIGN", "flag", 0)
+
+        vm.execute("COND", "flag", 1,
+                    [("ADD", "x", 99)])
+        assert vm.execute("QUERY", "x") == 10
+
+    def test_cond_nested(self, vm):
+        """COND can nest — inner cond inside outer then-branch."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 0)
+        vm.execute("CREATE", "a", "number")
+        vm.execute("ASSIGN", "a", 1)
+        vm.execute("CREATE", "b", "number")
+        vm.execute("ASSIGN", "b", 1)
+
+        # If a==1: if b==1: x=100 else x=50
+        vm.execute("COND", "a", 1,
+                    [("COND", "b", 1,
+                      [("ASSIGN", "x", 100)],
+                      [("ASSIGN", "x", 50)])])
+        assert vm.execute("QUERY", "x") == 100
+
+
+# ── LOOP ─────────────────────────────────────────────────────────────────
+
+
+class TestLoop:
+
+    def test_loop_counts_to_target(self, vm):
+        """LOOP adds 1 until x reaches 5."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 0)
+
+        vm.execute("LOOP", "x", 5, "less",
+                    [("ADD", "x", 1)])
+        assert vm.execute("QUERY", "x") == 5
+
+    def test_loop_decrements(self, vm):
+        """LOOP subtracts 2 until x reaches 0 or below."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+
+        vm.execute("LOOP", "x", 0, "greater",
+                    [("SUB", "x", 2)])
+        assert vm.execute("QUERY", "x") == 0
+
+    def test_loop_already_satisfied(self, vm):
+        """LOOP does nothing if condition already met."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+
+        vm.execute("LOOP", "x", 5, "less",
+                    [("ADD", "x", 1)])
+        # x=10 is NOT less than 5, so loop never runs
+        assert vm.execute("QUERY", "x") == 10
+
+    def test_loop_max_iterations_safety(self, vm):
+        """LOOP has a max iteration limit to prevent infinite loops."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 0)
+
+        # This would loop forever without the safety limit
+        vm.execute("LOOP", "x", 999999, "less",
+                    [("ADD", "x", 1)],
+                    max_iter=100)
+        assert vm.execute("QUERY", "x") == 100
+
+    def test_loop_in_program(self, vm):
+        """'Start with 3. While less than 20, double it. How much?'"""
+        program = [
+            ("CREATE", "x", "number"),
+            ("ASSIGN", "x", 3),
+            ("LOOP", "x", 20, "less", [("MUL", "x", 2)]),
+            ("QUERY", "x"),
+        ]
+        # 3 → 6 → 12 → 24 (stop, 24 >= 20)
+        assert vm.run(program) == 24
+
+    def test_transfer_in_loop(self, vm):
+        """'A has 10. Give 2 to B each round for 3 rounds.'"""
+        program = [
+            ("CREATE", "a", "person"),
+            ("CREATE", "b", "person"),
+            ("CREATE", "round", "number"),
+            ("ASSIGN", "a", 10),
+            ("ASSIGN", "b", 0),
+            ("ASSIGN", "round", 0),
+            ("LOOP", "round", 3, "less", [
+                ("TRANSFER", "a", "b", 2),
+                ("ADD", "round", 1),
+            ]),
+            ("QUERY", "b"),
+        ]
+        assert vm.run(program) == 6

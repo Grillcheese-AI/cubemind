@@ -272,7 +272,7 @@ class VSAVM:
 
     # ── Instruction Dispatch ─────────────────────────────────────────────
 
-    def execute(self, opcode: str, *args: Any) -> Any:
+    def execute(self, opcode: str, *args: Any, **kwargs: Any) -> Any:
         """Execute a single VM instruction."""
         self.step_count += 1
         if self.trace_enabled:
@@ -289,6 +289,10 @@ class VSAVM:
                 return self._add(*args)
             case "SUB":
                 return self._sub(*args)
+            case "MUL":
+                return self._mul(*args)
+            case "DIV":
+                return self._div(*args)
             case "TRANSFER":
                 return self._transfer(*args)
             case "COMPARE":
@@ -313,6 +317,11 @@ class VSAVM:
                 return self._predict(*args)
             case "MATCH":
                 return self._match(*args)
+            # ── Control flow ────────────────────────────────────────
+            case "COND":
+                return self._cond(*args)
+            case "LOOP":
+                return self._loop(*args, **kwargs)
             # ── Sequence ────────────────────────────────────────────
             case "SEQ":
                 return self._seq(*args)
@@ -371,6 +380,19 @@ class VSAVM:
         current = self._values.get(name, 0)
         new_val = current - amount
         self._assign(name, new_val)
+
+    def _mul(self, name: str, factor: int) -> None:
+        """MUL var n — multiply the register's value."""
+        current = self._values.get(name, 0)
+        self._assign(name, current * factor)
+
+    def _div(self, name: str, divisor: int) -> None:
+        """DIV var n — integer-divide the register's value. Div by zero → 0."""
+        current = self._values.get(name, 0)
+        if divisor == 0:
+            self._assign(name, 0)
+        else:
+            self._assign(name, current // divisor)
 
     def _transfer(self, src: str, dst: str, amount: int) -> None:
         """TRANSFER src dst n — move n from src to dst."""
@@ -529,6 +551,53 @@ class VSAVM:
                 best_sim = sim
                 best_idx = i
         return best_idx
+
+    # ── Control Flow ──────────────────────────────────────────────────
+
+    def _cond(
+        self, var: str, target: int,
+        then_prog: list[tuple],
+        else_prog: list[tuple] | None = None,
+    ) -> None:
+        """COND var target then_prog [else_prog] — conditional execution.
+
+        If var's value == target, execute then_prog; otherwise execute else_prog.
+        Programs are lists of (opcode, *args) tuples.
+        """
+        current = self._values.get(var, 0)
+        if current == target:
+            for instr in then_prog:
+                self.execute(instr[0], *instr[1:])
+        elif else_prog:
+            for instr in else_prog:
+                self.execute(instr[0], *instr[1:])
+
+    def _loop(
+        self, var: str, target: int, condition: str,
+        body: list[tuple],
+        max_iter: int = 1000,
+    ) -> None:
+        """LOOP var target condition body [max_iter] — repeat body while condition holds.
+
+        Conditions:
+            "less"    — loop while var < target
+            "greater" — loop while var > target
+            "not_equal" — loop while var != target
+
+        max_iter prevents infinite loops (VM safety).
+        """
+        iterations = 0
+        while iterations < max_iter:
+            current = self._values.get(var, 0)
+            if condition == "less" and current >= target:
+                break
+            elif condition == "greater" and current <= target:
+                break
+            elif condition == "not_equal" and current == target:
+                break
+            for instr in body:
+                self.execute(instr[0], *instr[1:])
+            iterations += 1
 
     # ── Sequence (Position-Aware) ───────────────────────────────────────
 
