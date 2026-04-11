@@ -247,6 +247,9 @@ class VSAVM:
         # Last predicted vector (for MATCH after PREDICT)
         self._last_predicted: np.ndarray | None = None
 
+        # Stack (LIFO) for PUSH/POP — saves (name, block-code, int_value)
+        self._stack: list[tuple[str, np.ndarray, int]] = []
+
         # Cleanup memory (associative store for snapping noisy vectors to clean ones)
         self.cleanup_mem = CleanupMemory(bc)
 
@@ -317,11 +320,24 @@ class VSAVM:
                 return self._predict(*args)
             case "MATCH":
                 return self._match(*args)
+            # ── Data movement ──────────────────────────────────────
+            case "COPY":
+                return self._copy(*args)
+            case "PUSH":
+                return self._push(*args)
+            case "POP":
+                return self._pop(*args)
             # ── Control flow ────────────────────────────────────────
             case "COND":
                 return self._cond(*args)
             case "LOOP":
                 return self._loop(*args, **kwargs)
+            case "CALL":
+                return self._call(*args)
+            case "JMP":
+                return self._jmp(*args)
+            case "LABEL":
+                return None  # labels are markers, no-op at execution
             # ── Sequence ────────────────────────────────────────────
             case "SEQ":
                 return self._seq(*args)
@@ -334,16 +350,47 @@ class VSAVM:
                 logger.warning("Unknown opcode: %s", opcode)
                 return None
 
-    def run(self, program: list[tuple]) -> Any:
-        """Execute a sequence of (opcode, *args) tuples.
+    def run(self, program: list[tuple], max_instructions: int = 10000) -> Any:
+        """Execute a program with instruction-pointer-based flow.
+
+        Supports JMP/LABEL for non-linear control flow.
+        max_instructions prevents runaway programs (safety guard).
 
         Returns last QUERY or MATCH result.
         """
+        # Pre-scan for labels → instruction index
+        labels: dict[str, int] = {}
+        for i, instr in enumerate(program):
+            if instr[0] == "LABEL":
+                labels[instr[1]] = i
+
+        # Store labels and program for JMP access
+        self._run_labels = labels
+        self._run_program = program
+        self._run_ip = 0  # instruction pointer
+        self._run_jump = False  # set by _jmp()
+
         last_result = None
-        for instr in program:
+        executed = 0
+
+        while self._run_ip < len(program) and executed < max_instructions:
+            instr = program[self._run_ip]
+            self._run_jump = False
+
+            if instr[0] == "LABEL":
+                self._run_ip += 1
+                continue
+
             result = self.execute(instr[0], *instr[1:])
+            executed += 1
+
             if instr[0] in ("QUERY", "MATCH"):
                 last_result = result
+
+            # If JMP was called, _run_ip was already updated
+            if not self._run_jump:
+                self._run_ip += 1
+
         return last_result
 
     # ── Instructions ─────────────────────────────────────────────────────
@@ -402,6 +449,48 @@ class VSAVM:
         dst_val = self._values.get(dst, 0)
         self._assign(src, src_val - amount)
         self._assign(dst, dst_val + amount)
+
+    def _copy(self, src: str, dst: str) -> None:
+        """COPY src dst — copy register value (block-code + integer)."""
+        if src in self.registers:
+            self.registers[dst] = self.registers[src].copy()
+        self._values[dst] = self._values.get(src, 0)
+
+    def _push(self, name: str) -> None:
+        """PUSH reg — save register state onto the stack."""
+        if name not in self.registers:
+            return
+        frame = (self.registers[name].copy(), self._values.get(name, 0))
+        if not hasattr(self, "_stack"):
+            self._stack: list[tuple[str, np.ndarray, int]] = []
+        self._stack.append((name, frame[0], frame[1]))
+
+    def _pop(self, name: str) -> None:
+        """POP reg — restore register from top of stack (LIFO)."""
+        if not hasattr(self, "_stack") or not self._stack:
+            return
+        # Find the last push for this register
+        for i in range(len(self._stack) - 1, -1, -1):
+            if self._stack[i][0] == name:
+                _, vec, val = self._stack.pop(i)
+                self.registers[name] = vec
+                self._values[name] = val
+                return
+
+    def _call(self, rule_name: str) -> Any:
+        """CALL rule_name — execute a stored rule (subroutine)."""
+        if rule_name not in self.rules:
+            return None
+        return self.run(self.rules[rule_name])
+
+    def _jmp(self, label: str) -> None:
+        """JMP label — jump to a labeled position in the current program.
+
+        Only works inside run() — sets the instruction pointer directly.
+        """
+        if hasattr(self, "_run_labels") and label in self._run_labels:
+            self._run_ip = self._run_labels[label]
+            self._run_jump = True
 
     def _compare(self, a: str, b: str) -> str:
         """COMPARE a b — compare two registers' values."""

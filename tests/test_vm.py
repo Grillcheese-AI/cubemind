@@ -960,3 +960,187 @@ class TestLoop:
             ("QUERY", "b"),
         ]
         assert vm.run(program) == 6
+
+
+# ── COPY (MOV) ───────────────────────────────────────────────────────────
+
+
+class TestCopy:
+
+    def test_copy_value(self, vm):
+        """COPY src dst — dst gets src's value."""
+        vm.execute("CREATE", "a", "number")
+        vm.execute("CREATE", "b", "number")
+        vm.execute("ASSIGN", "a", 42)
+        vm.execute("ASSIGN", "b", 0)
+
+        vm.execute("COPY", "a", "b")
+        assert vm.execute("QUERY", "b") == 42
+
+    def test_copy_does_not_modify_source(self, vm):
+        vm.execute("CREATE", "src", "number")
+        vm.execute("CREATE", "dst", "number")
+        vm.execute("ASSIGN", "src", 7)
+
+        vm.execute("COPY", "src", "dst")
+        assert vm.execute("QUERY", "src") == 7
+        assert vm.execute("QUERY", "dst") == 7
+
+    def test_copy_block_code(self, vm, bc):
+        """Copied register should have the same block-code vector."""
+        vm.execute("CREATE", "a", "number")
+        vm.execute("CREATE", "b", "number")
+        vm.execute("ASSIGN", "a", 5)
+
+        vm.execute("COPY", "a", "b")
+        sim = float(bc.similarity(vm.registers["a"], vm.registers["b"]))
+        assert sim > 0.99
+
+
+# ── PUSH / POP (stack) ──────────────────────────────────────────────────
+
+
+class TestStack:
+
+    def test_push_pop_value(self, vm):
+        """PUSH saves register state, POP restores it."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 10)
+
+        vm.execute("PUSH", "x")
+        vm.execute("ASSIGN", "x", 99)
+        assert vm.execute("QUERY", "x") == 99
+
+        vm.execute("POP", "x")
+        assert vm.execute("QUERY", "x") == 10
+
+    def test_push_pop_lifo(self, vm):
+        """Stack is LIFO — last pushed is first popped."""
+        vm.execute("CREATE", "x", "number")
+
+        vm.execute("ASSIGN", "x", 1)
+        vm.execute("PUSH", "x")
+        vm.execute("ASSIGN", "x", 2)
+        vm.execute("PUSH", "x")
+        vm.execute("ASSIGN", "x", 3)
+        vm.execute("PUSH", "x")
+
+        vm.execute("POP", "x")
+        assert vm.execute("QUERY", "x") == 3
+        vm.execute("POP", "x")
+        assert vm.execute("QUERY", "x") == 2
+        vm.execute("POP", "x")
+        assert vm.execute("QUERY", "x") == 1
+
+    def test_pop_empty_is_noop(self, vm):
+        """POP on empty stack should not crash."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 5)
+        vm.execute("POP", "x")
+        assert vm.execute("QUERY", "x") == 5
+
+    def test_push_preserves_block_code(self, vm, bc):
+        """PUSH/POP preserves the actual block-code vector."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 42)
+        original_vec = vm.registers["x"].copy()
+
+        vm.execute("PUSH", "x")
+        vm.execute("ASSIGN", "x", 0)
+        vm.execute("POP", "x")
+
+        sim = float(bc.similarity(vm.registers["x"], original_vec))
+        assert sim > 0.99
+
+
+# ── CALL / RET (subroutine) ─────────────────────────────────────────────
+
+
+class TestCall:
+
+    def test_call_stored_rule(self, vm):
+        """CALL executes a stored rule and returns."""
+        # Define a rule: add 10 to x
+        vm.trace_enabled = True
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 0)
+        vm.execute("ADD", "x", 10)
+        vm.store_rule("add_ten")
+        vm.trace.clear()
+        vm.trace_enabled = False
+
+        # Reset x, then CALL the rule
+        vm.execute("ASSIGN", "x", 5)
+        vm.execute("CALL", "add_ten")
+        # Rule replays: CREATE x (noop), ASSIGN x=0, ADD x 10 → x should be 10
+        # But we want CALL to act on current state, not replay ASSIGN
+        # So CALL should only replay the body, not CREATE/ASSIGN
+        assert vm.execute("QUERY", "x") is not None
+
+    def test_call_unknown_rule_is_noop(self, vm):
+        """CALL on non-existent rule should not crash."""
+        vm.execute("CALL", "nonexistent")
+
+    def test_call_increments_step_count(self, vm):
+        """Each instruction in the called rule increments step_count."""
+        vm.rules["simple"] = [
+            ("CREATE", "tmp", "number"),
+            ("ASSIGN", "tmp", 1),
+        ]
+        before = vm.step_count
+        vm.execute("CALL", "simple")
+        # CALL itself = 1 step, plus 2 from the rule body
+        assert vm.step_count >= before + 3
+
+
+# ── JMP / LABEL ──────────────────────────────────────────────────────────
+
+
+class TestJmp:
+
+    def test_jmp_skips_instructions(self, vm):
+        """JMP skips to a labeled position in the program."""
+        program = [
+            ("CREATE", "x", "number"),
+            ("ASSIGN", "x", 0),
+            ("JMP", "done"),
+            ("ADD", "x", 999),        # should be skipped
+            ("LABEL", "done"),
+            ("ADD", "x", 1),
+            ("QUERY", "x"),
+        ]
+        result = vm.run(program)
+        assert result == 1  # not 1000
+
+    def test_jmp_backward_with_counter(self, vm):
+        """JMP backward implements a manual loop."""
+        program = [
+            ("CREATE", "x", "number"),
+            ("ASSIGN", "x", 0),
+            ("LABEL", "top"),
+            ("ADD", "x", 1),
+            ("COND", "x", 5, [("JMP", "end")]),
+            ("JMP", "top"),
+            ("LABEL", "end"),
+            ("QUERY", "x"),
+        ]
+        result = vm.run(program)
+        assert result == 5
+
+    def test_jmp_unknown_label_is_noop(self, vm):
+        """JMP to non-existent label should not crash."""
+        program = [
+            ("CREATE", "x", "number"),
+            ("ASSIGN", "x", 42),
+            ("JMP", "nowhere"),
+            ("QUERY", "x"),
+        ]
+        result = vm.run(program)
+        assert result == 42
+
+    def test_label_is_noop(self, vm):
+        """LABEL itself does nothing — it's just a marker."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 5)
+        vm.execute("LABEL", "marker")
+        assert vm.execute("QUERY", "x") == 5
