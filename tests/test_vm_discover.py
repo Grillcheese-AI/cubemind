@@ -15,7 +15,6 @@ and can replay it on new data.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from cubemind.ops.block_codes import BlockCodes

@@ -352,6 +352,9 @@ class VSAVM:
             # ── Cleanup ─────────────────────────────────────────────
             case "CLEANUP":
                 return self._cleanup(*args)
+            # ── Skip / Pass ─────────────────────────────────────────
+            case "SKIP" | "PASS":
+                return None  # explicit no-op (confounder detected)
             # ── Rule discovery ──────────────────────────────────────
             case "DISCOVER":
                 return self._discover(*args)
