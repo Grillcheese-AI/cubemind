@@ -36,10 +36,13 @@ from cubemind.functional.math import softmax
 # ── GPU bridge ───────────────────────────────────────────────────────────
 
 _gc = None
+_gc_distill = False
 try:
     import grilly_core as _gc_mod
     if hasattr(_gc_mod, "vsa_lm_forward"):
         _gc = _gc_mod
+    if hasattr(_gc_mod, "distillation_loss"):
+        _gc_distill = True
 except Exception:
     pass
 
@@ -87,6 +90,21 @@ class LiquidCell:
         return self.h.copy()
 
 
+def _layernorm_bwd(dout, x, mean, var, weight, eps=1e-5):
+    """LayerNorm backward — returns (dx, dweight, dbias)."""
+    N = x.shape[-1]
+    std_inv = 1.0 / np.sqrt(var + eps)
+    x_hat = (x - mean) * std_inv
+    dx_hat = dout * weight
+    dvar = np.sum(dx_hat * (x - mean) * -0.5 * (std_inv ** 3), axis=-1, keepdims=True)
+    dmean = (np.sum(dx_hat * -std_inv, axis=-1, keepdims=True)
+             + dvar * np.mean(-2.0 * (x - mean), axis=-1, keepdims=True))
+    dx = dx_hat * std_inv + dvar * 2.0 * (x - mean) / N + dmean / N
+    dweight = np.sum(dout * x_hat, axis=0)
+    dbias = np.sum(dout, axis=0)
+    return dx.astype(np.float32), dweight.astype(np.float32), dbias.astype(np.float32)
+
+
 class VSALayer:
     def __init__(self, cfg: VSALMConfig, layer_id: int, forge: MindForge,
                  hippo: HippocampalFormation, bc: BlockCodes, seed: int = 42):
@@ -104,9 +122,16 @@ class VSALayer:
 
         self.ln_g = np.ones(d, dtype=np.float32)
         self.ln_b = np.zeros(d, dtype=np.float32)
+        self.grads = {
+            "ln_g": np.zeros_like(self.ln_g),
+            "ln_b": np.zeros_like(self.ln_b),
+            "ffn_up_w": np.zeros_like(self.ffn_up.weight_patterns),
+            "ffn_down_w": np.zeros_like(self.ffn_down.weight_patterns),
+        }
 
-    def forward(self, x: np.ndarray, novelty: float = 0.5,
-                plasticity: float = 0.5, **kwargs) -> np.ndarray:
+    def forward_with_cache(self, x: np.ndarray, novelty: float = 0.5,
+                           plasticity: float = 0.5, **kwargs):
+        """Forward with cache for backward. Returns (output, cache)."""
         S, d = x.shape
 
         # LayerNorm
@@ -122,22 +147,71 @@ class VSALayer:
         spikes, _ = self.gif.forward(temporal_ctx.reshape(1, d))
         gate = spikes.ravel()
 
-        # MindForge LoRA
+        # MindForge LoRA (with cache for backward)
         ctx_flat = temporal_ctx[:self.cfg.k * self.cfg.l]
         if len(ctx_flat) < self.cfg.k * self.cfg.l:
             ctx_flat = np.pad(ctx_flat, (0, self.cfg.k * self.cfg.l - len(ctx_flat)))
-        ctx_bc = self.bc.discretize(ctx_flat.reshape(self.cfg.k, self.cfg.l))
-        A, B = self.forge.forge(ctx_bc, self.layer_id)
+        A, B, forge_cache = self.forge.forge_with_cache(
+            self.bc.discretize(ctx_flat.reshape(self.cfg.k, self.cfg.l)),
+            self.layer_id,
+        )
 
         # FFN
-        h_up = self.sign.forward(self.ffn_up.forward(h) / np.sqrt(self.ffn_up.in_features))
+        h_up_raw = self.ffn_up.forward(h) / np.sqrt(self.ffn_up.in_features)
+        h_up = self.sign.forward(h_up_raw)
         h_ffn = self.ffn_down.forward(h_up) / np.sqrt(self.ffn_down.in_features)
 
         # LoRA: h @ B @ A
-        h_lora = ((h @ B) @ A).astype(np.float32)
+        M = h @ B
+        h_lora = (M @ A).astype(np.float32)
 
-        y = (0.5 + plasticity) * h_ffn + (0.5 + novelty) * gate * h_lora
-        return x + y
+        lora_scale = 0.5 + novelty
+        ffn_scale = 0.5 + plasticity
+        y = ffn_scale * h_ffn + lora_scale * gate * h_lora
+
+        cache = (x, h, mean, var, h_up, M, A, B, lora_scale, ffn_scale, gate, forge_cache)
+        return x + y, cache
+
+    def forward(self, x: np.ndarray, novelty: float = 0.5,
+                plasticity: float = 0.5, **kwargs) -> np.ndarray:
+        """Forward without cache (inference only)."""
+        out, _ = self.forward_with_cache(x, novelty, plasticity, **kwargs)
+        return out
+
+    def backward(self, d_out: np.ndarray, cache: tuple) -> np.ndarray:
+        """Backward pass — accumulates gradients for FFN, LN, and MindForge."""
+        x, h, mean, var, h_up, M, A, B, lora_scale, ffn_scale, gate, forge_cache = cache
+        S, d = x.shape
+
+        d_x = d_out.copy()  # residual
+        d_y = d_out
+
+        # 1. LoRA backward
+        d_h_lora = d_y * lora_scale * gate
+        d_A = M.T @ d_h_lora
+        d_M = d_h_lora @ A.T
+        d_B = h.T @ d_M
+        d_h_from_lora = d_M @ B.T
+
+        # 2. MindForge backward (accumulates into forge.grads)
+        self.forge.backward(d_A, d_B, self.layer_id, forge_cache)
+
+        # 3. FFN backward (STE for SignActivation)
+        d_h_ffn = d_y * ffn_scale
+        self.grads["ffn_down_w"] += (h_up.T @ d_h_ffn) / S
+        d_h_up = d_h_ffn @ self.ffn_down.weight_patterns.T
+        d_h_up_pre = d_h_up  # STE
+        self.grads["ffn_up_w"] += (h.T @ d_h_up_pre) / S
+        d_h_from_ffn = d_h_up_pre @ self.ffn_up.weight_patterns.T
+
+        # 4. LayerNorm backward
+        d_h_total = d_h_from_lora + d_h_from_ffn
+        d_x_ln, d_g, d_b = _layernorm_bwd(d_h_total, x, mean, var, self.ln_g)
+        self.grads["ln_g"] += d_g.ravel()
+        self.grads["ln_b"] += d_b.ravel()
+
+        d_x += d_x_ln
+        return d_x
 
 
 # ── Model ────────────────────────────────────────────────────────────────
@@ -192,7 +266,7 @@ class VSALM:
             if not spv.exists():
                 # Try installed grilly
                 import grilly
-                spv = pathlib.Path(grilly.__file__).parent / "shaders" / "spv"
+                spv = pathlib.Path(grilly.__file__).parent / "shaders" / "spv" # type: ignore
 
             self._gpu_dev = _gc.Device()
             self._gpu_dev.load_shaders(str(spv))
@@ -388,69 +462,78 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
             prev_loss = loss if step > 0 else 0.0
             logits = model.forward(ids, prev_loss=prev_loss)
 
-            # ── Loss + gradient ──────────────────────────────────────
-            probs = np.asarray(softmax(logits), dtype=np.float32)
-            loss = -float(np.mean(np.log(probs[np.arange(S), labels] + 1e-8)))
-            grad_logits = probs.copy()
-            grad_logits[np.arange(S), labels] -= 1.0
-            grad_logits /= S
+            # ── Loss + gradient (GPU fused when available) ────────────
+            if _gc_distill and model._gpu_dev is not None:
+                dl = _gc.distillation_loss(
+                    model._gpu_dev,
+                    logits.astype(np.float32),
+                    logits.astype(np.float32),  # self-distill = pure CE
+                    labels.astype(np.int32),
+                    temperature=1.0, alpha=0.0,
+                )
+                loss = float(np.mean(dl["loss"]))
+                grad_logits = np.asarray(dl["grad"], dtype=np.float32)
+            else:
+                probs = np.asarray(softmax(logits), dtype=np.float32)
+                loss = -float(np.mean(np.log(probs[np.arange(S), labels] + 1e-8)))
+                grad_logits = probs.copy()
+                grad_logits[np.arange(S), labels] -= 1.0
+                grad_logits /= S
 
-            # ── GPU backward path ────────────────────────────────────
+            # ── Backward: zero grads ─────────────────────────────────
+            model.forge.grads = model.forge.zero_grads()
+            for layer in model.layers:
+                for k in layer.grads:
+                    layer.grads[k].fill(0.0)
+
+            # ── Forward with caches (needed for backward) ────────────
+            x_fwd = model.embed[ids] + model.pe[:S]
+            caps = model.capsule_embed[ids]
+            x_fwd = x_fwd + (caps @ model.capsule_proj.T).astype(np.float32)
+            caps_mean = caps.mean(axis=0)
+            novelty = float(np.clip(caps_mean[CAP_NOVELTY], 0, 1))
+            plasticity = float(np.clip(caps_mean[CAP_PLASTICITY], 0, 1))
+
+            caches = []
+            for layer in model.layers:
+                x_fwd, cache = layer.forward_with_cache(
+                    x_fwd, novelty=novelty, plasticity=plasticity)
+                caches.append(cache)
+
+            # ── Backward: output projection ──────────────────────────
+            dx = (grad_logits @ model.out_w / np.sqrt(cfg.d_model)).astype(np.float32)
+            grad_out_w = (grad_logits.T @ x_fwd / np.sqrt(cfg.d_model)).astype(np.float32)
+            model.out_w -= cfg.lr * np.clip(grad_out_w, -0.1, 0.1)
+
+            # ── Backward: layers in reverse (chain rule) ─────────────
+            for layer, cache in reversed(list(zip(model.layers, caches))):
+                dx = layer.backward(dx, cache)
+
+            # ── Apply layer gradients (FFN + LayerNorm) ──────────────
+            for layer in model.layers:
+                layer.ffn_up.weight_patterns -= cfg.lr * 0.1 * np.clip(
+                    layer.grads["ffn_up_w"], -0.05, 0.05)
+                layer.ffn_down.weight_patterns -= cfg.lr * 0.1 * np.clip(
+                    layer.grads["ffn_down_w"], -0.05, 0.05)
+                layer.ln_g -= cfg.lr * np.clip(layer.grads["ln_g"], -0.1, 0.1)
+                layer.ln_b -= cfg.lr * np.clip(layer.grads["ln_b"], -0.1, 0.1)
+
+            # ── Apply MindForge gradients ────────────────────────────
+            for fk, fg in model.forge.grads.items():
+                param = getattr(model.forge, fk)
+                param -= cfg.lr * np.clip(fg, -0.1, 0.1)
+
+            # ── Embedding gradients (scatter-add) ────────────────────
+            for t in range(S):
+                tok = int(ids[t])
+                if 0 <= tok < cfg.vocab_size:
+                    model.embed[tok] -= cfg.lr * np.clip(dx[t], -0.1, 0.1)
+                    dcaps = (dx[t] @ model.capsule_proj).astype(np.float32)
+                    model.capsule_embed[tok] -= cfg.lr * np.clip(dcaps, -0.1, 0.1)
+
+            # ── Re-upload to GPU if active ───────────────────────────
             if model._gpu_handle is not None:
-                try:
-                    grads = _gc.vsa_lm_backward(
-                        model._gpu_dev, model._gpu_handle,
-                        ids.astype(np.int32),
-                        grad_logits.astype(np.float32),
-                    )
-                    # Apply gradients
-                    model.embed -= cfg.lr * np.clip(grads["grad_embed"], -0.1, 0.1)
-                    model.out_w -= cfg.lr * np.clip(grads["grad_out_w"], -0.1, 0.1)
-                    if "grad_pos" in grads:
-                        model.pe -= cfg.lr * 0.01 * np.clip(grads["grad_pos"], -0.01, 0.01)
-                    for li in range(cfg.n_layers):
-                        if f"grad_ffn_up_{li}" in grads:
-                            model.layers[li].ffn_up.weight_patterns -= (
-                                cfg.lr * 0.1 * np.clip(grads[f"grad_ffn_up_{li}"], -0.05, 0.05)
-                            )
-                        if f"grad_ffn_down_{li}" in grads:
-                            model.layers[li].ffn_down.weight_patterns -= (
-                                cfg.lr * 0.1 * np.clip(grads[f"grad_ffn_down_{li}"], -0.05, 0.05)
-                            )
-                        if f"grad_ln_g_{li}" in grads:
-                            model.layers[li].ln_g -= cfg.lr * np.clip(grads[f"grad_ln_g_{li}"], -0.1, 0.1)
-                        if f"grad_ln_b_{li}" in grads:
-                            model.layers[li].ln_b -= cfg.lr * np.clip(grads[f"grad_ln_b_{li}"], -0.1, 0.1)
-
-                    model._reupload_gpu()
-                except Exception as e:
-                    logger.warning("GPU backward failed: {}", e)
-                    # Fall through to CPU update
-                    model._gpu_handle = None
-
-            # ── CPU backward path ────────────────────────────────────
-            if model._gpu_handle is None and model._last_hidden is not None:
-                x_final = model._last_hidden
-                grad_out_w = grad_logits.T @ x_final / S
-                model.out_w -= cfg.lr * np.clip(grad_out_w, -0.1, 0.1)
-
-                dx = (grad_logits @ model.out_w).astype(np.float32)
-                for t in range(S):
-                    tok = int(ids[t])
-                    if 0 <= tok < cfg.vocab_size:
-                        model.embed[tok] -= cfg.lr * np.clip(dx[t], -0.1, 0.1)
-                        dcaps = (dx[t] @ model.capsule_proj).astype(np.float32)
-                        model.capsule_embed[tok] -= cfg.lr * np.clip(dcaps, -0.1, 0.1)
-
-                error_signal = dx.mean(axis=0)
-                for layer in model.layers:
-                    h_mean = x_final.mean(axis=0)[:layer.ffn_up.in_features]
-                    delta = np.outer(
-                        error_signal[:layer.ffn_up.out_features],
-                        h_mean[:layer.ffn_up.in_features],
-                    )
-                    if delta.shape == layer.ffn_up.weight_patterns.shape:
-                        layer.ffn_up.weight_patterns -= cfg.lr * 0.1 * np.clip(delta, -0.05, 0.05)
+                model._reupload_gpu()
 
             # ── Logging + checkpoint ─────────────────────────────────
             if step % cfg.val_every == 0:
