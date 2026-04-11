@@ -199,10 +199,11 @@ class MindForge:
         self.A_basis = rng.normal(
             0, basis_std, size=(n_basis, rank, d_target),
         ).astype(np.float32)
-        # FIX: B_basis initialized to ZERO — initial LoRA output is exactly 0
-        self.B_basis = np.zeros(
-            (n_basis, d_target, rank), dtype=np.float32,
-        )
+        # Small init for B_basis — near-identity at step 0 while allowing
+        # gradient flow. Zero init kills gradients through the LoRA path.
+        self.B_basis = rng.normal(
+            0, basis_std * 0.01, size=(n_basis, d_target, rank),
+        ).astype(np.float32)
 
         # ── Gradient accumulators ────────────────────────────────────────────
         self.grads = self.zero_grads()
