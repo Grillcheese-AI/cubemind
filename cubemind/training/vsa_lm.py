@@ -67,10 +67,13 @@ class AdamW:
         self._m: dict[int, np.ndarray] = {}
         self._v: dict[int, np.ndarray] = {}
 
-    def step(self, param: np.ndarray, grad: np.ndarray) -> None:
-        """In-place AdamW update on param."""
-        pid = id(param)
+    def begin_step(self) -> None:
+        """Call once per training step (before all param updates)."""
         self.t += 1
+
+    def step(self, param: np.ndarray, grad: np.ndarray) -> None:
+        """In-place AdamW update on param. Call begin_step() first each iteration."""
+        pid = id(param)
 
         if pid not in self._m:
             self._m[pid] = np.zeros_like(param)
@@ -540,7 +543,8 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
                 grad_logits[np.arange(S), labels] -= 1.0
                 grad_logits /= S
 
-            # ── Backward: zero grads ─────────────────────────────────
+            # ── Backward: zero grads + advance optimizer step ─────────
+            opt.begin_step()
             model.forge.grads = model.forge.zero_grads()
             for layer in model.layers:
                 for k in layer.grads:
