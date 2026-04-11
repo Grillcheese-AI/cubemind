@@ -22,6 +22,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from pathlib import Path
 from dataclasses import dataclass
 
 import numpy as np
@@ -93,6 +94,7 @@ class HarrierPretrainConfig:
     # Distillation
     temperature: float = 2.0  # softmax temperature for KL div
     top_k_logits: int = 256   # only distill top-K logits (memory saving)
+    max_stories: int = 0      # 0 = all stories
 
     seed: int = 42
 
@@ -119,26 +121,32 @@ class TeacherExtractor:
         self.top_k = config.top_k_logits
         logger.info("Teacher loaded: vocab={}, d_model={}", self.vocab_size, config.teacher_d_model)
 
-    def extract(self, token_ids: np.ndarray) -> np.ndarray:
-        """Extract teacher logits for a token sequence.
+    def extract_from_text(self, text: str, max_tokens: int = 128) -> tuple[np.ndarray, np.ndarray]:
+        """Tokenize text with teacher's tokenizer and extract logits.
 
         Args:
-            token_ids: (seq_len,) int32 array of token IDs.
+            text: Raw text string.
+            max_tokens: Maximum tokens to process.
 
         Returns:
-            (seq_len, top_k) float32 logits (top-K only for memory).
+            (token_ids, logits) where token_ids is (seq,) int32 and
+            logits is (seq, top_k) float32.
         """
-        tokens = token_ids.tolist()
-        self.model.reset()  # clear KV cache between extractions
+        tokens = self.model.tokenize(text.encode("utf-8"))[:max_tokens]
+        if len(tokens) < 2:
+            tokens = self.model.tokenize(b"The cat sat on the mat.")[:max_tokens]
+
+        self.model.reset()
         self.model.eval(tokens)
         full_logits = np.array(self.model.scores[:len(tokens)], dtype=np.float32)
 
-        # Keep only top-K logits per position (saves memory)
+        token_ids = np.array(tokens, dtype=np.int32)
+
         if self.top_k < full_logits.shape[1]:
             top_indices = np.argpartition(full_logits, -self.top_k, axis=1)[:, -self.top_k:]
             top_logits = np.take_along_axis(full_logits, top_indices, axis=1)
-            return top_logits
-        return full_logits
+            return token_ids, top_logits
+        return token_ids, full_logits
 
     def __del__(self):
         if hasattr(self, "model"):
@@ -148,16 +156,36 @@ class TeacherExtractor:
 # ── Data Loading ─────────────────────────────────────────────────────────
 
 
-def load_tokens(config: HarrierPretrainConfig) -> np.ndarray:
-    """Load pre-tokenized TinyStories."""
-    tokens_path = os.path.join(config.data_dir, "tokens.npy")
-    if os.path.exists(tokens_path):
-        tokens = np.load(tokens_path)
-        logger.info("Loaded {} tokens from {}", len(tokens), tokens_path)
-        return tokens
-    else:
-        logger.error("No tokens found at {}. Run sandbox/vsa_lm/prepare_data.py first.", tokens_path)
-        raise FileNotFoundError(tokens_path)
+def load_text_data(config: HarrierPretrainConfig) -> list[str]:
+    """Load TinyStories as raw text chunks for teacher tokenization."""
+    # Try loading from HuggingFace datasets
+    try:
+        import datasets
+        logger.info("Loading TinyStories from HuggingFace...")
+        ds = datasets.load_dataset("roneneldan/TinyStories", split="train")
+        texts = [row["text"] for row in ds if len(row.get("text", "")) > 50]
+        logger.info("Loaded {} text samples from TinyStories", len(texts))
+        return texts[:config.max_stories] if config.max_stories > 0 else texts
+    except Exception as e:
+        logger.warning("HF load failed: {}. Trying local fallback.", e)
+
+    # Fallback: read any .txt files in data_dir
+    text_files = sorted(Path(config.data_dir).glob("*.txt"))
+    if text_files:
+        texts = []
+        for f in text_files:
+            texts.extend(f.read_text(encoding="utf-8", errors="ignore").split("\n\n"))
+        texts = [t.strip() for t in texts if len(t.strip()) > 50]
+        logger.info("Loaded {} text chunks from {}", len(texts), config.data_dir)
+        return texts
+
+    # Last resort: generate simple training sentences
+    logger.warning("No text data found. Using synthetic training sentences.")
+    return [
+        f"Once upon a time there was a {animal} who liked to {action}."
+        for animal in ["cat", "dog", "bird", "fish", "bear", "fox", "rabbit"]
+        for action in ["run", "jump", "play", "eat", "sleep", "sing", "dance", "swim"]
+    ] * 100
 
 
 # ── Training Loop ────────────────────────────────────────────────────────
@@ -169,9 +197,9 @@ def train(config: HarrierPretrainConfig | None = None):
 
     rng = np.random.default_rng(config.seed)
 
-    # Load data
-    tokens = load_tokens(config)
-    n_tokens = len(tokens)
+    # Load data as raw text (teacher will tokenize with its own vocab)
+    texts = load_text_data(config)
+    n_texts = len(texts)
 
     # Init teacher
     teacher = TeacherExtractor(config)
@@ -199,16 +227,17 @@ def train(config: HarrierPretrainConfig | None = None):
     loss_ema = 0.0
     t0 = time.time()
 
-    logger.info("Starting Harrier pre-training: {} steps, seq_len={}, lr={}",
-                config.train_steps, config.seq_len, config.lr)
+    logger.info("Starting MindForge pre-training: {} steps, {} texts, lr={}",
+                config.train_steps, n_texts, config.lr)
 
     for step in range(config.train_steps):
-        # Sample a random sequence
-        start = rng.integers(0, n_tokens - config.seq_len - 1)
-        input_ids = tokens[start:start + config.seq_len].astype(np.int32)
+        # Sample a random text and tokenize with teacher's tokenizer
+        text_idx = int(rng.integers(0, n_texts))
+        text = texts[text_idx]
 
-        # Get teacher logits
-        teacher_logits = teacher.extract(input_ids)  # (seq, top_k)
+        # Extract logits using teacher's own tokenizer
+        input_ids, teacher_logits = teacher.extract_from_text(text, max_tokens=config.seq_len)
+        labels = input_ids[1:]  # shifted labels
 
         # Create context block-code from token sequence
         context = bc.random_discrete(seed=0)
@@ -222,7 +251,6 @@ def train(config: HarrierPretrainConfig | None = None):
             softmax(teacher_logits / config.temperature), dtype=np.float32,
         )
         teacher_probs = np.clip(teacher_probs, 1e-7, 1.0)
-        labels = tokens[start + 1:start + config.seq_len + 1].astype(np.int32)
 
         # Forge adapter for one random layer
         layer_id = int(rng.integers(0, config.teacher_n_layers))
