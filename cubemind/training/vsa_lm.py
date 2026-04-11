@@ -544,28 +544,9 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
                 grad_logits[np.arange(S), labels] -= 1.0
                 grad_logits /= S
 
-            # Per-block CE auxiliary loss (uses block-code structure)
-            # Reshape last hidden to (S, k, l) and compute per-block softmax
-            if model._last_hidden is not None:
-                k, l_blk = cfg.k, cfg.l
-                d_vsa = k * l_blk
-                h_flat = model._last_hidden[:, :d_vsa]  # (S, d_vsa)
-                h_blocks = h_flat.reshape(S, k, l_blk)  # (S, k, l)
-                # Per-block softmax
-                h_max = h_blocks.max(axis=-1, keepdims=True)
-                h_exp = np.exp(h_blocks - h_max)
-                h_probs = h_exp / (h_exp.sum(axis=-1, keepdims=True) + 1e-8)
-                # Target: embed token's block-code structure
-                target_embed = model.embed[labels][:, :d_vsa].reshape(S, k, l_blk)
-                t_max = target_embed.max(axis=-1, keepdims=True)
-                t_exp = np.exp(target_embed - t_max)
-                t_probs = t_exp / (t_exp.sum(axis=-1, keepdims=True) + 1e-8)
-                # Per-block CE: -mean(sum(t * log(h)))
-                block_ce = -float(np.mean(np.sum(
-                    t_probs * np.log(h_probs + 1e-8), axis=-1,
-                )))
-                # Blend: 70% standard CE + 30% block CE
-                loss = 0.7 * loss + 0.3 * block_ce
+            # NOTE: Per-block CE disabled — embedding target distribution is not
+            # a meaningful supervision signal and causes loss oscillation.
+            # Will re-enable with proper block-code codebook target.
 
             # ── Backward: zero grads + advance optimizer step ─────────
             opt.begin_step()
@@ -657,6 +638,185 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
 
     elapsed = time.time() - t0
     logger.info("Done: {} steps in {:.0f}s, best PPL={:.1f}", step, elapsed, best_ppl)
+
+
+def train_distill(
+    teacher_dir: str = "data/teacher/gemma4_26b",
+    train_steps: int = 10000,
+    n_layers: int = 6,
+    d_model: int = 256,
+    seq_len: int = 128,
+    lr: float = 3e-4,
+):
+    """Train VSA-LM from pre-extracted teacher logits (offline distillation).
+
+    Uses OfflineDistillationLoader to stream teacher .npz files.
+    Loss = 0.3*CE(hard labels) + 0.6*KL(soft teacher).
+    """
+    from cubemind.training.moqe_distillation import (
+        OfflineDistillationLoader, _softmax, _cross_entropy_with_grad,
+        _kl_divergence_with_grad, _sparse_kl_divergence_with_grad,
+    )
+
+    cfg = VSALMConfig(
+        train_steps=train_steps, n_layers=n_layers, seq_len=seq_len,
+        val_every=100, d_model=d_model, d_ffn=d_model * 3,
+        k=16, l=16, forge_rank=8, forge_basis=16,
+        n_place=32, n_time=16, n_grid=24, lr=lr,
+    )
+
+    # Load teacher logits
+    loader = OfflineDistillationLoader(teacher_dir, max_seq_len=seq_len)
+
+    # Detect vocab from first file
+    import glob
+    first_file = sorted(glob.glob(os.path.join(teacher_dir, "*.npz")))[0]
+    sample = np.load(first_file)
+    if "logits" in sample:
+        teacher_vocab = sample["logits"].shape[-1]
+    elif "top_k_indices" in sample:
+        teacher_vocab = int(np.max(sample["top_k_indices"])) + 1
+    else:
+        teacher_vocab = 262144  # Gemma default
+    logger.info("Teacher vocab: {}", teacher_vocab)
+
+    # Set model vocab to teacher vocab for direct distillation
+    cfg.vocab_size = teacher_vocab
+
+    model = VSALM(cfg)
+    logger.info("VSA-LM distill: d={}, layers={}, vocab={}, params={:.1f}M",
+                cfg.d_model, cfg.n_layers, cfg.vocab_size, model.param_count() / 1e6)
+
+    opt = AdamW(lr=lr)
+    t0 = time.time()
+    best_loss = float("inf")
+    loss_ema = 0.0
+    step = 0
+
+    logger.info("Distillation training: {} steps, teacher_dir={}", train_steps, teacher_dir)
+
+    for epoch in range(100):  # enough epochs to hit train_steps
+        for input_ids, labels, teacher_data in loader:
+            if step >= train_steps:
+                break
+
+            S = min(len(input_ids), seq_len)
+            ids = input_ids[:S].astype(np.int32)
+            labs = labels[:S].astype(np.int32)
+
+            # Clamp token IDs to model vocab
+            ids = np.clip(ids, 0, cfg.vocab_size - 1)
+            labs = np.clip(labs, 0, cfg.vocab_size - 1)
+
+            # ── Forward ──────────────────────────────────────────────
+            logits = model.forward(ids)  # (S, vocab)
+
+            # ── Loss: CE + KL from teacher ───────────────────────────
+            loss_ce, grad_ce = _cross_entropy_with_grad(logits, labs)
+
+            if teacher_data is None:
+                loss_kd, grad_kd = 0.0, np.zeros_like(logits)
+            elif isinstance(teacher_data, dict) and "top_k_indices" in teacher_data:
+                loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
+                    logits,
+                    teacher_data["top_k_indices"][:S],
+                    teacher_data["top_k_logprobs"][:S].astype(np.float32),
+                    temperature=2.0,
+                )
+            elif isinstance(teacher_data, np.ndarray):
+                min_v = min(logits.shape[-1], teacher_data.shape[-1])
+                loss_kd, grad_kd = _kl_divergence_with_grad(
+                    logits[:, :min_v],
+                    teacher_data[:S, :min_v].astype(np.float32),
+                    temperature=2.0,
+                )
+                if min_v < logits.shape[-1]:
+                    pad = np.zeros((S, logits.shape[-1] - min_v), dtype=np.float32)
+                    grad_kd = np.concatenate([grad_kd, pad], axis=-1)
+            else:
+                loss_kd, grad_kd = 0.0, np.zeros_like(logits)
+
+            loss = 0.3 * loss_ce + 0.6 * loss_kd
+            grad_logits = (0.3 * grad_ce + 0.6 * grad_kd).astype(np.float32)
+
+            # ── Backward ─────────────────────────────────────────────
+            opt.begin_step()
+            model.forge.grads = model.forge.zero_grads()
+            for layer in model.layers:
+                for k in layer.grads:
+                    layer.grads[k].fill(0.0)
+
+            # Forward with caches for backward
+            x_fwd = model.embed[ids] + model.pe[:S]
+            caps = model.capsule_embed[ids]
+            x_fwd = x_fwd + (caps @ model.capsule_proj.T).astype(np.float32)
+            caps_mean = caps.mean(axis=0)
+            novelty = float(np.clip(caps_mean[CAP_NOVELTY], 0, 1))
+            plasticity = float(np.clip(caps_mean[CAP_PLASTICITY], 0, 1))
+
+            caches = []
+            for layer in model.layers:
+                x_fwd, cache = layer.forward_with_cache(
+                    x_fwd, novelty=novelty, plasticity=plasticity)
+                caches.append(cache)
+
+            # Output projection backward
+            dx = (grad_logits @ model.out_w / np.sqrt(cfg.d_model)).astype(np.float32)
+            grad_out_w = (grad_logits.T @ x_fwd / np.sqrt(cfg.d_model)).astype(np.float32)
+            opt.step(model.out_w, grad_out_w)
+
+            # Layer backward (chain rule)
+            for layer, cache in reversed(list(zip(model.layers, caches))):
+                dx = layer.backward(dx, cache)
+
+            # Apply layer + forge gradients via AdamW
+            for layer in model.layers:
+                opt.step(layer.ffn_up.weight_patterns, layer.grads["ffn_up_w"])
+                opt.step(layer.ffn_down.weight_patterns, layer.grads["ffn_down_w"])
+                opt.step(layer.ln_g, layer.grads["ln_g"])
+                opt.step(layer.ln_b, layer.grads["ln_b"])
+
+            for fk, fg in model.forge.grads.items():
+                opt.step(getattr(model.forge, fk), fg)
+
+            # Embedding gradients
+            for t in range(S):
+                tok = int(ids[t])
+                if 0 <= tok < cfg.vocab_size:
+                    model.embed[tok] -= lr * np.clip(dx[t], -0.1, 0.1)
+
+            # ── Logging ──────────────────────────────────────────────
+            loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
+            if step % cfg.val_every == 0:
+                elapsed = time.time() - t0
+                sps = (step + 1) / elapsed if elapsed > 0 else 0
+                logger.info(
+                    "step={:5d} | CE={:.3f} | KD={:.3f} | loss={:.3f} | "
+                    "ema={:.3f} | {:.1f} stp/s",
+                    step, loss_ce, loss_kd, loss, loss_ema, sps,
+                )
+                if loss_ema < best_loss:
+                    best_loss = loss_ema
+
+            if step % cfg.save_every == 0 and step > 0:
+                ckpt = f"data/checkpoints/vsa_lm_distill_step{step}.npz"
+                os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+                np.savez_compressed(
+                    ckpt, embed=model.embed, out_w=model.out_w,
+                    forge_A_basis=model.forge.A_basis,
+                    forge_B_basis=model.forge.B_basis,
+                    step=step, loss_ema=loss_ema,
+                )
+                logger.info("Checkpoint: {} (loss={:.3f})", ckpt, loss_ema)
+
+            step += 1
+
+        if step >= train_steps:
+            break
+
+    elapsed = time.time() - t0
+    logger.info("Distillation done: {} steps in {:.0f}s, best_loss={:.3f}",
+                step, elapsed, best_loss)
 
 
 if __name__ == "__main__":

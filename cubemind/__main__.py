@@ -199,6 +199,20 @@ def train_mindforge(teacher, steps, seq_len, lr, save_every, log_every) -> None:
     train(config)
 
 
+@train.command("distill")
+@click.option("--teacher-dir", default="data/teacher/gemma4_26b", help="Teacher logits directory.")
+@click.option("--steps", default=10000, help="Training steps.")
+@click.option("--layers", default=6, help="Number of VSA layers.")
+@click.option("--d-model", default=256, help="Model dimension.")
+@click.option("--seq-len", default=128, help="Sequence length.")
+@click.option("--lr", type=float, default=3e-4, help="Learning rate.")
+def train_distill(teacher_dir, steps, layers, d_model, seq_len, lr) -> None:
+    """Distill from pre-extracted teacher logits (Gemma/Llama .npz)."""
+    from cubemind.training.vsa_lm import train_distill as distill_fn
+    distill_fn(teacher_dir=teacher_dir, train_steps=steps, n_layers=layers,
+               d_model=d_model, seq_len=seq_len, lr=lr)
+
+
 @cli.command()
 def version() -> None:
     """Print version."""
