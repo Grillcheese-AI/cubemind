@@ -37,6 +37,7 @@ from cubemind.functional.math import softmax
 
 _gc = None
 _gc_distill = False
+_adamw = None
 try:
     import grilly_core as _gc_mod
     if hasattr(_gc_mod, "vsa_lm_forward"):
@@ -45,6 +46,58 @@ try:
         _gc_distill = True
 except Exception:
     pass
+
+try:
+    from grilly.backend._bridge import adamw_update as _adamw
+except Exception:
+    pass
+
+
+class AdamW:
+    """AdamW optimizer using grilly GPU update when available, numpy fallback."""
+
+    def __init__(self, lr: float = 5e-4, beta1: float = 0.9, beta2: float = 0.999,
+                 eps: float = 1e-8, weight_decay: float = 0.01):
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.wd = weight_decay
+        self.t = 0
+        self._m: dict[int, np.ndarray] = {}
+        self._v: dict[int, np.ndarray] = {}
+
+    def step(self, param: np.ndarray, grad: np.ndarray) -> None:
+        """In-place AdamW update on param."""
+        pid = id(param)
+        self.t += 1
+
+        if pid not in self._m:
+            self._m[pid] = np.zeros_like(param)
+            self._v[pid] = np.zeros_like(param)
+
+        beta1_t = self.beta1 ** self.t
+        beta2_t = self.beta2 ** self.t
+
+        if _adamw is not None:
+            result = _adamw(
+                param, grad, self._m[pid], self._v[pid],
+                lr=self.lr, beta1=self.beta1, beta2=self.beta2,
+                eps=self.eps, weight_decay=self.wd,
+                beta1_t=beta1_t, beta2_t=beta2_t,
+            )
+            if result is not None:
+                np.copyto(param, np.asarray(result["weights"], dtype=np.float32))
+                np.copyto(self._m[pid], np.asarray(result["m"], dtype=np.float32))
+                np.copyto(self._v[pid], np.asarray(result["v"], dtype=np.float32))
+                return
+
+        # Numpy fallback
+        self._m[pid] = self.beta1 * self._m[pid] + (1 - self.beta1) * grad
+        self._v[pid] = self.beta2 * self._v[pid] + (1 - self.beta2) * (grad ** 2)
+        m_hat = self._m[pid] / (1 - beta1_t)
+        v_hat = self._v[pid] / (1 - beta2_t)
+        param -= self.lr * (m_hat / (np.sqrt(v_hat) + self.eps) + self.wd * param)
 
 
 CAPSULE_DIM = 32
@@ -450,7 +503,8 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
     step = 0
     loss = 0.0
 
-    logger.info("Training {} steps...", cfg.train_steps)
+    opt = AdamW(lr=cfg.lr)
+    logger.info("Training {} steps (AdamW lr={})...", cfg.train_steps, cfg.lr)
 
     while step < cfg.train_steps:
         perm = np.random.permutation(len(train_x))
@@ -509,33 +563,31 @@ def main(train_steps: int = 10000, n_layers: int = 6, d_model: int = 256,
             # ── Backward: output projection ──────────────────────────
             dx = (grad_logits @ model.out_w / np.sqrt(cfg.d_model)).astype(np.float32)
             grad_out_w = (grad_logits.T @ x_fwd / np.sqrt(cfg.d_model)).astype(np.float32)
-            model.out_w -= cfg.lr * np.clip(grad_out_w, -0.1, 0.1)
+            opt.step(model.out_w, grad_out_w)
 
             # ── Backward: layers in reverse (chain rule) ─────────────
             for layer, cache in reversed(list(zip(model.layers, caches))):
                 dx = layer.backward(dx, cache)
 
-            # ── Apply layer gradients (FFN + LayerNorm) ──────────────
+            # ── Apply layer gradients via AdamW ──────────────────────
             for layer in model.layers:
-                layer.ffn_up.weight_patterns -= cfg.lr * 0.1 * np.clip(
-                    layer.grads["ffn_up_w"], -0.05, 0.05)
-                layer.ffn_down.weight_patterns -= cfg.lr * 0.1 * np.clip(
-                    layer.grads["ffn_down_w"], -0.05, 0.05)
-                layer.ln_g -= cfg.lr * np.clip(layer.grads["ln_g"], -0.1, 0.1)
-                layer.ln_b -= cfg.lr * np.clip(layer.grads["ln_b"], -0.1, 0.1)
+                opt.step(layer.ffn_up.weight_patterns, layer.grads["ffn_up_w"])
+                opt.step(layer.ffn_down.weight_patterns, layer.grads["ffn_down_w"])
+                opt.step(layer.ln_g, layer.grads["ln_g"])
+                opt.step(layer.ln_b, layer.grads["ln_b"])
 
-            # ── Apply MindForge gradients ────────────────────────────
+            # ── Apply MindForge gradients via AdamW ──────────────────
             for fk, fg in model.forge.grads.items():
                 param = getattr(model.forge, fk)
-                param -= cfg.lr * np.clip(fg, -0.1, 0.1)
+                opt.step(param, fg)
 
-            # ── Embedding gradients (scatter-add) ────────────────────
+            # ── Embedding gradients (scatter-add + AdamW) ────────────
             for t in range(S):
                 tok = int(ids[t])
                 if 0 <= tok < cfg.vocab_size:
-                    model.embed[tok] -= cfg.lr * np.clip(dx[t], -0.1, 0.1)
+                    opt.step(model.embed[tok], dx[t])
                     dcaps = (dx[t] @ model.capsule_proj).astype(np.float32)
-                    model.capsule_embed[tok] -= cfg.lr * np.clip(dcaps, -0.1, 0.1)
+                    opt.step(model.capsule_embed[tok], dcaps)
 
             # ── Re-upload to GPU if active ───────────────────────────
             if model._gpu_handle is not None:
