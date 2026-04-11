@@ -84,11 +84,16 @@ def _layernorm(x: np.ndarray, gamma: np.ndarray, beta: np.ndarray,
 def _layernorm_backward(dout: np.ndarray, x: np.ndarray, mean: float,
                          var: float, gamma: np.ndarray, eps: float = 1e-5):
     if _bridge is not None:
-        dx, dg, db = _bridge.layernorm_backward(
+        result = _bridge.layernorm_backward(
             dout.reshape(1, -1), x.reshape(1, -1), gamma,
             np.array([mean], dtype=np.float32),
             np.array([var], dtype=np.float32), eps,
         )
+        if isinstance(result, dict):
+            return (np.asarray(result["grad_input"], dtype=np.float32).ravel(),
+                    np.asarray(result["grad_gamma"], dtype=np.float32).ravel(),
+                    np.asarray(result["grad_beta"], dtype=np.float32).ravel())
+        dx, dg, db = result
         return (np.asarray(dx, dtype=np.float32).ravel(),
                 np.asarray(dg, dtype=np.float32).ravel(),
                 np.asarray(db, dtype=np.float32).ravel())
