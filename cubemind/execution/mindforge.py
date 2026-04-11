@@ -3,23 +3,26 @@
 Extends HYLA's factored weight generation with:
   1. Layer-ID conditioning — single generator for all target model layers
   2. LoRA-style injection — generates low-rank (A, B) adapters for a frozen base
-  3. Shared basis with mixing coefficients — instead of raw weights, predict
-     linear combinations of a trainable basis set
+  3. Shared basis with mixing coefficients — predicts continuous linear combinations
+     of a trainable basis set (NO softmax — prevents mode collapse)
   4. Symbolic context — input is VSA block-code from bind/bundle/permute ops
   5. Cleanup verification — SDLS purification validates symbolic consistency
+  6. Full backward pass ��� analytical gradients through basis mixing, MLP, LayerNorm
 
 Architecture::
 
     context_hv = bind(task_hv, personality_hv)          # VSA symbolic context
     layer_emb  = layer_embeddings[layer_id]             # per-layer coordinate
-    h          = GELU(concat(context_flat, layer_emb) @ W_h + b_h)
-    coeffs     = h @ W_coeff                            # (n_basis,) mixing coefficients
+    ctx_proj   = LayerNorm(context_flat @ W_proj)       # stabilize VSA noise
+    h          = GELU(concat(ctx_proj, layer_emb) @ W_h + b_h)
+    coeffs     = h @ W_coeff                            # continuous mixing (NO softmax)
     A          = sum(coeffs[i] * basis_A[i])            # (rank, d_in) adapter down
     B          = sum(coeffs[i] * basis_B[i])            # (d_out, rank) adapter up
     output     = frozen_base(x) + scale * (x @ A.T @ B.T)  # LoRA injection
 
-Memory: O(n_basis * rank * (d_in + d_out)) shared across all layers/contexts.
-At n_basis=16, rank=8, d=2048: ~4MB total vs ~256MB for 128 separate adapters.
+B_basis initialized to ZERO — initial adapter output is exactly 0 (identity).
+
+All ops use grilly GPU backend when available, numpy fallback otherwise.
 
 Part of the CubeMind cognitive architecture.
 """
@@ -37,22 +40,88 @@ except ImportError:
     K_BLOCKS: int = 80
     L_BLOCK: int = 128
 
+# ── Grilly GPU ops with numpy fallback ───────────────────────────────────
 
-def gelu(x: np.ndarray) -> np.ndarray:
-    """GELU activation."""
+_bridge = None
+try:
+    from grilly.backend import _bridge as _grilly_bridge
+    if _grilly_bridge.is_available():
+        _bridge = _grilly_bridge
+except Exception:
+    pass
+
+
+def _gelu(x: np.ndarray) -> np.ndarray:
+    if _bridge is not None:
+        return np.asarray(_bridge.gelu(x), dtype=np.float32)
     return (0.5 * x * (1.0 + np.tanh(
         np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)
     ))).astype(np.float32)
 
 
+def _gelu_backward(grad: np.ndarray, x: np.ndarray) -> np.ndarray:
+    if _bridge is not None:
+        return np.asarray(_bridge.gelu_backward(grad, x), dtype=np.float32)
+    cdf = 0.5 * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x ** 3)))
+    pdf = np.exp(-0.5 * x ** 2) / np.sqrt(2.0 * np.pi)
+    return (grad * (cdf + x * pdf)).astype(np.float32)
+
+
+def _layernorm(x: np.ndarray, gamma: np.ndarray, beta: np.ndarray,
+               eps: float = 1e-5) -> tuple[np.ndarray, float, float]:
+    mean = float(np.mean(x))
+    var = float(np.var(x))
+    if _bridge is not None:
+        normed = np.asarray(
+            _bridge.layernorm(x.reshape(1, -1), gamma, beta, eps),
+            dtype=np.float32,
+        ).ravel()
+        return normed, mean, var
+    normed = gamma * (x - mean) / np.sqrt(var + eps) + beta
+    return normed.astype(np.float32), mean, var
+
+
+def _layernorm_backward(dout: np.ndarray, x: np.ndarray, mean: float,
+                         var: float, gamma: np.ndarray, eps: float = 1e-5):
+    if _bridge is not None:
+        dx, dg, db = _bridge.layernorm_backward(
+            dout.reshape(1, -1), x.reshape(1, -1), gamma,
+            np.array([mean], dtype=np.float32),
+            np.array([var], dtype=np.float32), eps,
+        )
+        return (np.asarray(dx, dtype=np.float32).ravel(),
+                np.asarray(dg, dtype=np.float32).ravel(),
+                np.asarray(db, dtype=np.float32).ravel())
+    N = len(x)
+    std_inv = 1.0 / np.sqrt(var + eps)
+    x_hat = (x - mean) * std_inv
+    dx_hat = dout * gamma
+    dvar = float(np.sum(dx_hat * (x - mean) * -0.5 * (std_inv ** 3)))
+    dmean = float(np.sum(dx_hat * -std_inv)) + dvar * float(np.mean(-2.0 * (x - mean)))
+    dx = dx_hat * std_inv + dvar * 2.0 * (x - mean) / N + dmean / N
+    dg = (dout * x_hat).astype(np.float32)
+    db = dout.astype(np.float32)
+    return dx.astype(np.float32), dg, db
+
+
+def _linear(x: np.ndarray, w: np.ndarray, b: np.ndarray | None = None) -> np.ndarray:
+    if _bridge is not None:
+        return np.asarray(_bridge.linear(x, w, b), dtype=np.float32)
+    out = (x @ w.T).astype(np.float32)
+    if b is not None:
+        out += b
+    return out
+
+
+# Keep backward-compat name for external callers
+def gelu(x: np.ndarray) -> np.ndarray:
+    """GELU activation (grilly GPU when available)."""
+    return _gelu(x)
+
+
 @register("executor", "mindforge")
 class MindForge:
     """VSA-conditioned hypernetwork that forges LoRA adapters on the fly.
-
-    Given a symbolic context vector (block-code) and a layer ID, generates
-    low-rank adapter matrices (A, B) by predicting mixing coefficients over
-    a shared trainable basis. This allows a single generator to produce
-    unique adapters for every layer of a target model.
 
     Args:
         k: Number of VSA blocks.
@@ -97,196 +166,209 @@ class MindForge:
         ).astype(np.float32) * 0.02
 
         # ── Generator MLP ────────────────────────────────────────────────────
-        # Input: concat(context_flat_projected, layer_emb) → d_hidden * 2
-        # Output: n_basis mixing coefficients
         input_dim = d_hidden * 2
-
-        xavier_std_h = np.sqrt(2.0 / (input_dim + d_hidden))
-        self.W_h = rng.normal(0, xavier_std_h,
-                              size=(d_hidden, input_dim)).astype(np.float32)
+        self.W_h = rng.normal(
+            0, np.sqrt(2.0 / (input_dim + d_hidden)),
+            size=(d_hidden, input_dim),
+        ).astype(np.float32)
         self.b_h = np.zeros(d_hidden, dtype=np.float32)
 
-        xavier_std_c = np.sqrt(2.0 / (d_hidden + n_basis))
-        self.W_coeff = rng.normal(0, xavier_std_c,
-                                  size=(n_basis, d_hidden)).astype(np.float32)
+        self.W_coeff = rng.normal(
+            0, np.sqrt(2.0 / (d_hidden + n_basis)),
+            size=(n_basis, d_hidden),
+        ).astype(np.float32)
         self.b_coeff = np.zeros(n_basis, dtype=np.float32)
 
         # ── Context projection: d_vsa → d_hidden ─────────────────────────────
-        xavier_std_p = np.sqrt(2.0 / (self.d_vsa + d_hidden))
-        self.W_proj = rng.normal(0, xavier_std_p,
-                                 size=(d_hidden, self.d_vsa)).astype(np.float32)
+        self.W_proj = rng.normal(
+            0, np.sqrt(2.0 / (self.d_vsa + d_hidden)),
+            size=(d_hidden, self.d_vsa),
+        ).astype(np.float32)
 
-        # ── Shared basis: n_basis pairs of (A, B) adapters ───────────────────
-        # A_basis[i]: (rank, d_target) — adapter down-projection
-        # B_basis[i]: (d_target, rank) — adapter up-projection
+        # ── LayerNorm on projection (stabilizes VSA high-frequency noise) ────
+        self.ln_g = np.ones(d_hidden, dtype=np.float32)
+        self.ln_b = np.zeros(d_hidden, dtype=np.float32)
+
+        # ── Shared basis adapters ────────────────────────────────────────────
         basis_std = np.sqrt(2.0 / (d_target + rank))
         self.A_basis = rng.normal(
-            0, basis_std, size=(n_basis, rank, d_target)
+            0, basis_std, size=(n_basis, rank, d_target),
         ).astype(np.float32)
-        self.B_basis = rng.normal(
-            0, basis_std, size=(n_basis, d_target, rank)
-        ).astype(np.float32)
+        # FIX: B_basis initialized to ZERO — initial LoRA output is exactly 0
+        self.B_basis = np.zeros(
+            (n_basis, d_target, rank), dtype=np.float32,
+        )
+
+        # ── Gradient accumulators ────────────────────────────────────────────
+        self.grads = self.zero_grads()
+
+    # ── Gradient Management ──────────────────────────────────────────────────
+
+    def zero_grads(self) -> dict[str, np.ndarray]:
+        return {
+            "A_basis": np.zeros_like(self.A_basis),
+            "B_basis": np.zeros_like(self.B_basis),
+            "W_coeff": np.zeros_like(self.W_coeff),
+            "b_coeff": np.zeros_like(self.b_coeff),
+            "W_h": np.zeros_like(self.W_h),
+            "b_h": np.zeros_like(self.b_h),
+            "W_proj": np.zeros_like(self.W_proj),
+            "layer_embeddings": np.zeros_like(self.layer_embeddings),
+            "ln_g": np.zeros_like(self.ln_g),
+            "ln_b": np.zeros_like(self.ln_b),
+        }
 
     # ── SDLS Duality Gate ────────────────────────────────────────────────────
 
     def register_context(self, name: str, context: np.ndarray) -> None:
-        """Register a known-clean context for SDLS purification."""
         if not hasattr(self, "_cleanup_mem"):
             from cubemind.reasoning.vm import CleanupMemory
             self._cleanup_mem = CleanupMemory(self.bc)
         self._cleanup_mem.store(name, context)
 
-    def sdls_purify(
-        self, context: np.ndarray, threshold: float = 0.85,
-    ) -> np.ndarray:
-        """SDLS Purification: validate symbolic consistency before forging.
-
-        1. Similarity search in cleanup memory (snap to nearest clean vector)
-        2. If similarity < threshold, return safe default context
-        3. Otherwise return the purified (clean) context
-
-        This prevents hallucinated weight generation by ensuring the input
-        is a valid member of the WorldManager vocabulary.
-        """
+    def sdls_purify(self, context: np.ndarray, threshold: float = 0.85) -> np.ndarray:
         if not hasattr(self, "_cleanup_mem") or self._cleanup_mem.size == 0:
-            # No cleanup memory — return default
             return self._default_context()
-
         name, clean = self._cleanup_mem.cleanup(context)
         sim = float(self.bc.similarity(context, clean))
-
         if sim < threshold:
             return self._default_context()
         return clean
 
-    def verify_duality(
-        self,
-        context: np.ndarray,
-        role: np.ndarray,
-        value: np.ndarray,
-    ) -> float:
-        """Algebraic self-duality check.
+    def verify_duality(self, context: np.ndarray, role: np.ndarray,
+                        value: np.ndarray) -> float:
+        rv = self.bc.unbind(context, role)
+        rr = self.bc.unbind(context, value)
+        return (float(self.bc.similarity(rv, value))
+                + float(self.bc.similarity(rr, role))) / 2.0
 
-        Verifies: unbind(context, role) ≈ value AND unbind(context, value) ≈ role.
-        Returns average duality score in [0, 1].
-        """
-        recovered_value = self.bc.unbind(context, role)
-        recovered_role = self.bc.unbind(context, value)
-
-        score_v = float(self.bc.similarity(recovered_value, value))
-        score_r = float(self.bc.similarity(recovered_role, role))
-
-        return (score_v + score_r) / 2.0
-
-    def forge_with_sdls(
-        self,
-        context: np.ndarray,
-        layer_id: int,
-        threshold: float = 0.85,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Forge with SDLS purification gate.
-
-        Low duality score → high softmax temperature (generic adapter).
-        High duality score → low temperature (specialized adapter).
-        """
-        clean_context = self.sdls_purify(context, threshold)
-        return self.forge(clean_context, layer_id)
+    def forge_with_sdls(self, context: np.ndarray, layer_id: int,
+                         threshold: float = 0.85) -> tuple[np.ndarray, np.ndarray]:
+        clean = self.sdls_purify(context, threshold)
+        return self.forge(clean, layer_id)
 
     def _default_context(self) -> np.ndarray:
-        """Safe default context when SDLS purification fails."""
-        # Identity-like: all mass on index 0 of each block
         ctx = np.zeros((self.k, self.l), dtype=np.float32)
         ctx[:, 0] = 1.0
         return self.bc.discretize(ctx)
 
-    # ── Adapter generation ───────────────────────────────────────────────────
+    # ── Forward (with cache for backward) ────────────────────────────────────
 
     def forge(
-        self,
-        context: np.ndarray,
-        layer_id: int,
+        self, context: np.ndarray, layer_id: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Forge a LoRA adapter (A, B) for a specific layer from symbolic context.
+        """Forge adapter. Returns (A, B). Use forge_with_cache for training."""
+        A, B, _ = self.forge_with_cache(context, layer_id)
+        return A, B
 
-        Args:
-            context: VSA block-code context vector (k, l).
-            layer_id: Target model layer index.
+    def forge_with_cache(
+        self, context: np.ndarray, layer_id: int,
+    ) -> tuple[np.ndarray, np.ndarray, tuple]:
+        """Forge adapter with cache for backward pass.
 
-        Returns:
-            (A, B) where A is (rank, d_target) and B is (d_target, rank).
+        Returns (A, B, cache) where cache is needed by backward().
         """
-        # Project context to hidden dim
-        ctx_flat = self.bc.to_flat(context)
-        ctx_proj = (ctx_flat @ self.W_proj.T).astype(np.float32)  # (d_hidden,)
+        ctx_flat = self.bc.to_flat(context).astype(np.float32)
+
+        # Project + LayerNorm (grilly GPU)
+        ctx_proj_raw = _linear(ctx_flat, self.W_proj)
+        ctx_proj, ln_mean, ln_var = _layernorm(ctx_proj_raw, self.ln_g, self.ln_b)
 
         # Concat with layer embedding
-        layer_emb = self.layer_embeddings[layer_id]  # (d_hidden,)
-        combined = np.concatenate([ctx_proj, layer_emb])  # (d_hidden * 2,)
+        layer_emb = self.layer_embeddings[layer_id]
+        combined = np.concatenate([ctx_proj, layer_emb])
 
-        # Generator MLP
-        h = gelu(combined @ self.W_h.T + self.b_h)  # (d_hidden,)
-        coeffs = h @ self.W_coeff.T + self.b_coeff   # (n_basis,)
+        # Generator MLP (grilly GPU)
+        pre_act = _linear(combined, self.W_h, self.b_h)
+        h = _gelu(pre_act)
 
-        # Softmax over basis coefficients for stable mixing
-        coeffs_exp = np.exp(coeffs - np.max(coeffs))
-        coeffs_soft = (coeffs_exp / np.sum(coeffs_exp)).astype(np.float32)
+        # Continuous mixing (NO softmax — prevents mode collapse)
+        coeffs = _linear(h, self.W_coeff, self.b_coeff)
 
-        # Mix basis adapters: weighted sum
-        A = np.tensordot(coeffs_soft, self.A_basis, axes=([0], [0]))  # (rank, d_target)
-        B = np.tensordot(coeffs_soft, self.B_basis, axes=([0], [0]))  # (d_target, rank)
+        # Mix basis adapters
+        A = np.tensordot(coeffs, self.A_basis, axes=([0], [0])).astype(np.float32)
+        B = np.tensordot(coeffs, self.B_basis, axes=([0], [0])).astype(np.float32)
 
-        return A.astype(np.float32), B.astype(np.float32)
+        cache = (ctx_flat, ctx_proj_raw, ln_mean, ln_var,
+                 layer_emb, combined, pre_act, h, coeffs)
+        return A, B, cache
 
-    def forge_all_layers(
-        self,
-        context: np.ndarray,
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
-        """Forge adapters for all layers from a single context.
+    # ── Backward ─────────────────────────────────────────────────────────────
+
+    def backward(
+        self, d_A: np.ndarray, d_B: np.ndarray,
+        layer_id: int, cache: tuple,
+    ) -> None:
+        """Accumulate gradients from adapter loss.
 
         Args:
-            context: VSA block-code context vector (k, l).
-
-        Returns:
-            List of (A, B) pairs, one per layer.
+            d_A: Gradient w.r.t. forged A matrix (rank, d_target).
+            d_B: Gradient w.r.t. forged B matrix (d_target, rank).
+            layer_id: Which layer this adapter was forged for.
+            cache: Cache from forge_with_cache().
         """
+        (ctx_flat, ctx_proj_raw, ln_mean, ln_var,
+         layer_emb, combined, pre_act, h, coeffs) = cache
+
+        # ── Backprop through basis mixing ────────────────────────────────
+        d_coeffs = np.zeros_like(coeffs)
+        for i in range(self.n_basis):
+            d_coeffs[i] = float(np.sum(d_A * self.A_basis[i])
+                                + np.sum(d_B * self.B_basis[i]))
+            self.grads["A_basis"][i] += coeffs[i] * d_A
+            self.grads["B_basis"][i] += coeffs[i] * d_B
+
+        # ── Backprop through coefficient layer ───────────────────────────
+        d_h = (d_coeffs @ self.W_coeff).astype(np.float32)
+        self.grads["W_coeff"] += np.outer(d_coeffs, h)
+        self.grads["b_coeff"] += d_coeffs
+
+        # ── Backprop through GELU (grilly GPU) ───────────────────────────
+        d_pre_act = _gelu_backward(d_h, pre_act)
+
+        # ── Backprop through MLP hidden layer ────────────────────────────
+        self.grads["W_h"] += np.outer(d_pre_act, combined)
+        self.grads["b_h"] += d_pre_act
+
+        # ── Backprop to combined input ───────────────────────────────────
+        d_combined = _linear(d_pre_act, self.W_h.T).ravel()
+        d_ctx_proj = d_combined[:self.d_hidden]
+        self.grads["layer_embeddings"][layer_id] += d_combined[self.d_hidden:]
+
+        # ── Backprop through LayerNorm (grilly GPU) ──────────────────────
+        d_ctx_proj_raw, d_ln_g, d_ln_b = _layernorm_backward(
+            d_ctx_proj, ctx_proj_raw, ln_mean, ln_var, self.ln_g,
+        )
+        self.grads["ln_g"] += d_ln_g
+        self.grads["ln_b"] += d_ln_b
+
+        # ── Backprop through projection ──────────────────────────────────
+        self.grads["W_proj"] += np.outer(d_ctx_proj_raw, ctx_flat)
+
+    # ── Convenience ──────────────────────────────────────────────────────────
+
+    def forge_all_layers(self, context: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
         return [self.forge(context, i) for i in range(self.n_layers)]
 
-    # ── LoRA injection ───────────────────────────────────────────────────────
-
-    def apply_adapter(
-        self,
-        x: np.ndarray,
-        base_output: np.ndarray,
-        A: np.ndarray,
-        B: np.ndarray,
-    ) -> np.ndarray:
-        """Apply a forged LoRA adapter to a base model output.
-
-        output = base_output + scale * (x @ A.T @ B.T)
-
-        Args:
-            x: Input to the layer (seq_len, d_target) or (d_target,).
-            base_output: Output from the frozen base layer, same shape.
-            A: Adapter down-projection (rank, d_target).
-            B: Adapter up-projection (d_target, rank).
-
-        Returns:
-            Adapted output, same shape as base_output.
-        """
-        # x @ A.T → (*, rank), then @ B.T → (*, d_target)
-        lora_out = (x @ A.T) @ B.T
+    def apply_adapter(self, x: np.ndarray, base_output: np.ndarray,
+                       A: np.ndarray, B: np.ndarray) -> np.ndarray:
+        if _bridge is not None:
+            lora_out = np.asarray(
+                _bridge.linear(np.asarray(_bridge.linear(x, A), dtype=np.float32), B),
+                dtype=np.float32,
+            )
+        else:
+            lora_out = ((x @ A.T) @ B.T).astype(np.float32)
         return (base_output + self.scale * lora_out).astype(np.float32)
 
-    # ── Memory stats ─────────────────────────────────────────────────────────
-
     def memory_bytes(self) -> int:
-        """Total memory footprint of the MindForge module."""
-        basis_mem = self.n_basis * self.rank * self.d_target * 4 * 2  # A + B
+        basis_mem = self.n_basis * self.rank * self.d_target * 4 * 2
         layer_emb_mem = self.n_layers * self.d_hidden * 4
         proj_mem = self.d_vsa * self.d_hidden * 4
-        mlp_mem = (self.d_hidden * 2 * self.d_hidden + self.d_hidden) * 4  # W_h + b_h
-        coeff_mem = (self.n_basis * self.d_hidden + self.n_basis) * 4  # W_coeff + b_coeff
-        return basis_mem + layer_emb_mem + proj_mem + mlp_mem + coeff_mem
+        mlp_mem = (self.d_hidden * 2 * self.d_hidden + self.d_hidden) * 4
+        coeff_mem = (self.n_basis * self.d_hidden + self.n_basis) * 4
+        ln_mem = self.d_hidden * 4 * 2
+        return basis_mem + layer_emb_mem + proj_mem + mlp_mem + coeff_mem + ln_mem
 
     def memory_mb(self) -> float:
         return self.memory_bytes() / (1024 * 1024)
