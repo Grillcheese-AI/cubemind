@@ -101,6 +101,7 @@ class TeacherExtractor:
             (seq_len, top_k) float32 logits (top-K only for memory).
         """
         tokens = token_ids.tolist()
+        self.model.reset()  # clear KV cache between extractions
         self.model.eval(tokens)
         full_logits = np.array(self.model.scores[:len(tokens)], dtype=np.float32)
 
