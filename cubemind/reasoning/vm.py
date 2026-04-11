@@ -355,6 +355,8 @@ class VSAVM:
             # ── Reasoning ───────────────────────────────────────────
             case "DEBATE":
                 return self._debate(*args)
+            case "ASK":
+                return self._ask(*args)
             # ── MindForge (JIT adapter generation) ──────────────────
             case "FORGE":
                 return self._forge_adapter(*args)
@@ -770,6 +772,16 @@ class VSAVM:
         return name
 
     # ── Reasoning (HD Graph-of-Thoughts) ────────────────────────────────
+
+    def _ask(self, objects: list, question: str):
+        """ASK objects question — visual question answering via VSA scene memory."""
+        from cubemind.reasoning.vqa import VQAEngine, VQAResult
+        if not hasattr(self, "_vqa") or self._vqa is None:
+            self._vqa = VQAEngine(k=self.k, l=self.l)
+        if not objects:
+            return VQAResult(answer="No objects in scene.", confidence=0.0, program=[])
+        self._vqa.set_scene(objects)
+        return self._vqa.answer(question)
 
     def _debate(self, candidates: list[np.ndarray]) -> np.ndarray:
         """DEBATE [v0, v1, ...] — resolve competing hypotheses via HD-GoT.

@@ -1360,3 +1360,159 @@ class TestEpisodicMemory:
 
         vm.execute("FORGET", "temp")
         assert "temp" not in vm.registers
+
+
+# ── ASK (VQA) ────────────────────────────────────────────────────────────
+
+
+class TestAsk:
+    """ASK opcode — visual question answering via VSA scene memory."""
+
+    def test_ask_simple_count(self, vm):
+        """ASK 'how many objects?' on a scene with 3 objects."""
+        from cubemind.reasoning.vqa import DetectedObject
+        objects = [
+            DetectedObject(label="lamp", x=0.2, y=0.3, w=0.1, h=0.2),
+            DetectedObject(label="table", x=0.5, y=0.7, w=0.3, h=0.2),
+            DetectedObject(label="chair", x=0.8, y=0.6, w=0.15, h=0.3),
+        ]
+        result = vm.execute("ASK", objects, "how many objects?")
+        assert result is not None
+        assert result.answer is not None
+
+    def test_ask_spatial_relation(self, vm):
+        """ASK 'what is to the right of the lamp?'"""
+        from cubemind.reasoning.vqa import DetectedObject
+        objects = [
+            DetectedObject(label="lamp", x=0.2, y=0.5, w=0.1, h=0.2),
+            DetectedObject(label="table", x=0.8, y=0.5, w=0.3, h=0.2),
+        ]
+        result = vm.execute("ASK", objects, "what is to the right of the lamp?")
+        assert result is not None
+        assert isinstance(result.confidence, float)
+
+    def test_ask_empty_scene(self, vm):
+        """ASK on empty scene returns graceful result."""
+        result = vm.execute("ASK", [], "what is here?")
+        assert result is not None
+        assert result.confidence == 0.0
+
+
+# ── FULL REASONING CYCLE ─────────────────────────────────────────────────
+
+
+class TestFullCycle:
+    """End-to-end reasoning cycle using multiple VM opcodes together.
+
+    This simulates a complete problem-solving pipeline:
+    perceive → detect pattern → predict → debate → decode → store rule
+    """
+
+    def test_arithmetic_word_problem(self, vm):
+        """'John has 8 apples. He gives 3 to Mary. Mary gives 1 to Bob.
+        How many does John have? How many does Mary have?'"""
+        program = [
+            ("CREATE", "john", "person"),
+            ("CREATE", "mary", "person"),
+            ("CREATE", "bob", "person"),
+            ("ASSIGN", "john", 8),
+            ("ASSIGN", "mary", 0),
+            ("ASSIGN", "bob", 0),
+            ("TRANSFER", "john", "mary", 3),
+            ("TRANSFER", "mary", "bob", 1),
+            ("QUERY", "john"),
+        ]
+        assert vm.run(program) == 5
+
+        # Continue querying other entities
+        assert vm.execute("QUERY", "mary") == 2
+        assert vm.execute("QUERY", "bob") == 1
+
+    def test_pattern_detect_predict_decode(self, vm, bc):
+        """Detect a pattern, predict next, decode to label."""
+        # Create a progression
+        v0 = bc.random_discrete(seed=10)
+        delta = bc.random_discrete(seed=50)
+        v1 = bc.bind(v0, delta)
+        v2 = bc.bind(v1, delta)
+        v3_correct = bc.bind(v2, delta)
+
+        # Build codebook of answers
+        codebook = np.stack([
+            bc.random_discrete(seed=200),
+            v3_correct,
+            bc.random_discrete(seed=300),
+        ])
+        labels = ["wrong_a", "correct", "wrong_b"]
+
+        # Full pipeline
+        pattern = vm.execute("DETECT_PATTERN", [v0, v1, v2])
+        assert pattern["type"] == "progression"
+
+        predicted = vm.execute("PREDICT", [v0, v1, v2])
+        label, conf = vm.execute("DECODE", "__predicted", codebook, labels)
+
+        # Store predicted in a register for DECODE
+        vm.execute("CREATE", "pred", "answer")
+        vm.registers["pred"] = predicted
+        label, conf = vm.execute("DECODE", "pred", codebook, labels)
+        assert label == "correct"
+
+    def test_explore_and_specialize(self, vm, bc):
+        """Explore strategies, specialize on best one, store as rule."""
+        vm.trace_enabled = True
+
+        # Try different strategies via bandit
+        vm.execute("EXPLORE", 3)
+
+        # Simulate a transition and specialize
+        before = bc.random_discrete(seed=10)
+        after = bc.random_discrete(seed=11)
+        result = vm.execute("SPECIALIZE", before, after)
+        assert "world_id" in result
+
+        # Remember the outcome
+        vm.execute("CREATE", "outcome", "result")
+        vm.execute("ASSIGN", "outcome", 1)
+        vm.execute("REMEMBER", "outcome")
+
+        # Store the full trace as a reusable rule
+        vm.store_rule("strategy_1")
+        assert "strategy_1" in vm.rules
+
+    def test_debate_then_decode(self, vm, bc):
+        """Generate hypotheses, debate them, decode winner."""
+        # 3 similar hypotheses + 2 outliers
+        base = bc.random_discrete(seed=42)
+        hypotheses = [base.copy() for _ in range(3)]
+        hypotheses += [bc.random_discrete(seed=100), bc.random_discrete(seed=200)]
+
+        # Debate → consensus
+        consensus = vm.execute("DEBATE", hypotheses)
+
+        # Decode
+        codebook = np.stack([
+            bc.random_discrete(seed=300),
+            base,  # the cluster center should win
+            bc.random_discrete(seed=400),
+        ])
+        vm.execute("CREATE", "winner", "answer")
+        vm.registers["winner"] = consensus
+        label, conf = vm.execute("DECODE", "winner", codebook)
+        assert label == 1  # base is at index 1
+
+    def test_conditional_loop_with_transfer(self, vm):
+        """'A baker has 24 cookies. She packs them in boxes of 6.
+        How many boxes does she need?'"""
+        program = [
+            ("CREATE", "cookies", "number"),
+            ("CREATE", "boxes", "number"),
+            ("ASSIGN", "cookies", 24),
+            ("ASSIGN", "boxes", 0),
+            ("LOOP", "cookies", 0, "greater", [
+                ("SUB", "cookies", 6),
+                ("ADD", "boxes", 1),
+            ]),
+            ("QUERY", "boxes"),
+        ]
+        assert vm.run(program) == 4
