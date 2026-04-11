@@ -159,6 +159,11 @@ class TeacherExtractor:
 def load_text_data(config: HarrierPretrainConfig) -> list[str]:
     """Load TinyStories as raw text chunks for teacher tokenization."""
     # Try loading from HuggingFace datasets
+    # Fix: grilly.tokenizers shadows HF tokenizers — temporarily remove from path
+    import sys
+    grilly_paths = [p for p in sys.path if "grilly" in p.lower()]
+    for p in grilly_paths:
+        sys.path.remove(p)
     try:
         import datasets
         logger.info("Loading TinyStories from HuggingFace...")
@@ -168,6 +173,10 @@ def load_text_data(config: HarrierPretrainConfig) -> list[str]:
         return texts[:config.max_stories] if config.max_stories > 0 else texts
     except Exception as e:
         logger.warning("HF load failed: {}. Trying local fallback.", e)
+    finally:
+        for p in grilly_paths:
+            if p not in sys.path:
+                sys.path.append(p)
 
     # Fallback: read any .txt files in data_dir
     text_files = sorted(Path(config.data_dir).glob("*.txt"))
