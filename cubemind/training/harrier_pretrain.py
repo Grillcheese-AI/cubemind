@@ -261,29 +261,55 @@ def train(config: HarrierPretrainConfig | None = None):
                 1 + math.cos(math.pi * progress)
             )
 
-        # Direct gradient on W_proj: d(loss)/d(W_proj) via chain rule
-        # loss = 1 - cos(adapted, target) where adapted = normalize(target @ A.T @ B.T)
-        # Simplified: nudge W_proj so that forged A,B better align with target
+        # ── Gradient update on basis adapters (the actual weights) ────────
+        # The forged adapter is: A = sum(coeffs[i] * A_basis[i])
+        # To minimize loss, update each basis adapter toward producing
+        # adapters that align target_vec with itself.
+        #
+        # d(loss)/d(A_basis[i]) ≈ coeffs[i] * (target @ B.T).T ⊗ (adapted - target)
+        # Simplified: push A_basis toward target alignment, scaled by coefficient
+
+        # Get the softmax coefficients for this context+layer
         ctx_flat = bc.to_flat(context).astype(np.float32)
         ctx_proj = (ctx_flat @ forge.W_proj.T).astype(np.float32)
-
-        # Error signal: how much the projection needs to change
-        error = loss * target_vec  # (d_model,) — direction of needed correction
-        # Outer product gradient: dL/dW_proj ≈ error ⊗ ctx_flat
-        grad_proj = np.outer(error[:forge.W_proj.shape[0]], ctx_flat[:forge.W_proj.shape[1]])
-        if grad_proj.shape == forge.W_proj.shape:
-            forge.W_proj -= lr * np.clip(grad_proj, -0.05, 0.05).astype(np.float32)
-
-        # Update W_coeff: nudge mixing coefficients toward better basis selection
-        # Recompute coefficients
         layer_emb = forge.layer_embeddings[layer_id]
         combined = np.concatenate([ctx_proj, layer_emb])
         from cubemind.execution.mindforge import gelu
-        h_hidden = np.asarray(gelu(combined @ forge.W_h.T + forge.b_h), dtype=np.float32)
-        grad_coeff = np.outer(loss * h_hidden[:forge.W_coeff.shape[1]],
-                              np.ones(forge.W_coeff.shape[0]))
-        if grad_coeff.T.shape == forge.W_coeff.shape:
-            forge.W_coeff -= lr * 0.1 * np.clip(grad_coeff.T, -0.05, 0.05).astype(np.float32)
+        h = np.asarray(gelu(combined @ forge.W_h.T + forge.b_h), dtype=np.float32)
+        coeffs = h @ forge.W_coeff.T + forge.b_coeff
+        coeffs_exp = np.exp(coeffs - np.max(coeffs))
+        coeffs_soft = (coeffs_exp / np.sum(coeffs_exp)).astype(np.float32)
+
+        # Error direction in d_model space
+        error_dir = (target_vec - adapted).astype(np.float32)  # (d_model,)
+
+        # Update each basis adapter proportional to its coefficient
+        for i in range(forge.n_basis):
+            w = float(coeffs_soft[i])
+            if w < 0.01:
+                continue  # skip negligible basis
+
+            # Gradient for A_basis[i]: push adapter to better reconstruct target
+            grad_A = w * np.outer(
+                error_dir[:forge.rank],
+                target_vec[:forge.d_target],
+            )
+            forge.A_basis[i] += lr * np.clip(grad_A, -0.01, 0.01).astype(np.float32)
+
+            # Gradient for B_basis[i]: similar
+            grad_B = w * np.outer(
+                target_vec[:forge.d_target],
+                error_dir[:forge.rank],
+            )
+            forge.B_basis[i] += lr * np.clip(grad_B, -0.01, 0.01).astype(np.float32)
+
+        # Also update W_proj (slower, smaller LR)
+        grad_proj = np.outer(
+            (loss * ctx_proj)[:forge.W_proj.shape[0]],
+            ctx_flat[:forge.W_proj.shape[1]],
+        )
+        if grad_proj.shape == forge.W_proj.shape:
+            forge.W_proj -= lr * 0.01 * np.clip(grad_proj, -0.01, 0.01).astype(np.float32)
 
         # Track loss
         loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
