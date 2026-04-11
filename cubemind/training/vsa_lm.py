@@ -751,9 +751,11 @@ def train_distill(
             # ── Backward ─────────────────────────────────────────────
             opt.begin_step()
 
-            # Try GPU backward first (grilly_core.vsa_lm_backward)
+            # GPU backward disabled — vsa_lm_backward doesn't handle MindForge
+            # LoRA layers, produces wrong gradients. Use CPU backward which works.
+            # TODO: add MindForge backward to the C++ vsa_lm_backward kernel.
             gpu_backward_ok = False
-            if model._gpu_handle is not None and _gc is not None:
+            if False:  # model._gpu_handle is not None and _gc is not None:
                 try:
                     grads = _gc.vsa_lm_backward(
                         model._gpu_dev, model._gpu_handle,
