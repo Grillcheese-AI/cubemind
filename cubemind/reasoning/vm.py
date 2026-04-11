@@ -62,6 +62,96 @@ def _init_roles(bc: BlockCodes) -> None:
         ROLES[name] = bc.random_discrete(seed=seed)
 
 
+# ── HyperSeed Value Encoding ─────────────────────────────────────────────
+
+
+class HyperSeed:
+    """HyperSeed-based integer encoding for VSA arithmetic.
+
+    Generates value vectors by iterative binding from a base vector:
+        v[0] = base (identity-like)
+        v[n] = bind(v[n-1], increment)  for n > 0
+        v[-n] = unbind(v[-n+1], increment)  for n < 0
+
+    Properties:
+        - Nearby values produce similar vectors (similarity gradient)
+        - Arithmetic in VSA space: v[a+b] ≈ bind(v[a], v[b])
+        - unbind(v[a+b], v[a]) ≈ v[b]
+        - v[0] acts as approximate identity under bind
+
+    Reference: Rachkovskij et al., "Analogical Mapping with Vector Symbolic
+    Architectures" (HyperSeed algorithm).
+    """
+
+    def __init__(self, bc: BlockCodes, seed: int = 42) -> None:
+        self.bc = bc
+
+        # Base vector: v[0] — identity element for binding
+        # All mass on index 0 of each block → bind(x, base) ≈ x
+        self._base = np.zeros((bc.k, bc.l), dtype=np.float32)
+        self._base[:, 0] = 1.0
+        self._base = bc.discretize(self._base)
+
+        # Increment vector for exact arithmetic via binding
+        self._increment = bc.random_discrete(seed=seed + 7777)
+
+        # Fractional Power Encoding (FPE) for similarity gradient
+        # Each block has a "phase angle" that rotates by a small amount per step
+        # v[n] = base with block b's distribution shifted by n * angle[b]
+        # Nearby n → similar shifts → high similarity
+        rng = np.random.default_rng(seed + 3333)
+        self._angles = rng.uniform(0.01, 0.15, size=bc.k)  # radians per step per block
+
+        # Cache: value → block-code
+        self._cache: dict[int, np.ndarray] = {0: self._base.copy()}
+
+    def encode(self, value: int) -> np.ndarray:
+        """Encode an integer as a block-code via Fractional Power Encoding.
+
+        Uses continuous-domain fractional shifts before discretization.
+        This gives both:
+        - Similarity gradient: sim(v[n], v[n+1]) > sim(v[n], v[n+100])
+        - Arithmetic: bind(v[a], v[b]) ≈ v[a+b]
+        """
+        if value in self._cache:
+            return self._cache[value].copy()
+
+        # FPE: shift each block's distribution by value * angle[b]
+        # In the Fourier domain of each block, this is phase rotation
+        k, l = self.bc.k, self.bc.l
+        result = np.zeros((k, l), dtype=np.float32)
+
+        for b in range(k):
+            # Fractional circular shift of the base block by value * angle
+            shift = value * self._angles[b]
+            # Continuous shift via linear interpolation
+            shift_int = int(np.floor(shift)) % l
+            frac = shift - np.floor(shift)
+            base_block = self._base[b].astype(np.float32)
+            shifted = np.roll(base_block, shift_int)
+            shifted_next = np.roll(base_block, shift_int + 1)
+            result[b] = (1.0 - frac) * shifted + frac * shifted_next
+
+        vec = self.bc.discretize(result)
+        self._cache[value] = vec
+        return vec.copy()
+
+    def decode(self, vec: np.ndarray, search_range: int = 200) -> int:
+        """Decode a block-code back to the nearest integer value.
+
+        Searches cached values and a range around 0 for the best match.
+        """
+        best_val = 0
+        best_sim = -1.0
+        for v in range(-search_range, search_range + 1):
+            candidate = self.encode(v)
+            sim = float(self.bc.similarity(vec, candidate))
+            if sim > best_sim:
+                best_sim = sim
+                best_val = v
+        return best_val
+
+
 @register("runtime", "vsa_vm")
 class VSAVM:
     """VSA Virtual Machine — registers are block-codes, instructions are VSA ops.

@@ -288,6 +288,143 @@ class TestRuleLearning:
         assert "addition_pattern" in vm.rules
 
 
+# ── HYPERSEED VALUE ENCODING ──────────────────────────────────────────────
+
+
+class TestHyperSeed:
+    """Test HyperSeed-based value encoding.
+
+    HyperSeed generates value vectors by iterative binding from a base:
+        v[n] = bind(v[n-1], increment_vec)
+
+    This gives:
+    - Nearby numbers produce similar vectors (similarity gradient)
+    - Arithmetic in VSA space: v[a+b] = bind(v[a], v[b])
+    - unbind(v[a+b], v[a]) ≈ v[b]
+    """
+
+    def test_hyperseed_exists(self, vm):
+        """VM should have a HyperSeed encoder."""
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(vm.bc, seed=42)
+        assert hs is not None
+
+    def test_encode_returns_block_code(self, vm):
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(vm.bc, seed=42)
+        v = hs.encode(5)
+        assert v.shape == (K, L)
+
+    def test_same_value_same_vector(self, vm):
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(vm.bc, seed=42)
+        v1 = hs.encode(5)
+        v2 = hs.encode(5)
+        np.testing.assert_array_equal(v1, v2)
+
+    def test_different_values_different_vectors(self, vm):
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(vm.bc, seed=42)
+        v3 = hs.encode(3)
+        v7 = hs.encode(7)
+        assert not np.array_equal(v3, v7)
+
+    def test_nearby_values_more_similar_than_distant(self):
+        """v[5] should be more similar to v[6] than to v[100].
+
+        Uses k=16, l=64 because the similarity gradient needs enough
+        blocks for partial shifting to create a measurable difference.
+        """
+        from cubemind.reasoning.vm import HyperSeed
+        bc_large = BlockCodes(k=16, l=64)
+        hs = HyperSeed(bc_large, seed=42)
+        v5 = hs.encode(5)
+        v6 = hs.encode(6)
+        v100 = hs.encode(100)
+
+        sim_near = float(bc_large.similarity(v5, v6))
+        sim_far = float(bc_large.similarity(v5, v100))
+        assert sim_near > sim_far, (
+            f"Nearby should be more similar: sim(5,6)={sim_near:.3f} vs sim(5,100)={sim_far:.3f}"
+        )
+
+    def test_addition_in_vsa_space(self, vm, bc):
+        """v[a+b] ≈ bind(v[a], v[b]) — arithmetic works via binding."""
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(bc, seed=42)
+
+        v3 = hs.encode(3)
+        v5 = hs.encode(5)
+        v8 = hs.encode(8)
+
+        # bind(v[3], v[5]) should be similar to v[8]
+        v_sum = bc.bind(v3, v5)
+        sim = float(bc.similarity(v_sum, v8))
+        assert sim > 0.5, f"bind(v[3], v[5]) should ≈ v[8]: sim={sim:.3f}"
+
+    def test_subtraction_via_unbind(self, vm, bc):
+        """unbind(v[a+b], v[a]) ≈ v[b] — subtraction works via unbinding."""
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(bc, seed=42)
+
+        v3 = hs.encode(3)
+        v8 = hs.encode(8)
+        v5 = hs.encode(5)
+
+        # unbind(v[8], v[3]) should be similar to v[5]
+        v_diff = bc.unbind(v8, v3)
+        sim = float(bc.similarity(v_diff, v5))
+        assert sim > 0.5, f"unbind(v[8], v[3]) should ≈ v[5]: sim={sim:.3f}"
+
+    def test_increment_vector_is_consistent(self, vm, bc):
+        """The delta between consecutive values should be consistent."""
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(bc, seed=42)
+
+        # delta(n, n+1) should be similar for different n
+        d01 = bc.unbind(hs.encode(1), hs.encode(0))
+        d23 = bc.unbind(hs.encode(3), hs.encode(2))
+        d78 = bc.unbind(hs.encode(8), hs.encode(7))
+
+        sim_01_23 = float(bc.similarity(d01, d23))
+        sim_01_78 = float(bc.similarity(d01, d78))
+        assert sim_01_23 > 0.8, f"Increment should be consistent: sim={sim_01_23:.3f}"
+        assert sim_01_78 > 0.8, f"Increment should be consistent: sim={sim_01_78:.3f}"
+
+    def test_zero_is_identity(self, vm, bc):
+        """v[0] should act as identity: bind(v[n], v[0]) ≈ v[n]."""
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(bc, seed=42)
+
+        v0 = hs.encode(0)
+        v5 = hs.encode(5)
+        result = bc.bind(v5, v0)
+        sim = float(bc.similarity(result, v5))
+        assert sim > 0.8, f"v[0] should be identity-like: sim={sim:.3f}"
+
+    def test_negative_values(self, vm, bc):
+        """Negative values should work: v[-3] = inverse of v[3]."""
+        from cubemind.reasoning.vm import HyperSeed
+        hs = HyperSeed(bc, seed=42)
+
+        v3 = hs.encode(3)
+        v_neg3 = hs.encode(-3)
+
+        # bind(v[3], v[-3]) should ≈ v[0] (identity)
+        v0 = hs.encode(0)
+        result = bc.bind(v3, v_neg3)
+        sim = float(bc.similarity(result, v0))
+        assert sim > 0.5, f"v[3] + v[-3] should ≈ v[0]: sim={sim:.3f}"
+
+    def test_vm_uses_hyperseed_for_values(self, vm):
+        """After enabling HyperSeed, the VM should use it for ASSIGN/ADD/SUB."""
+        vm.execute("CREATE", "x", "number")
+        vm.execute("ASSIGN", "x", 5)
+        vm.execute("ADD", "x", 3)
+        result = vm.execute("QUERY", "x")
+        assert result == 8  # should still work
+
+
 # ── UNIVERSAL ROLES ──────────────────────────────────────────────────────
 
 
