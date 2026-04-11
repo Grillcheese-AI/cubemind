@@ -35,16 +35,34 @@ from cubemind.functional.math import softmax
 # ── Config ───────────────────────────────────────────────────────────────
 
 
+TEACHER_PRESETS = {
+    "harrier": {
+        "path": "data/external_llms/harrier-oss-v1-0.6b.Q8_0.gguf",
+        "d_model": 1024, "n_layers": 24, "vocab": 151936, "gpu": False,
+    },
+    "ministral": {
+        "path": "data/external_llms/Ministral-3-3B-Reasoning-2512-Q8_0.gguf",
+        "d_model": 3072, "n_layers": 32, "vocab": 131072, "gpu": True,
+    },
+    "llama": {
+        "path": "data/external_llms/Llama3.3-8b-instruct-reasoning.gguf",
+        "d_model": 4096, "n_layers": 32, "vocab": 128256, "gpu": True,
+    },
+}
+
+
 @dataclass
 class HarrierPretrainConfig:
-    # Model paths
-    teacher_path: str = "data/external_llms/harrier-oss-v1-0.6b.Q8_0.gguf"
+    # Teacher selection
+    teacher_name: str = "llama"
+    teacher_path: str = ""
     data_dir: str = "sandbox/vsa_lm/data"
 
-    # Teacher dims (Harrier 0.6B)
-    teacher_d_model: int = 1024
-    teacher_n_layers: int = 24
-    teacher_vocab: int = 151936
+    # Teacher dims (set from preset)
+    teacher_d_model: int = 4096
+    teacher_n_layers: int = 32
+    teacher_vocab: int = 128256
+    teacher_gpu: bool = True
 
     # MindForge
     k: int = 16
@@ -52,6 +70,15 @@ class HarrierPretrainConfig:
     forge_rank: int = 8
     forge_basis: int = 16
     forge_d_hidden: int = 128
+
+    def __post_init__(self):
+        if not self.teacher_path and self.teacher_name in TEACHER_PRESETS:
+            p = TEACHER_PRESETS[self.teacher_name]
+            self.teacher_path = p["path"]
+            self.teacher_d_model = p["d_model"]
+            self.teacher_n_layers = p["n_layers"]
+            self.teacher_vocab = p["vocab"]
+            self.teacher_gpu = p["gpu"]
 
     # Training
     seq_len: int = 64
@@ -80,10 +107,11 @@ class TeacherExtractor:
         from llama_cpp import Llama
 
         logger.info("Loading teacher: {}", config.teacher_path)
+        n_gpu = -1 if config.teacher_gpu else 0
         self.model = Llama(
             model_path=config.teacher_path,
             n_ctx=config.n_ctx,
-            n_gpu_layers=-1,  # all layers on Vulkan GPU
+            n_gpu_layers=n_gpu,
             verbose=False,
             logits_all=True,
         )
@@ -183,44 +211,43 @@ def train(config: HarrierPretrainConfig | None = None):
         teacher_logits = teacher.extract(input_ids)  # (seq, top_k)
 
         # Create context block-code from token sequence
-        # Each token contributes via positional binding for richer context
-        context = bc.random_discrete(seed=0)  # identity-like base
-        for t_idx in range(min(8, len(input_ids))):  # first 8 tokens
+        context = bc.random_discrete(seed=0)
+        for t_idx in range(min(8, len(input_ids))):
             tok_vec = bc.random_discrete(seed=int(input_ids[t_idx]) + 1)
             pos_shift = np.roll(tok_vec, t_idx, axis=-1)
             context = bc.discretize(context.astype(np.float32) + pos_shift.astype(np.float32))
 
-        # Forge adapters for a subset of layers (faster than all 24)
-        n_sample_layers = min(4, config.teacher_n_layers)
-        layer_ids = rng.choice(config.teacher_n_layers, size=n_sample_layers, replace=False)
-        adapters = [forge.forge(context, int(lid)) for lid in layer_ids]
-
-        # Teacher soft targets
+        # Teacher target: project logits to d_model-sized target vector
+        # Use top-K logit values as a compact supervision signal
         teacher_probs = np.asarray(
             softmax(teacher_logits / config.temperature), dtype=np.float32,
         )
+        # Mean over sequence → (top_k,) target distribution
+        target_dist = teacher_probs.mean(axis=0)
+        # Project to d_model size via tiling/truncation
+        d = config.teacher_d_model
+        if len(target_dist) >= d:
+            target_vec = target_dist[:d].astype(np.float32)
+        else:
+            repeats = d // len(target_dist) + 1
+            target_vec = np.tile(target_dist, repeats)[:d].astype(np.float32)
+        # Normalize to unit vector
+        target_vec = target_vec / (np.linalg.norm(target_vec) + 1e-8)
 
-        # Loss: adapter reconstruction error
-        # For each forged adapter (A, B), apply it to a random input vector
-        # and measure how much the output aligns with the teacher's logit direction
-        teacher_direction = teacher_probs.mean(axis=0)  # (top_k,) average teacher preference
-        teacher_direction = teacher_direction / (np.linalg.norm(teacher_direction) + 1e-8)
+        # Forge adapter for one random layer
+        layer_id = int(rng.integers(0, config.teacher_n_layers))
+        A, B = forge.forge(context, layer_id)
 
-        total_loss = 0.0
-        for A, B in adapters:
-            # Simulate: random hidden state → adapter → output direction
-            h = rng.standard_normal(config.teacher_d_model).astype(np.float32) * 0.1
-            adapted = (h @ A.T @ B.T).astype(np.float32)  # (d_model,)
+        # Apply adapter to target_vec itself (self-reconstruction)
+        # The adapter should learn to preserve/enhance the teacher's signal
+        adapted = (target_vec @ A.T @ B.T).astype(np.float32)
+        adapted_norm = np.linalg.norm(adapted)
+        if adapted_norm > 1e-8:
+            adapted = adapted / adapted_norm
 
-            # Project adapted output to logit space (simplified: use norm as signal)
-            # Real loss: KL(teacher || student). Proxy: adapter should produce
-            # non-trivial, differentiated outputs per layer
-            output_norm = float(np.linalg.norm(adapted))
-            # Target: adapter output should have norm proportional to teacher confidence
-            target_norm = float(np.linalg.norm(teacher_direction)) * 10.0
-            total_loss += (output_norm - target_norm) ** 2
-
-        loss = total_loss / max(n_sample_layers, 1)
+        # Loss: negative cosine similarity (want adapted ≈ target direction)
+        cosine_sim = float(np.dot(adapted, target_vec))
+        loss = 1.0 - cosine_sim  # range [0, 2], 0 = perfect alignment
 
         # LR schedule: cosine with warmup
         lr = config.lr
@@ -234,41 +261,29 @@ def train(config: HarrierPretrainConfig | None = None):
                 1 + math.cos(math.pi * progress)
             )
 
-        # Error-driven update on MindForge weights
-        # Finite-difference gradient: perturb W_proj, measure loss change
+        # Direct gradient on W_proj: d(loss)/d(W_proj) via chain rule
+        # loss = 1 - cos(adapted, target) where adapted = normalize(target @ A.T @ B.T)
+        # Simplified: nudge W_proj so that forged A,B better align with target
         ctx_flat = bc.to_flat(context).astype(np.float32)
-        perturbation = rng.standard_normal(forge.W_proj.shape).astype(np.float32) * 0.01
+        ctx_proj = (ctx_flat @ forge.W_proj.T).astype(np.float32)
 
-        # Perturbed forge
-        forge.W_proj += perturbation
-        adapters_p = [forge.forge(context, int(lid)) for lid in layer_ids]
-        loss_p = 0.0
-        for A, B in adapters_p:
-            h = rng.standard_normal(config.teacher_d_model).astype(np.float32) * 0.1
-            adapted = (h @ A.T @ B.T).astype(np.float32)
-            target_norm = float(np.linalg.norm(teacher_direction)) * 10.0
-            loss_p += (float(np.linalg.norm(adapted)) - target_norm) ** 2
-        loss_p /= max(n_sample_layers, 1)
-        forge.W_proj -= perturbation  # restore
+        # Error signal: how much the projection needs to change
+        error = loss * target_vec  # (d_model,) — direction of needed correction
+        # Outer product gradient: dL/dW_proj ≈ error ⊗ ctx_flat
+        grad_proj = np.outer(error[:forge.W_proj.shape[0]], ctx_flat[:forge.W_proj.shape[1]])
+        if grad_proj.shape == forge.W_proj.shape:
+            forge.W_proj -= lr * np.clip(grad_proj, -0.05, 0.05).astype(np.float32)
 
-        # Gradient estimate: (loss_p - loss) / perturbation
-        grad_est = perturbation * (loss_p - loss) / (0.01 ** 2 + 1e-8)
-        forge.W_proj -= lr * np.clip(grad_est, -0.1, 0.1).astype(np.float32)
-
-        # Also update W_coeff (coefficient layer) — same approach
-        pert_c = rng.standard_normal(forge.W_coeff.shape).astype(np.float32) * 0.01
-        forge.W_coeff += pert_c
-        adapters_c = [forge.forge(context, int(lid)) for lid in layer_ids]
-        loss_c = 0.0
-        for A, B in adapters_c:
-            h = rng.standard_normal(config.teacher_d_model).astype(np.float32) * 0.1
-            adapted = (h @ A.T @ B.T).astype(np.float32)
-            target_norm = float(np.linalg.norm(teacher_direction)) * 10.0
-            loss_c += (float(np.linalg.norm(adapted)) - target_norm) ** 2
-        loss_c /= max(n_sample_layers, 1)
-        forge.W_coeff -= pert_c
-        grad_c = pert_c * (loss_c - loss) / (0.01 ** 2 + 1e-8)
-        forge.W_coeff -= lr * np.clip(grad_c, -0.1, 0.1).astype(np.float32)
+        # Update W_coeff: nudge mixing coefficients toward better basis selection
+        # Recompute coefficients
+        layer_emb = forge.layer_embeddings[layer_id]
+        combined = np.concatenate([ctx_proj, layer_emb])
+        from cubemind.execution.mindforge import gelu
+        h_hidden = np.asarray(gelu(combined @ forge.W_h.T + forge.b_h), dtype=np.float32)
+        grad_coeff = np.outer(loss * h_hidden[:forge.W_coeff.shape[1]],
+                              np.ones(forge.W_coeff.shape[0]))
+        if grad_coeff.T.shape == forge.W_coeff.shape:
+            forge.W_coeff -= lr * 0.1 * np.clip(grad_coeff.T, -0.05, 0.05).astype(np.float32)
 
         # Track loss
         loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss

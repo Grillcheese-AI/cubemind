@@ -179,16 +179,19 @@ def train_vsa_lm(steps, layers, d_model, seq_len, data_dir) -> None:
     vsa_lm_main()
 
 
-@train.command("harrier")
+@train.command("mindforge")
+@click.option("--teacher", default="llama", type=click.Choice(["harrier", "ministral", "llama"]),
+              help="Teacher model (harrier=0.6B/CPU, ministral=3B/GPU, llama=8B/GPU).")
 @click.option("--steps", default=50000, help="Training steps.")
 @click.option("--seq-len", default=64, help="Sequence length.")
 @click.option("--lr", type=float, default=1e-3, help="Learning rate.")
 @click.option("--save-every", default=5000, help="Save checkpoint every N steps.")
 @click.option("--log-every", default=100, help="Log every N steps.")
-def train_harrier(steps, seq_len, lr, save_every, log_every) -> None:
-    """Pre-train MindForge on Harrier 0.6B teacher logits."""
+def train_mindforge(teacher, steps, seq_len, lr, save_every, log_every) -> None:
+    """Pre-train MindForge on teacher logits (harrier/ministral/llama)."""
     from cubemind.training.harrier_pretrain import HarrierPretrainConfig, train
     config = HarrierPretrainConfig(
+        teacher_name=teacher,
         train_steps=steps, seq_len=seq_len, lr=lr,
         save_every=save_every, log_every=log_every,
     )
