@@ -654,7 +654,7 @@ def train_distill(
     Loss = 0.3*CE(hard labels) + 0.6*KL(soft teacher).
     """
     from cubemind.training.moqe_distillation import (
-        OfflineDistillationLoader, _softmax, _cross_entropy_with_grad,
+        OfflineDistillationLoader, _cross_entropy_with_grad,
         _kl_divergence_with_grad, _sparse_kl_divergence_with_grad,
     )
 
@@ -674,14 +674,16 @@ def train_distill(
     sample = np.load(first_file)
     if "logits" in sample:
         teacher_vocab = sample["logits"].shape[-1]
-    elif "top_k_indices" in sample:
-        teacher_vocab = int(np.max(sample["top_k_indices"])) + 1
     else:
         teacher_vocab = 262144  # Gemma default
     logger.info("Teacher vocab: {}", teacher_vocab)
 
-    # Set model vocab to teacher vocab for direct distillation
-    cfg.vocab_size = teacher_vocab
+    # Use a reasonable student vocab — much smaller than teacher.
+    # Sparse KL only matches positions where both have coverage.
+    # 32K covers common tokens; rare tokens in top-k get clamped.
+    student_vocab = min(teacher_vocab, 32768)
+    cfg.vocab_size = student_vocab
+    logger.info("Student vocab: {} (clamped from teacher {})", student_vocab, teacher_vocab)
 
     model = VSALM(cfg)
     logger.info("VSA-LM distill: d={}, layers={}, vocab={}, params={:.1f}M",
@@ -717,11 +719,14 @@ def train_distill(
             if teacher_data is None:
                 loss_kd, grad_kd = 0.0, np.zeros_like(logits)
             elif isinstance(teacher_data, dict) and "top_k_indices" in teacher_data:
+                t_indices = teacher_data["top_k_indices"][:S].copy()
+                t_logprobs = teacher_data["top_k_logprobs"][:S].astype(np.float32)
+                # Clamp teacher indices to student vocab
+                mask = t_indices < student_vocab
+                t_indices = np.where(mask, t_indices, 0)
+                t_logprobs = np.where(mask, t_logprobs, -100.0)  # suppress OOV
                 loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
-                    logits,
-                    teacher_data["top_k_indices"][:S],
-                    teacher_data["top_k_logprobs"][:S].astype(np.float32),
-                    temperature=2.0,
+                    logits, t_indices, t_logprobs, temperature=2.0,
                 )
             elif isinstance(teacher_data, np.ndarray):
                 min_v = min(logits.shape[-1], teacher_data.shape[-1])
