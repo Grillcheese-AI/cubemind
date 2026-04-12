@@ -711,9 +711,11 @@ def train_distill(
             ids = input_ids[:S].astype(np.int32)
             labs = labels[:S].astype(np.int32)
 
-            # Clamp token IDs to model vocab
+            # Clamp input IDs to model vocab; mark OOV labels as -1 (ignored by CE)
             ids = np.clip(ids, 0, cfg.vocab_size - 1)
+            labs_oov = labs >= cfg.vocab_size
             labs = np.clip(labs, 0, cfg.vocab_size - 1)
+            labs[labs_oov] = -1  # CE ignores -1 labels
 
             # ── Forward ──────────────────────────────────────────────
             logits = model.forward(ids)  # (S, vocab)
@@ -726,13 +728,19 @@ def train_distill(
             elif isinstance(teacher_data, dict) and "top_k_indices" in teacher_data:
                 t_indices = teacher_data["top_k_indices"][:S].copy()
                 t_logprobs = teacher_data["top_k_logprobs"][:S].astype(np.float32)
-                # Clamp teacher indices to student vocab
-                mask = t_indices < student_vocab
-                t_indices = np.where(mask, t_indices, 0)
-                t_logprobs = np.where(mask, t_logprobs, -100.0)  # suppress OOV
-                loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
-                    logits, t_indices, t_logprobs, temperature=2.0,
-                )
+                # Filter out OOV: zero out entries where index >= student vocab
+                # so they contribute zero probability mass (not mapped to token 0)
+                oov_mask = t_indices >= student_vocab
+                t_indices[oov_mask] = 0
+                t_logprobs[oov_mask] = -1e9  # effectively zero after softmax
+                # Skip if all entries are OOV for this sequence
+                valid_count = np.sum(~oov_mask, axis=-1)
+                if np.min(valid_count) > 0:
+                    loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
+                        logits, t_indices, t_logprobs, temperature=2.0,
+                    )
+                else:
+                    loss_kd, grad_kd = 0.0, np.zeros_like(logits)
             elif isinstance(teacher_data, np.ndarray):
                 min_v = min(logits.shape[-1], teacher_data.shape[-1])
                 loss_kd, grad_kd = _kl_divergence_with_grad(
