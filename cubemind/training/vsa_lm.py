@@ -681,7 +681,7 @@ def train_distill(
     # Use a reasonable student vocab — much smaller than teacher.
     # Sparse KL only matches positions where both have coverage.
     # 32K covers common tokens; rare tokens in top-k get clamped.
-    student_vocab = min(teacher_vocab, 32768)
+    student_vocab = min(teacher_vocab, 8192)
     cfg.vocab_size = student_vocab
     logger.info("Student vocab: {} (clamped from teacher {})", student_vocab, teacher_vocab)
 
