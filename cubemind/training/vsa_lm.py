@@ -689,9 +689,10 @@ def train_distill(
     logger.info("VSA-LM distill: d={}, layers={}, vocab={}, params={:.1f}M",
                 cfg.d_model, cfg.n_layers, cfg.vocab_size, model.param_count() / 1e6)
 
-    # Init GPU for forward + backward
-    gpu_ok = model._init_gpu()
-    logger.info("GPU: {}", "enabled (forward+backward)" if gpu_ok else "CPU only")
+    # GPU forward/backward disabled for distillation — vsa_lm_forward/backward
+    # don't include MindForge LoRA layers, producing wrong outputs/gradients.
+    # TODO: add MindForge to the C++ vsa_lm kernel.
+    logger.info("GPU: disabled (MindForge not in C++ kernel yet, using CPU)")
 
     opt = AdamW(lr=lr)
     t0 = time.time()
