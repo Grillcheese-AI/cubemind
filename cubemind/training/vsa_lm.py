@@ -647,11 +647,24 @@ def train_distill(
     d_model: int = 256,
     seq_len: int = 128,
     lr: float = 3e-4,
+    accum_steps: int = 1,
+    loader_max_seq_len: int = 1024,
 ):
     """Train VSA-LM from pre-extracted teacher logits (offline distillation).
 
     Uses OfflineDistillationLoader to stream teacher .npz files.
     Loss = 0.3*CE(hard labels) + 0.6*KL(soft teacher).
+
+    Phase 1 — window sweep: each .npz file is decoded once, then swept
+    with non-overlapping windows of length `seq_len`. For Qwen3's 1013
+    token sequences at seq_len=128 that's 7 training windows per file
+    load instead of 1 — amortizes the ~270MB decompression cost.
+
+    Phase 2 — gradient accumulation: gradients from `accum_steps` windows
+    are summed before opt.step() fires. Effective batch = seq_len *
+    accum_steps. Default `accum_steps=1` preserves the previous single-
+    window behaviour; bump it when you want a larger effective batch
+    without increasing seq_len.
     """
     from cubemind.training.moqe_distillation import (
         OfflineDistillationLoader, _cross_entropy_with_grad,
@@ -665,25 +678,39 @@ def train_distill(
         n_place=32, n_time=16, n_grid=24, lr=lr,
     )
 
-    # Load teacher logits
-    loader = OfflineDistillationLoader(teacher_dir, max_seq_len=seq_len)
+    # Load teacher logits. Ask the loader for the full sequence (up to
+    # loader_max_seq_len) so we can sweep multiple windows out of each
+    # yielded sample instead of throwing the tail away.
+    loader_cap = max(seq_len, int(loader_max_seq_len))
+    loader = OfflineDistillationLoader(teacher_dir, max_seq_len=loader_cap)
 
-    # Detect vocab from first file
+    # Detect vocab and format from first file
     import glob
     first_file = sorted(glob.glob(os.path.join(teacher_dir, "*.npz")))[0]
     sample = np.load(first_file)
     if "logits" in sample:
-        teacher_vocab = sample["logits"].shape[-1]
+        teacher_vocab = int(sample["logits"].shape[-1])
+        teacher_format = "dense"
+    elif "top_k_indices" in sample:
+        teacher_vocab = int(sample["top_k_indices"].max()) + 1
+        teacher_format = "top_k"
     else:
-        teacher_vocab = 262144  # Gemma default
-    logger.info("Teacher vocab: {}", teacher_vocab)
+        teacher_vocab = 262144  # Gemma default fallback
+        teacher_format = "unknown"
+    if "identity_len" in sample.files:
+        ident_len = int(sample["identity_len"][0])
+        logger.info("Teacher: vocab={} format={} identity_len={}",
+                    teacher_vocab, teacher_format, ident_len)
+    else:
+        logger.info("Teacher: vocab={} format={}", teacher_vocab, teacher_format)
 
-    # Use a reasonable student vocab — much smaller than teacher.
-    # Sparse KL only matches positions where both have coverage.
-    # 32K covers common tokens; rare tokens in top-k get clamped.
-    student_vocab = min(teacher_vocab, 32768)
+    # Student vocab: cap at 131072 — large enough that Qwen3 (151K) loses
+    # < 0.001% tokens to OOV, while keeping embed + out_w under ~270MB fp32.
+    # For Gemma 262K this still leaves some OOV tail, but Gemma is deprecated
+    # here in favour of Qwen3 which has a proper frequency-ordered BPE.
+    student_vocab = min(teacher_vocab, 131072)
     cfg.vocab_size = student_vocab
-    logger.info("Student vocab: {} (clamped from teacher {})", student_vocab, teacher_vocab)
+    logger.info("Student vocab: {} (from teacher {})", student_vocab, teacher_vocab)
 
     model = VSALM(cfg)
     logger.info("VSA-LM distill: d={}, layers={}, vocab={}, params={:.1f}M",
@@ -700,116 +727,131 @@ def train_distill(
     loss_ema = 0.0
     step = 0
 
-    logger.info("Distillation training: {} steps, teacher_dir={}", train_steps, teacher_dir)
+    # ── Gradient accumulators (Phase 2) ──────────────────────────────
+    # layer.grads and forge.grads already accumulate via += inside their
+    # backward methods, so we only need extra buffers for the two pieces
+    # that the old loop applied in place: the out_w matmul grad, and the
+    # sparse embedding row updates.
+    accum_grad_out_w = np.zeros_like(model.out_w)
+    accum_embed_grad: dict[int, np.ndarray] = {}
+    windows_in_accum = 0
+
+    def _fire_optimizer() -> None:
+        """Apply accumulated gradients via AdamW and zero everything."""
+        nonlocal windows_in_accum
+        if windows_in_accum == 0:
+            return
+        opt.begin_step()
+        opt.step(model.out_w, accum_grad_out_w)
+        for layer in model.layers:
+            opt.step(layer.ffn_up.weight_patterns, layer.grads["ffn_up_w"])
+            opt.step(layer.ffn_down.weight_patterns, layer.grads["ffn_down_w"])
+            opt.step(layer.ln_g, layer.grads["ln_g"])
+            opt.step(layer.ln_b, layer.grads["ln_b"])
+        for fk, fg in model.forge.grads.items():
+            opt.step(getattr(model.forge, fk), fg)
+        # Sparse embedding rows — direct SGD (per-row slices defeat the
+        # AdamW moment accumulators, same reason as the original loop).
+        for tok, g in accum_embed_grad.items():
+            model.embed[tok] -= lr * np.clip(g, -0.1, 0.1)
+        # Zero every accumulator for the next accum batch.
+        accum_grad_out_w.fill(0.0)
+        accum_embed_grad.clear()
+        for layer in model.layers:
+            for k in layer.grads:
+                layer.grads[k].fill(0.0)
+        model.forge.grads = model.forge.zero_grads()
+        windows_in_accum = 0
+
+    logger.info(
+        "Distillation training: {} steps, accum_steps={}, "
+        "loader_cap={}, teacher_dir={}",
+        train_steps, accum_steps, loader_cap, teacher_dir,
+    )
 
     for epoch in range(100):  # enough epochs to hit train_steps
         for input_ids, labels, teacher_data in loader:
             if step >= train_steps:
                 break
 
-            S = min(len(input_ids), seq_len)
-            ids = input_ids[:S].astype(np.int32)
-            labs = labels[:S].astype(np.int32)
+            # ── Phase 1: sweep non-overlapping windows from this sample ──
+            full_len = int(len(input_ids))
+            n_windows = full_len // seq_len
+            if n_windows == 0:
+                continue  # sample shorter than one window, skip
 
-            # Clamp input IDs to model vocab; mark OOV labels as -1 (ignored by CE)
-            ids = np.clip(ids, 0, cfg.vocab_size - 1)
-            labs_oov = labs >= cfg.vocab_size
-            labs = np.clip(labs, 0, cfg.vocab_size - 1)
-            labs[labs_oov] = -1  # CE ignores -1 labels
+            for wi in range(n_windows):
+                if step >= train_steps:
+                    break
+                ws = wi * seq_len
+                we = ws + seq_len
 
-            # ── Forward ──────────────────────────────────────────────
-            logits = model.forward(ids)  # (S, vocab)
+                ids = input_ids[ws:we].astype(np.int32)
+                labs = labels[ws:we].astype(np.int32)
 
-            # ── Loss: CE + KL from teacher ───────────────────────────
-            loss_ce, grad_ce = _cross_entropy_with_grad(logits, labs)
+                # Slice teacher_data to this window
+                if isinstance(teacher_data, dict) and "top_k_indices" in teacher_data:
+                    window_teacher = {
+                        "top_k_indices": teacher_data["top_k_indices"][ws:we],
+                        "top_k_logprobs": teacher_data["top_k_logprobs"][ws:we],
+                    }
+                elif isinstance(teacher_data, np.ndarray):
+                    window_teacher = teacher_data[ws:we]
+                else:
+                    window_teacher = teacher_data
 
-            if teacher_data is None:
-                loss_kd, grad_kd = 0.0, np.zeros_like(logits)
-            elif isinstance(teacher_data, dict) and "top_k_indices" in teacher_data:
-                t_indices = teacher_data["top_k_indices"][:S].copy()
-                t_logprobs = teacher_data["top_k_logprobs"][:S].astype(np.float32)
-                # Filter out OOV: zero out entries where index >= student vocab
-                # so they contribute zero probability mass (not mapped to token 0)
-                oov_mask = t_indices >= student_vocab
-                t_indices[oov_mask] = 0
-                t_logprobs[oov_mask] = -1e9  # effectively zero after softmax
-                # Skip if all entries are OOV for this sequence
-                valid_count = np.sum(~oov_mask, axis=-1)
-                if np.min(valid_count) > 0:
-                    loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
-                        logits, t_indices, t_logprobs, temperature=2.0,
+                # Remap OOV input IDs to UNK (token 1) so the model sees an
+                # identifiable placeholder instead of a clamped valid-looking
+                # token. Labels OOV are masked as -1 so CE/KD skip those.
+                ids = np.where(ids >= cfg.vocab_size, 1, ids).astype(np.int32)
+                ids = np.where(ids < 0, 1, ids).astype(np.int32)
+                labs_oov = (labs >= cfg.vocab_size) | (labs < 0)
+                labs = np.where(labs_oov, 0, labs).astype(np.int32)
+                labs[labs_oov] = -1  # CE ignores -1 labels
+
+                S = seq_len
+
+                # ── Forward ──────────────────────────────────────────
+                logits = model.forward(ids)  # (S, vocab)
+
+                # ── Loss: CE + KL from teacher ───────────────────────
+                loss_ce, grad_ce = _cross_entropy_with_grad(logits, labs)
+
+                if window_teacher is None:
+                    loss_kd, grad_kd = 0.0, np.zeros_like(logits)
+                elif isinstance(window_teacher, dict) and "top_k_indices" in window_teacher:
+                    t_indices = window_teacher["top_k_indices"].copy()
+                    t_logprobs = window_teacher["top_k_logprobs"].astype(np.float32)
+                    oov_mask = t_indices >= student_vocab
+                    t_indices[oov_mask] = 0
+                    t_logprobs[oov_mask] = -1e9  # zero after softmax
+                    valid_count = np.sum(~oov_mask, axis=-1)
+                    if np.min(valid_count) > 0:
+                        loss_kd, grad_kd = _sparse_kl_divergence_with_grad(
+                            logits, t_indices, t_logprobs, temperature=2.0,
+                        )
+                    else:
+                        loss_kd, grad_kd = 0.0, np.zeros_like(logits)
+                elif isinstance(window_teacher, np.ndarray):
+                    min_v = min(logits.shape[-1], window_teacher.shape[-1])
+                    loss_kd, grad_kd = _kl_divergence_with_grad(
+                        logits[:, :min_v],
+                        window_teacher[:, :min_v].astype(np.float32),
+                        temperature=2.0,
                     )
+                    if min_v < logits.shape[-1]:
+                        pad = np.zeros((S, logits.shape[-1] - min_v), dtype=np.float32)
+                        grad_kd = np.concatenate([grad_kd, pad], axis=-1)
                 else:
                     loss_kd, grad_kd = 0.0, np.zeros_like(logits)
-            elif isinstance(teacher_data, np.ndarray):
-                min_v = min(logits.shape[-1], teacher_data.shape[-1])
-                loss_kd, grad_kd = _kl_divergence_with_grad(
-                    logits[:, :min_v],
-                    teacher_data[:S, :min_v].astype(np.float32),
-                    temperature=2.0,
-                )
-                if min_v < logits.shape[-1]:
-                    pad = np.zeros((S, logits.shape[-1] - min_v), dtype=np.float32)
-                    grad_kd = np.concatenate([grad_kd, pad], axis=-1)
-            else:
-                loss_kd, grad_kd = 0.0, np.zeros_like(logits)
 
-            loss = 0.3 * loss_ce + 0.6 * loss_kd
-            grad_logits = (0.3 * grad_ce + 0.6 * grad_kd).astype(np.float32)
+                loss = 0.3 * loss_ce + 0.6 * loss_kd
+                grad_logits = (0.3 * grad_ce + 0.6 * grad_kd).astype(np.float32)
 
-            # ── Backward ─────────────────────────────────────────────
-            opt.begin_step()
-
-            # GPU backward disabled — vsa_lm_backward doesn't handle MindForge
-            # LoRA layers, produces wrong gradients. Use CPU backward which works.
-            # TODO: add MindForge backward to the C++ vsa_lm_backward kernel.
-            gpu_backward_ok = False
-            if False:  # model._gpu_handle is not None and _gc is not None:
-                try:
-                    grads = _gc.vsa_lm_backward(
-                        model._gpu_dev, model._gpu_handle,
-                        ids.astype(np.int32),
-                        grad_logits.astype(np.float32),
-                    )
-                    # Apply all gradients via AdamW
-                    opt.step(model.embed, grads["grad_embed"])
-                    opt.step(model.out_w, grads["grad_out_w"])
-                    if "grad_pos" in grads:
-                        opt.step(model.pe, grads["grad_pos"])
-                    for li in range(cfg.n_layers):
-                        for key, attr in [
-                            (f"grad_ffn_up_{li}", "ffn_up"),
-                            (f"grad_ffn_down_{li}", "ffn_down"),
-                        ]:
-                            if key in grads:
-                                wp = getattr(model.layers[li], attr).weight_patterns
-                                opt.step(wp, grads[key])
-                        for key, attr in [
-                            (f"grad_ln_g_{li}", "ln_g"),
-                            (f"grad_ln_b_{li}", "ln_b"),
-                        ]:
-                            if key in grads:
-                                opt.step(getattr(model.layers[li], attr), grads[key])
-                    # MindForge grads from GPU (if returned)
-                    for fk in ["A_basis", "B_basis", "W_coeff", "b_coeff",
-                               "W_h", "b_h", "W_proj", "layer_embeddings",
-                               "ln_g", "ln_b"]:
-                        gkey = f"grad_forge_{fk}"
-                        if gkey in grads:
-                            opt.step(getattr(model.forge, fk), grads[gkey])
-                    model._reupload_gpu()
-                    gpu_backward_ok = True
-                except Exception as e:
-                    logger.warning("GPU backward failed: {}, using CPU", e)
-
-            # CPU backward fallback
-            if not gpu_backward_ok:
-                model.forge.grads = model.forge.zero_grads()
-                for layer in model.layers:
-                    for k in layer.grads:
-                        layer.grads[k].fill(0.0)
-
-                # Forward with caches
+                # ── Backward (CPU path; GPU backward still lacks
+                #    MindForge, so vsa_lm_backward is bypassed) ────────
+                # Re-forward with caches because model.forward() above
+                # didn't return them.
                 x_fwd = model.embed[ids] + model.pe[:S]
                 caps = model.capsule_embed[ids]
                 x_fwd = x_fwd + (caps @ model.capsule_proj.T).astype(np.float32)
@@ -825,53 +867,77 @@ def train_distill(
 
                 dx = (grad_logits @ model.out_w / np.sqrt(cfg.d_model)).astype(np.float32)
                 grad_out_w = (grad_logits.T @ x_fwd / np.sqrt(cfg.d_model)).astype(np.float32)
-                opt.step(model.out_w, grad_out_w)
+                accum_grad_out_w += grad_out_w  # ← Phase 2: accumulate
 
                 for layer, cache in reversed(list(zip(model.layers, caches))):
                     dx = layer.backward(dx, cache)
-
-                for layer in model.layers:
-                    opt.step(layer.ffn_up.weight_patterns, layer.grads["ffn_up_w"])
-                    opt.step(layer.ffn_down.weight_patterns, layer.grads["ffn_down_w"])
-                    opt.step(layer.ln_g, layer.grads["ln_g"])
-                    opt.step(layer.ln_b, layer.grads["ln_b"])
-
-                for fk, fg in model.forge.grads.items():
-                    opt.step(getattr(model.forge, fk), fg)
+                    # layer.grads and forge.grads accumulate via += inside
 
                 for t in range(S):
                     tok = int(ids[t])
                     if 0 <= tok < cfg.vocab_size:
-                        model.embed[tok] -= lr * np.clip(dx[t], -0.1, 0.1)
+                        delta = np.clip(dx[t], -0.1, 0.1)
+                        buf = accum_embed_grad.get(tok)
+                        if buf is None:
+                            accum_embed_grad[tok] = delta.astype(np.float32).copy()
+                        else:
+                            buf += delta
 
-            # ── Logging ──────────────────────────────────────────────
-            loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
-            if step % cfg.val_every == 0:
-                elapsed = time.time() - t0
-                sps = (step + 1) / elapsed if elapsed > 0 else 0
-                logger.info(
-                    "step={:5d} | CE={:.3f} | KD={:.3f} | loss={:.3f} | "
-                    "ema={:.3f} | {:.1f} stp/s",
-                    step, loss_ce, loss_kd, loss, loss_ema, sps,
-                )
-                if loss_ema < best_loss:
-                    best_loss = loss_ema
+                windows_in_accum += 1
 
-            if step % cfg.save_every == 0 and step > 0:
-                ckpt = f"data/checkpoints/vsa_lm_distill_step{step}.npz"
-                os.makedirs(os.path.dirname(ckpt), exist_ok=True)
-                np.savez_compressed(
-                    ckpt, embed=model.embed, out_w=model.out_w,
-                    forge_A_basis=model.forge.A_basis,
-                    forge_B_basis=model.forge.B_basis,
-                    step=step, loss_ema=loss_ema,
-                )
-                logger.info("Checkpoint: {} (loss={:.3f})", ckpt, loss_ema)
+                # ── Logging ──────────────────────────────────────────
+                loss_ema = 0.99 * loss_ema + 0.01 * loss if step > 0 else loss
+                if step % cfg.val_every == 0:
+                    elapsed = time.time() - t0
+                    sps = (step + 1) / elapsed if elapsed > 0 else 0
+                    logger.info(
+                        "step={:5d} | CE={:.3f} | KD={:.3f} | loss={:.3f} | "
+                        "ema={:.3f} | {:.1f} stp/s",
+                        step, loss_ce, loss_kd, loss, loss_ema, sps,
+                    )
+                    if loss_ema < best_loss:
+                        best_loss = loss_ema
 
-            step += 1
+                if step > 0 and step % cfg.save_every == 0:
+                    # Flush pending grads before snapshotting so the ckpt
+                    # reflects the just-applied weights, not a mid-batch
+                    # partial update.
+                    _fire_optimizer()
+                    ckpt = f"data/checkpoints/vsa_lm_distill_step{step}.npz"
+                    os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+                    np.savez_compressed(
+                        ckpt, embed=model.embed, out_w=model.out_w,
+                        forge_A_basis=model.forge.A_basis,
+                        forge_B_basis=model.forge.B_basis,
+                        step=step, loss_ema=loss_ema,
+                    )
+                    logger.info("Checkpoint: {} (loss={:.3f})", ckpt, loss_ema)
+
+                step += 1
+
+                # ── Phase 2: fire optimizer every accum_steps windows ──
+                if windows_in_accum >= accum_steps:
+                    _fire_optimizer()
+            # end of per-sample window sweep
 
         if step >= train_steps:
             break
+
+    # Flush any leftover grads from a partial accum batch.
+    _fire_optimizer()
+
+    # Final checkpoint — always save at end of training so we never
+    # lose a completed run (the in-loop save only fires at multiples
+    # of save_every, which can be skipped if train_steps isn't aligned).
+    ckpt = f"data/checkpoints/vsa_lm_distill_step{step}.npz"
+    os.makedirs(os.path.dirname(ckpt), exist_ok=True)
+    np.savez_compressed(
+        ckpt, embed=model.embed, out_w=model.out_w,
+        forge_A_basis=model.forge.A_basis,
+        forge_B_basis=model.forge.B_basis,
+        step=step, loss_ema=loss_ema,
+    )
+    logger.info("Final checkpoint: {} (loss={:.3f})", ckpt, loss_ema)
 
     elapsed = time.time() - t0
     logger.info("Distillation done: {} steps in {:.0f}s, best_loss={:.3f}",

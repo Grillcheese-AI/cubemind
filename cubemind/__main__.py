@@ -206,11 +206,21 @@ def train_mindforge(teacher, steps, seq_len, lr, save_every, log_every) -> None:
 @click.option("--d-model", default=256, help="Model dimension.")
 @click.option("--seq-len", default=128, help="Sequence length.")
 @click.option("--lr", type=float, default=3e-4, help="Learning rate.")
-def train_distill(teacher_dir, steps, layers, d_model, seq_len, lr) -> None:
-    """Distill from pre-extracted teacher logits (Gemma/Llama .npz)."""
+@click.option("--accum-steps", default=1,
+              help="Gradient accumulation windows before opt.step "
+                   "(effective batch = seq-len * accum-steps).")
+@click.option("--loader-max-seq-len", default=1024,
+              help="Max tokens pulled from each teacher .npz "
+                   "(long enough to sweep multiple windows per file).")
+def train_distill(teacher_dir, steps, layers, d_model, seq_len, lr,
+                  accum_steps, loader_max_seq_len) -> None:
+    """Distill from pre-extracted teacher logits (Qwen3/Gemma/Llama .npz)."""
     from cubemind.training.vsa_lm import train_distill as distill_fn
-    distill_fn(teacher_dir=teacher_dir, train_steps=steps, n_layers=layers,
-               d_model=d_model, seq_len=seq_len, lr=lr)
+    distill_fn(
+        teacher_dir=teacher_dir, train_steps=steps, n_layers=layers,
+        d_model=d_model, seq_len=seq_len, lr=lr,
+        accum_steps=accum_steps, loader_max_seq_len=loader_max_seq_len,
+    )
 
 
 @cli.command()

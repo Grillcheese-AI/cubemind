@@ -75,3 +75,7 @@ cubemind/cpp/build/
 *.so
 *.pyd
 *.dylib
+CLAUDE.md
+logs/distill_500.log
+logs/distill_5000.log
+CLAUDE.md

@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 CubeMind is a neuro-vector-symbolic architecture (NVSA) for compositional reasoning on consumer hardware. It achieves 90.3% zero-shot accuracy on I-RAVEN using deterministic integer-domain rule detectors—no gradient training required for the core pipeline.
 
+## IMPORTANT RULES
+
+**ALWAYS USE GRILLY GPU FUNCTIONS INSTEAD OF NUMPY, IF YOU SEE NUMPYS IN THE CODE, REFACTOR IT!*
+**USE PLUGINS WHEN YOU CAN PER EXAMPLE ELEPHANT-CODER, ALWAYS CHECK ALL PLUGINS AVAILABLE TO SEE IF ONE FITS THE WORK!*
+
 **License:** BSL-1.1 | **Python:** >=3.12 | **Package manager:** uv
 
 ## Commands

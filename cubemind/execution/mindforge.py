@@ -50,6 +50,45 @@ try:
 except Exception:
     pass
 
+# Direct grilly_core access for the MindForge-specific shaders (basis mix
+# forward + backward). These weren't wrapped by grilly.backend._bridge
+# because they're domain-specific to this hypernetwork. We lazy-init a
+# shared Device singleton and check capability once on first use.
+_gc_core = None
+_mf_device = None
+_mf_available = None  # None = unknown, True = all three ops present, False = fall back
+try:
+    import grilly_core as _gc_core  # type: ignore
+except Exception:
+    _gc_core = None
+
+
+def _mindforge_gpu_ok() -> bool:
+    """Lazy-init grilly_core Device and verify the three mindforge ops exist."""
+    global _mf_device, _mf_available
+    if _mf_available is not None:
+        return _mf_available
+    if _gc_core is None:
+        _mf_available = False
+        return False
+    needed = ("mindforge_basis_mix", "mindforge_bwd_coeff", "mindforge_bwd_basis")
+    if not all(hasattr(_gc_core, n) for n in needed):
+        _mf_available = False
+        return False
+    try:
+        import pathlib
+        spv = pathlib.Path(__file__).resolve().parents[2] / "grilly" / "shaders" / "spv"
+        if not spv.exists():
+            import grilly
+            spv = pathlib.Path(grilly.__file__).parent / "shaders" / "spv"  # type: ignore
+        _mf_device = _gc_core.Device()
+        _mf_device.load_shaders(str(spv))
+        _mf_available = True
+    except Exception:
+        _mf_device = None
+        _mf_available = False
+    return _mf_available
+
 
 def _gelu(x: np.ndarray) -> np.ndarray:
     if _bridge is not None:
@@ -291,9 +330,24 @@ class MindForge:
         # Continuous mixing (NO softmax — prevents mode collapse)
         coeffs = _linear(h, self.W_coeff, self.b_coeff)
 
-        # Mix basis adapters
-        A = np.tensordot(coeffs, self.A_basis, axes=([0], [0])).astype(np.float32)
-        B = np.tensordot(coeffs, self.B_basis, axes=([0], [0])).astype(np.float32)
+        # Mix basis adapters. Prefer the fused grilly shader — it keeps
+        # the whole operation GPU-resident and avoids the PCIe roundtrip
+        # that np.tensordot would cause. Shape contract:
+        #   A_basis: (n_basis, rank, d_in)  →  A: (rank, d_in)
+        #   B_basis: (n_basis, d_out, rank) →  B: (d_out, rank)
+        if _mindforge_gpu_ok():
+            coeffs_c = np.ascontiguousarray(coeffs, dtype=np.float32)
+            A = np.asarray(
+                _gc_core.mindforge_basis_mix(_mf_device, coeffs_c, self.A_basis),
+                dtype=np.float32,
+            )
+            B = np.asarray(
+                _gc_core.mindforge_basis_mix(_mf_device, coeffs_c, self.B_basis),
+                dtype=np.float32,
+            )
+        else:
+            A = np.tensordot(coeffs, self.A_basis, axes=([0], [0])).astype(np.float32)
+            B = np.tensordot(coeffs, self.B_basis, axes=([0], [0])).astype(np.float32)
 
         cache = (ctx_flat, ctx_proj_raw, ln_mean, ln_var,
                  layer_emb, combined, pre_act, h, coeffs)
@@ -317,12 +371,30 @@ class MindForge:
          layer_emb, combined, pre_act, h, coeffs) = cache
 
         # ── Backprop through basis mixing ────────────────────────────────
-        d_coeffs = np.zeros_like(coeffs)
-        for i in range(self.n_basis):
-            d_coeffs[i] = float(np.sum(d_A * self.A_basis[i])
-                                + np.sum(d_B * self.B_basis[i]))
-            self.grads["A_basis"][i] += coeffs[i] * d_A
-            self.grads["B_basis"][i] += coeffs[i] * d_B
+        # Both grilly shaders accumulate in place (+=). We zero d_coeffs
+        # before the first call; the A-basis grads are already being
+        # accumulated into self.grads (persistent across steps).
+        if _mindforge_gpu_ok():
+            d_A_c = np.ascontiguousarray(d_A, dtype=np.float32)
+            d_B_c = np.ascontiguousarray(d_B, dtype=np.float32)
+            d_coeffs = np.zeros_like(coeffs, dtype=np.float32)
+            # d_coeffs += Σ (d_A ⊙ A_basis[i]) + Σ (d_B ⊙ B_basis[i])
+            _gc_core.mindforge_bwd_coeff(_mf_device, d_A_c, self.A_basis, d_coeffs)
+            _gc_core.mindforge_bwd_coeff(_mf_device, d_B_c, self.B_basis, d_coeffs)
+            # grads[..] += coeffs[i] ⊗ d_adapter
+            _gc_core.mindforge_bwd_basis(
+                _mf_device, coeffs.astype(np.float32), d_A_c, self.grads["A_basis"],
+            )
+            _gc_core.mindforge_bwd_basis(
+                _mf_device, coeffs.astype(np.float32), d_B_c, self.grads["B_basis"],
+            )
+        else:
+            d_coeffs = np.zeros_like(coeffs)
+            for i in range(self.n_basis):
+                d_coeffs[i] = float(np.sum(d_A * self.A_basis[i])
+                                    + np.sum(d_B * self.B_basis[i]))
+                self.grads["A_basis"][i] += coeffs[i] * d_A
+                self.grads["B_basis"][i] += coeffs[i] * d_B
 
         # ── Backprop through coefficient layer ───────────────────────────
         d_h = (d_coeffs @ self.W_coeff).astype(np.float32)
