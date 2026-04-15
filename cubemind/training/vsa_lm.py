@@ -416,8 +416,13 @@ def _layernorm_bwd(dout, x, mean, var, weight, eps=1e-5):
 
 
 class VSALayer:
-    def __init__(self, cfg: VSALMConfig, layer_id: int, forge: MindForge,
-                 hippo: HippocampalFormation, bc: BlockCodes, seed: int = 42):
+    def __init__(self, cfg: VSALMConfig, layer_id: int, forge: "MindForge",
+                 hippo: "HippocampalFormation", bc: BlockCodes, seed: int = 42):
+        # Lazy imports — keeps the MinGRU path free of the heavy legacy
+        # dependency chain (grilly.utils.visualization -> matplotlib).
+        from cubemind.brain.addition_linear import AdditionLinear, SignActivation
+        from cubemind.brain.gif_neuron import GIFNeuron
+
         self.cfg = cfg
         self.layer_id = layer_id
         self.forge = forge
@@ -535,6 +540,10 @@ class VSALayer:
 
 class VSALM:
     def __init__(self, cfg: VSALMConfig):
+        # Lazy imports — see VSALayer.__init__ for rationale.
+        from cubemind.execution.mindforge import MindForge
+        from cubemind.memory.formation import HippocampalFormation
+
         self.cfg = cfg
         d = cfg.d_model
         rng = np.random.default_rng(cfg.seed)
