@@ -26,11 +26,15 @@ from dataclasses import dataclass
 import numpy as np
 from loguru import logger
 
+# Heavy legacy imports (HippocampalFormation, MindForge, GIFNeuron,
+# AdditionLinear, SignActivation) are required only by the Phase-2+ VSA-LM
+# path below, not by the Phase-1 MinGRU backbone. They're imported lazily
+# inside ``VSALayer.__init__`` so ``from cubemind.training.vsa_lm import
+# MinGRUModel`` stays fast and — importantly — doesn't pull grilly's
+# ``utils/visualization.py`` matplotlib import chain, which crashes on
+# Colab where ``MPLBACKEND`` points at a backend that isn't installed in
+# a fresh venv.
 from cubemind.ops.block_codes import BlockCodes
-from cubemind.brain.addition_linear import AdditionLinear, SignActivation
-from cubemind.brain.gif_neuron import GIFNeuron
-from cubemind.memory.formation import HippocampalFormation
-from cubemind.execution.mindforge import MindForge
 from cubemind.functional.math import softmax
 
 # ── GPU bridge ───────────────────────────────────────────────────────────
