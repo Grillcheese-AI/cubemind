@@ -259,21 +259,31 @@ class RMSNorm(nn.Module):
 
 
 def prefix_scan_causal(x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
-    """Parallel causal linear-RNN scan: ``h_t = a_t · h_{t-1} + x_t``.
+    """Causal linear-RNN scan: ``h_t = a_t · h_{t-1} + x_t``.
 
-    Same math as the grilly shader (log-space cumsum + rescaling).
-    ``torch.cumsum`` runs in O(log T) depth on GPU, so this is fast.
+    Sequential time loop — simple and numerically stable at any seq_len
+    in any dtype (bf16, fp16, fp32). Each step is a cheap ``(B, D)``
+    multiply-add; kernel launch overhead dominates but stays under a ms
+    per layer on a modern GPU at seq=256.
 
-    ``a`` must already be bounded > 0 (MinGRULayer squashes it to
-    [0.05, 0.95]) so ``log(a)`` is finite.
+    The parallel log-space version (grilly shader / earlier revision
+    here) is faster but underflows when the cumulative sum of ``log(a)``
+    passes the dtype's min exponent. For ``a ∈ [0.05, 0.95]``,
+    ``log(a) ≥ -3``, so at seq=256 the worst-case cumulative log can hit
+    -768 — ``exp(-768) = 0`` in both bf16 and fp32, producing a division
+    by zero and NaN loss within the first step.
+
+    A proper parallel associative scan (Heinsen 2023 / Chen 2024) can
+    restore the O(log T) depth while staying numerically stable — wiring
+    that in is a Phase 1.5+ follow-up.
     """
-    # (B, S, D)
-    log_a = torch.log(a.clamp(min=1e-6))
-    cum_log = torch.cumsum(log_a, dim=1)          # cumulative log-product
-    g = torch.exp(cum_log)                        # ∏_{s≤t} a_s
-    scaled_x = x / g
-    cum = torch.cumsum(scaled_x, dim=1)
-    return g * cum
+    B, S, D = x.shape
+    h = torch.zeros(B, D, dtype=x.dtype, device=x.device)
+    out = torch.empty_like(x)
+    for t in range(S):
+        h = a[:, t] * h + x[:, t]
+        out[:, t] = h
+    return out
 
 
 class MinGRULayer(nn.Module):
