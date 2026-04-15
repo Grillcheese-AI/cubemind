@@ -33,7 +33,7 @@ build/
 /docs
 
 # Non-core directories (local experiments, not part of package)
-/sandbox
+
 /notebooks
 /scripts
 /cloned

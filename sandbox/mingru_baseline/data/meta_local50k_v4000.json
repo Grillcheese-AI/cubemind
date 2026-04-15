@@ -1,0 +1,7 @@
+{
+  "source": "local50k",
+  "vocab": 4000,
+  "train_tokens": 10979128,
+  "val_tokens": 608754,
+  "n_stories": 50000
+}
