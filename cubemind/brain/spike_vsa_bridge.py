@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
 from cubemind.ops.block_codes import BlockCodes
 
 # grilly bridge ops
@@ -31,6 +32,7 @@ except ImportError:
     pass
 
 
+@register("bridge", "spike_vsa")
 class SpikeVSABridge:
     """Bidirectional bridge between spike trains and VSA block-codes.
 

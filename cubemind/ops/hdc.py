@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
 
+
+@register("ops", "hdc")
 class HDCPacked:
     """Bit-packed HDC operations for 32x memory compression.
 

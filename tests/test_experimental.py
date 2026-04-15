@@ -1,4 +1,4 @@
-"""Tests for cubemind.experimental -- bandits, burn_feed, ToM, vs_graph, convergence."""
+"""Tests for cubemind.experimental (bandits) and cubemind.reasoning.vs_graph."""
 
 import numpy as np
 
@@ -68,7 +68,7 @@ class TestVSGraph:
 
     def test_vs_graph_add_query(self):
         """VSGraph.add_node, add_edge, query_neighbors work correctly."""
-        from cubemind.experimental.vs_graph import VSGraph
+        from cubemind.reasoning.vs_graph import VSGraph
 
         g = VSGraph(k=4, l=16)
         g.add_node("A")
@@ -88,7 +88,7 @@ class TestVSGraph:
 
     def test_vs_graph_encode(self):
         """VSGraph.encode_graph returns correct shape."""
-        from cubemind.experimental.vs_graph import VSGraph
+        from cubemind.reasoning.vs_graph import VSGraph
 
         g = VSGraph(k=4, l=16)
         g.add_edge("A", "B")
@@ -100,7 +100,7 @@ class TestVSGraph:
 
     def test_vs_graph_auto_create_nodes(self):
         """VSGraph.add_edge auto-creates nodes that don't exist."""
-        from cubemind.experimental.vs_graph import VSGraph
+        from cubemind.reasoning.vs_graph import VSGraph
 
         g = VSGraph(k=4, l=16)
         g.add_edge("X", "Y")
@@ -110,7 +110,7 @@ class TestVSGraph:
 
     def test_vs_graph_adjacency_matrix(self):
         """VSGraph.get_adjacency_matrix is symmetric."""
-        from cubemind.experimental.vs_graph import VSGraph
+        from cubemind.reasoning.vs_graph import VSGraph
 
         g = VSGraph(k=4, l=16)
         g.add_edge("A", "B")
@@ -122,7 +122,7 @@ class TestVSGraph:
 
     def test_spike_diffusion(self):
         """spike_diffusion returns valid ranks."""
-        from cubemind.experimental.vs_graph import spike_diffusion
+        from cubemind.reasoning.vs_graph import spike_diffusion
 
         adj = np.array([
             [0, 1, 1, 0],
@@ -136,85 +136,4 @@ class TestVSGraph:
         assert set(ranks.tolist()) == {0, 1, 2, 3}  # each node gets unique rank
 
 
-class TestConvergenceMonitor:
-
-    def test_convergence_monitor(self):
-        """ConvergenceMonitor detects plateau and suggests LR change."""
-        from cubemind.experimental.convergence import ConvergenceMonitor
-
-        monitor = ConvergenceMonitor(
-            window_size=10,
-            patience=2,
-            min_delta=1e-4,
-        )
-
-        # Decreasing loss -- not plateau
-        for i in range(20):
-            result = monitor.update(1.0 / (i + 1))
-            assert result["step"] == i + 1
-
-        assert monitor.best_loss < 1.0
-
-        # Flat loss -- should detect plateau
-        for _ in range(50):
-            result = monitor.update(0.05)
-
-        assert result["is_plateau"]
-
-    def test_convergence_monitor_is_converged(self):
-        """ConvergenceMonitor.is_converged returns True for flat loss."""
-        from cubemind.experimental.convergence import ConvergenceMonitor
-
-        monitor = ConvergenceMonitor(window_size=10, min_delta=1e-6)
-
-        # Need window_size entries
-        for _ in range(20):
-            monitor.update(0.001)
-
-        assert monitor.is_converged(threshold=1e-4)
-
-    def test_rhat_converged_chains(self):
-        """rhat returns ~1.0 for chains sampling from the same distribution."""
-        from cubemind.experimental.convergence import rhat
-
-        rng = np.random.default_rng(42)
-        chains = rng.normal(0, 1, size=(4, 500))
-
-        r = rhat(chains)
-        assert 0.99 < r < 1.05
-
-    def test_split_rhat_stationary(self):
-        """split_rhat returns ~1.0 for a stationary chain."""
-        from cubemind.experimental.convergence import split_rhat
-
-        rng = np.random.default_rng(42)
-        chain = rng.normal(0, 1, size=1000)
-
-        r = split_rhat(chain)
-        assert 0.99 < r < 1.05
-
-    def test_check_convergence_dict(self):
-        """check_convergence returns expected keys."""
-        from cubemind.experimental.convergence import check_convergence
-
-        rng = np.random.default_rng(42)
-        chains = rng.normal(0, 1, size=(3, 200))
-
-        result = check_convergence(chains, threshold=1.05)
-
-        assert "rhat" in result
-        assert "split_rhat" in result
-        assert "ess" in result
-        assert "converged" in result
-        assert isinstance(result["converged"], bool)
-
-    def test_ess_reasonable(self):
-        """ess returns a positive number less than total samples."""
-        from cubemind.experimental.convergence import ess
-
-        rng = np.random.default_rng(42)
-        chains = rng.normal(0, 1, size=(4, 200))
-
-        e = ess(chains)
-        assert e > 0
-        assert e <= 4 * 200 * 1.5  # should not exceed total by much
+# ConvergenceMonitor tests moved to sandbox/convergence/ alongside the module.

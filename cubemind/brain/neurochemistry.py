@@ -32,12 +32,15 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 
 def _sigmoid(x: float, center: float = 0.5, steepness: float = 10.0) -> float:
     """Receptor saturation curve. Prevents linear blow-up at extremes."""
     return 1.0 / (1.0 + np.exp(-steepness * (x - center)))
 
 
+@register("modulator", "neurochemistry")
 class Neurochemistry:
     """5-hormone neurochemical ODE with receptor dynamics.
 

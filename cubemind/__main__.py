@@ -156,10 +156,11 @@ def forward(text, k, l_block, d_hidden) -> None:
 @click.option("--host", default="0.0.0.0", help="Bind host.")
 @click.option("--port", default=8000, help="Bind port.")
 def api(host, port) -> None:
-    """Start the FastAPI server."""
-    import uvicorn
-    from cubemind.cloud.api import app
-    uvicorn.run(app, host=host, port=port)
+    """Start the FastAPI server (pending Phase 3.3 rewire)."""
+    raise click.ClickException(
+        "cubemind.cloud.api is being rewired in Phase 3.3 to use the new "
+        "VSALMModel container. The legacy DecisionOracle API has been archived."
+    )
 
 
 @cli.group()

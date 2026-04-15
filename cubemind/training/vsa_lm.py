@@ -133,6 +133,256 @@ class VSALMConfig:
     seed: int = 42
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# MinGRU Coherence-Baseline Backbone (Phase 1.2)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Per TASKS.md Phase 1 architectural decisions:
+#   - MinGRU gated recurrence (Feng & Tegmark 2024), standard float32 weights.
+#     Qwen3.5 (Gated Delta Networks + sparse MoE) validates this direction at
+#     production scale. MinGRU is the proven small-scale formulation.
+#   - TinyStories coherence (Eldan & Li 2023) is the evaluation gate, not PPL.
+#   - grilly autograd only — no manual backward.
+#   - AdditionLinear stays in the FFN (channel mix), never the sequence mixer.
+#
+# Recurrence (matches prefix_scan_causal form h_t = a_t · h_{t-1} + x_t):
+#   [g, v, d] = three grilly.nn.Linear projections of x
+#   x_scan    = sigmoid(g) · tanh(v)                 candidate hidden
+#   a         = 0.05 + 0.9 · sigmoid(d)              bounded decay gate
+#   h         = prefix_scan_causal(x_scan, a)        GPU linear-RNN scan
+#
+# Stack (pre-norm, residual) per block:
+#   x = x + MinGRULayer(RMSNorm(x))
+#   x = x + GLUChannelMix(RMSNorm(x))
+#
+# This is the Phase 1 baseline. Phase 2 will extend it into VSALMModel by
+# wrapping CubeMind extensions (SNN gating, MindForge, hippocampal memory)
+# around the same backbone — config-gated, disabled by default.
+
+
+@dataclass
+class MinGRUConfig:
+    """Config for the MinGRU coherence baseline.
+
+    Defaults match TASKS.md Phase 1.3: d=256, L=6, d_ffn=768, vocab=4000.
+    That produces ~5M params on TinyStories per the task.
+    """
+    vocab_size: int = 4000
+    d_model: int = 256
+    d_ffn: int = 768
+    n_layers: int = 6
+    seq_len: int = 256
+    tie_embeddings: bool = True
+    decay_bias_init: float = 1.0  # sigmoid(1) ≈ 0.73 retention at t=0
+    dropout: float = 0.0
+    seed: int = 42
+
+
+class MinGRULayer:
+    """MinGRU sequence mixer, GPU autograd-wired via prefix_scan_causal.
+
+    Bounded decay (``a ∈ [0.05, 0.95]``) keeps ``log(a)`` in a numerically
+    safe range for the scan's log-space accumulation — same trick as the
+    existing ``CausalSequenceMixer`` in grilly.
+    """
+
+    def __init__(self, d_model: int, bias_init: float = 1.0):
+        from grilly import nn
+        self.d_model = d_model
+        self.proj_g = nn.Linear(d_model, d_model, bias=True)
+        self.proj_v = nn.Linear(d_model, d_model, bias=True)
+        self.proj_d = nn.Linear(d_model, d_model, bias=True)
+
+        # Initialize decay-gate bias so sigmoid starts at ≈0.73 (mild
+        # retention at step 0 — the LiquidCell-era default).
+        try:
+            b = self.proj_d.bias
+            b_arr = b.data if hasattr(b, "data") else b
+            b_arr[:] = float(bias_init)
+        except Exception:
+            pass
+
+    def parameters(self):
+        yield from self.proj_g.parameters()
+        yield from self.proj_v.parameters()
+        yield from self.proj_d.parameters()
+
+    def __call__(self, x):
+        """x: Variable or ndarray of shape (B, S, D). Returns Variable (B, S, D).
+
+        Activation ops use grilly.nn.autograd's free functions (``sigmoid``,
+        ``tanh``) instead of Variable methods so the forward works in both
+        grad-enabled training and ``no_grad`` eval/generation — under
+        ``no_grad``, grilly's ``Linear.forward`` returns a raw ndarray
+        rather than a Variable, and ``ndarray.tanh()`` does not exist.
+        """
+        from grilly.nn.autograd import sigmoid, tanh
+        from grilly.nn.prefix_scan import prefix_scan_causal
+
+        g = self.proj_g(x)
+        v = self.proj_v(x)
+        d = self.proj_d(x)
+
+        # Candidate input: sigmoid(g) · tanh(v), bounded in (-1, 1).
+        x_scan = sigmoid(g) * tanh(v)
+
+        # Bounded decay: 0.05 + 0.9 · sigmoid(d) ∈ [0.05, 0.95] — keeps
+        # log(a) ≥ -3 for the prefix scan's log-space accumulation.
+        a = 0.05 + sigmoid(d) * 0.9
+
+        return prefix_scan_causal(x_scan, a)
+
+
+class GLUChannelMix:
+    """Gated linear unit FFN: ``y = W_o(silu(W_g x) ⊙ W_u x)``.
+
+    Standard float32 projections via grilly.nn.Linear. A follow-up issue
+    may swap the projections onto an autograd-wired AdditionLinear to
+    realize the "matmul-free FFN" architectural intent (see TASKS.md) —
+    the computation stays the same, only the weight kernel changes.
+    """
+
+    def __init__(self, d_model: int, d_ffn: int):
+        from grilly import nn
+        self.d_model = d_model
+        self.d_ffn = d_ffn
+        self.W_gate = nn.Linear(d_model, d_ffn, bias=False)
+        self.W_up   = nn.Linear(d_model, d_ffn, bias=False)
+        self.W_out  = nn.Linear(d_ffn, d_model, bias=False)
+
+    def parameters(self):
+        yield from self.W_gate.parameters()
+        yield from self.W_up.parameters()
+        yield from self.W_out.parameters()
+
+    def __call__(self, x):
+        from grilly.nn.autograd import sigmoid
+        g = self.W_gate(x)
+        silu_g = g * sigmoid(g)             # SiLU = x · sigmoid(x)
+        up = self.W_up(x)
+        return self.W_out(silu_g * up)
+
+
+class MinGRUBlock:
+    """Pre-norm residual block: mixer (MinGRU) + channel mix (GLU)."""
+
+    def __init__(self, cfg: MinGRUConfig):
+        from grilly import nn
+        self.rms_mix = nn.RMSNorm(cfg.d_model)
+        self.rms_ffn = nn.RMSNorm(cfg.d_model)
+        self.mix = MinGRULayer(cfg.d_model, bias_init=cfg.decay_bias_init)
+        self.ffn = GLUChannelMix(cfg.d_model, cfg.d_ffn)
+
+    def parameters(self):
+        yield from self.rms_mix.parameters()
+        yield from self.rms_ffn.parameters()
+        yield from self.mix.parameters()
+        yield from self.ffn.parameters()
+
+    def __call__(self, x):
+        x = x + self.mix(self.rms_mix(x))
+        x = x + self.ffn(self.rms_ffn(x))
+        return x
+
+
+class MinGRUModel:
+    """Standalone MinGRU language model — the Phase 1 coherence baseline.
+
+    ``token_ids (B, S) -> embed -> [MinGRUBlock × N] -> RMSNorm -> head``
+
+    Head is tied to the embedding when ``cfg.tie_embeddings`` (default).
+    Both reference the same Parameter object so ``loss.backward()``
+    accumulates the embedding-lookup gradient and the output-projection
+    gradient into a single ``.grad`` slot — standard tied-weight semantics.
+
+    No CubeMind extensions here (SNN gating, MindForge, hippocampal memory
+    land in Phase 2's VSALMModel, which extends this backbone).
+    """
+
+    def __init__(self, cfg: "MinGRUConfig | None" = None, **kwargs):
+        from grilly import nn
+        if cfg is None:
+            cfg = MinGRUConfig(**kwargs)
+        self.cfg = cfg
+
+        self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        # grilly.nn.Embedding defaults to N(0, 1), which is catastrophic
+        # for tied-weight language models — the head's logit scale becomes
+        # O(sqrt(d_model)) at init, so softmax is near one-hot and CE
+        # starts at ~log(V) · sqrt(d_model)/2 instead of log(V). Standard
+        # transformer init is N(0, 0.02).
+        try:
+            from grilly.nn._helpers import _get_param_array
+            emb_arr = _get_param_array(self.embed.weight)
+            rng = np.random.default_rng(cfg.seed)
+            emb_arr[:] = rng.standard_normal(emb_arr.shape).astype(np.float32) * 0.02
+        except Exception:
+            pass
+
+        self.blocks = [MinGRUBlock(cfg) for _ in range(cfg.n_layers)]
+        self.rms_f = nn.RMSNorm(cfg.d_model)
+
+        # Output head. Linear does ``x @ weight.T`` so for tied weights we
+        # point head.weight at the embedding's Parameter — same object,
+        # shared ``.grad`` slot.
+        self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        if cfg.tie_embeddings:
+            self.head.weight = self.embed.weight
+
+    def parameters(self):
+        """Yield each underlying Parameter once (tied weights de-duped)."""
+        seen: set = set()
+
+        def _new(p) -> bool:
+            pid = id(p)
+            if pid in seen:
+                return False
+            seen.add(pid)
+            return True
+
+        for p in self.embed.parameters():
+            if _new(p):
+                yield p
+        for block in self.blocks:
+            for p in block.parameters():
+                if _new(p):
+                    yield p
+        for p in self.rms_f.parameters():
+            if _new(p):
+                yield p
+        for p in self.head.parameters():
+            if _new(p):
+                yield p
+
+    def num_parameters(self) -> int:
+        """Total trainable parameter count (tied weights counted once)."""
+        from grilly.nn._helpers import _get_param_array
+        total = 0
+        seen: set = set()
+        for p in self.parameters():
+            arr = _get_param_array(p)
+            if id(arr) in seen:
+                continue
+            seen.add(id(arr))
+            total += int(arr.size)
+        return total
+
+    def __call__(self, tokens):
+        """tokens: int (B, S) or (S,). Returns logits Variable (B, S, V)."""
+        tokens = np.asarray(tokens)
+        if tokens.ndim == 1:
+            tokens = tokens[None, :]
+        h = self.embed(tokens)
+        for block in self.blocks:
+            h = block(h)
+        h = self.rms_f(h)
+        return self.head(h)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Legacy VSA-LM path (Phase 2+ extensions live downstream of MinGRUBlock)
+# ═══════════════════════════════════════════════════════════════════════════
+
 # ── VSA Layer (CPU path — used when GPU unavailable) ─────────────────────
 
 

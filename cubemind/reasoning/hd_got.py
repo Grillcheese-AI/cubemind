@@ -24,7 +24,7 @@ from __future__ import annotations
 import numpy as np
 
 from cubemind.ops import BlockCodes
-from cubemind.experimental.vs_graph import (
+from cubemind.reasoning.vs_graph import (
     spike_diffusion,
     associative_message_passing,
 )

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
+from cubemind.core.registry import register
 from cubemind.ops.block_codes import BlockCodes
 
 try:
@@ -41,6 +42,7 @@ except ImportError:
 _DEFAULT_WEIGHTS = Path(__file__).resolve().parent.parent.parent / "data" / "harrier-0.6b"
 
 
+@register("encoder", "harrier")
 class HarrierEncoder:
     """Text encoder using Microsoft Harrier-OSS-v1-0.6b.
 

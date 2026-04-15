@@ -15,6 +15,7 @@ import hashlib
 
 import numpy as np
 
+from cubemind.core.registry import register
 from cubemind.ops.block_codes import BlockCodes
 
 try:
@@ -24,6 +25,7 @@ except ImportError:
     L_BLOCK: int = 128
 
 
+@register("encoder", "world")
 class WorldEncoder:
     """Encode text (states, actions, narratives) into block-code VSA vectors.
 
