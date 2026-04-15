@@ -32,6 +32,15 @@ Run::
 
 from __future__ import annotations
 
+import os as _os
+# Colab sets ``MPLBACKEND=module://matplotlib_inline.backend_inline`` in
+# its shell env. grilly's ``utils/__init__.py`` eagerly imports matplotlib
+# via ``visualization.py``; if ``matplotlib_inline`` isn't installed in
+# the current venv, matplotlib throws ``ValueError: Key backend`` at
+# import time and grilly never loads. Clear the env var so matplotlib
+# picks a valid default.
+_os.environ.pop("MPLBACKEND", None)
+
 # IMPORTANT: import the HuggingFace ``tokenizers`` package BEFORE touching
 # grilly — grilly's own ``grilly/tokenizers/`` subpackage gets put on the
 # module search path by ``grilly/__init__.py`` and would otherwise shadow
