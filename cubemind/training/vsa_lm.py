@@ -182,6 +182,22 @@ class MinGRUConfig:
     seed: int = 42
 
 
+def _has_fused_mingru() -> bool:
+    """Probe for the fused ``mingru_forward`` GPU kernel — added to grilly
+    on 2026-04-16. Older grilly builds expose only ``prefix_scan_causal``
+    and need the composed sigmoid/tanh/scan path.
+    """
+    try:
+        import grilly_core as _gc
+        return hasattr(_gc, "mingru_forward") and hasattr(_gc, "mingru_backward")
+    except Exception:
+        return False
+
+
+# Cached at import time — capability doesn't change between calls.
+_FUSED_MINGRU = _has_fused_mingru()
+
+
 class MinGRULayer:
     """MinGRU sequence mixer, GPU autograd-wired via prefix_scan_causal.
 
@@ -214,26 +230,35 @@ class MinGRULayer:
     def __call__(self, x):
         """x: Variable or ndarray of shape (B, S, D). Returns Variable (B, S, D).
 
-        Activation ops use grilly.nn.autograd's free functions (``sigmoid``,
-        ``tanh``) instead of Variable methods so the forward works in both
-        grad-enabled training and ``no_grad`` eval/generation — under
-        ``no_grad``, grilly's ``Linear.forward`` returns a raw ndarray
-        rather than a Variable, and ``ndarray.tanh()`` does not exist.
+        Two GPU paths:
+
+        1. **Fused** (preferred, post-2026-04-16 grilly) — ``min_gru(g, v, d)``
+           runs the entire ``sigmoid(g)·tanh(v) + bounded-sigmoid(d) + causal
+           scan`` chain in a single kernel dispatch. ~3-5× fewer kernel
+           launches than the composed path; tighter memory traffic.
+        2. **Composed** (fallback) — separate sigmoid / tanh / multiply /
+           ``prefix_scan_causal`` calls. Works on any grilly build that has
+           ``prefix_scan_causal`` (post-seq-32-cap).
+
+        Activation ops use ``grilly.nn.autograd``'s free functions (not
+        Variable methods) so the forward works under ``no_grad`` too —
+        Linear returns raw ndarray there, and ``ndarray.tanh()`` doesn't
+        exist.
         """
-        from grilly.nn.autograd import sigmoid, tanh
         from grilly.nn.prefix_scan import prefix_scan_causal
 
         g = self.proj_g(x)
         v = self.proj_v(x)
         d = self.proj_d(x)
 
-        # Candidate input: sigmoid(g) · tanh(v), bounded in (-1, 1).
+        if _FUSED_MINGRU:
+            from grilly.nn.prefix_scan import min_gru
+            return min_gru(g, v, d)
+
+        # Composed fallback — see module docstring for the math.
+        from grilly.nn.autograd import sigmoid, tanh
         x_scan = sigmoid(g) * tanh(v)
-
-        # Bounded decay: 0.05 + 0.9 · sigmoid(d) ∈ [0.05, 0.95] — keeps
-        # log(a) ≥ -3 for the prefix scan's log-space accumulation.
         a = 0.05 + sigmoid(d) * 0.9
-
         return prefix_scan_causal(x_scan, a)
 
 

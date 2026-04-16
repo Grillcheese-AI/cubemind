@@ -159,7 +159,7 @@ Before writing any training code, establish what "coherent" means measurably:
 
 ### 1.3 Train on TinyStories (Colab Pro)
 
-- [ ] Prepare TinyStories dataset (tokenizer, shards)
+- [x] Prepare TinyStories dataset (tokenizer, shards)
 - [ ] Train `MinGRUModel` on Colab Pro A100:
   - `d_model=256`, `n_layers=6`, `d_ffn=768`, `vocab=4000`
   - grilly AdamW: `lr=3e-4`, cosine decay, warmup 1000, grad_clip=1.0
@@ -169,6 +169,14 @@ Before writing any training code, establish what "coherent" means measurably:
 
 **Done when:** Generated stories pass visual coherence check. Log PPL as a secondary
 metric. Create `sandbox/mingru_baseline/results.md` with sample outputs.
+
+✅ **2026-04-16:** Run on Colab Blackwell RTX PRO 6000 via PyTorch backend
+(`train_torch.py`). 5.75M params, 200M-token subset, 6000 steps, 18.2 min,
+val PPL 4.83 (no train/val gap). Greedy stories show proper narrative arcs
+with EOS termination. See `sandbox/mingru_baseline/results_torch/`.
+*Note: Phase 1 architectural decisions said "grilly autograd only" — Colab
+has no Vulkan ICD so PyTorch was used as a same-architecture mirror; Phase
+1.5 re-validates on grilly/Vulkan locally.*
 
 ---
 

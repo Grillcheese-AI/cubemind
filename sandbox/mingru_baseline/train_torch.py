@@ -480,7 +480,16 @@ def evaluate(model: MinGRUModel, val_data: np.ndarray, cfg: TrainConfig,
 
 def save_checkpoint(path: Path, model: MinGRUModel, optimizer, step: int,
                     best_val: float, tokens_seen: int, elapsed: float,
-                    cfg: TrainConfig) -> None:
+                    cfg: TrainConfig,
+                    tokenizer_json: str | None = None) -> None:
+    """Save checkpoint with optional inline tokenizer JSON.
+
+    Embedding the tokenizer in the checkpoint avoids the foot-gun where
+    eval-time tokenizer-source detection (e.g. ``LOCAL_JSON.exists()``)
+    diverges from train-time tokenizer choice — different BPE merges
+    produce different token IDs and the embedding lookup maps every
+    token to garbage.
+    """
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save({
         "step": step, "best_val": best_val,
@@ -488,6 +497,7 @@ def save_checkpoint(path: Path, model: MinGRUModel, optimizer, step: int,
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "config": asdict(cfg),
+        "tokenizer_json": tokenizer_json,
     }, tmp)
     os.replace(tmp, path)
 
@@ -697,7 +707,8 @@ def train(cfg: TrainConfig, args) -> dict:
                 best_path = OUT_DIR / "best.pt"
                 save_checkpoint(best_path, model, optimizer, step, best_val,
                                 tokens_seen,
-                                elapsed_prev + (time.time() - t_start), cfg)
+                                elapsed_prev + (time.time() - t_start), cfg,
+                                tokenizer_json=tokenizer.to_str())
                 tag = " *"
             print(f"\n  === step {step:,} ===  val CE {val_ce:.4f}  "
                   f"PPL {val_ppl:.2f}{tag}")
@@ -710,7 +721,8 @@ def train(cfg: TrainConfig, args) -> dict:
         if step % cfg.ckpt_every == 0:
             save_checkpoint(ckpt_path, model, optimizer, step, best_val,
                             tokens_seen,
-                            elapsed_prev + (time.time() - t_start), cfg)
+                            elapsed_prev + (time.time() - t_start), cfg,
+                            tokenizer_json=tokenizer.to_str())
 
         if step % 200 == 0:
             if device.type == "cuda":

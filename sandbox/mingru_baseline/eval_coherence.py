@@ -133,14 +133,16 @@ def _resolve_tokenizer_path(cfg: TrainConfig) -> Path:
     return DATA_DIR / f"tokenizer_{source}_v{cfg.vocab_size}.json"
 
 
-def load_torch_checkpoint(path: Path, device: torch.device) -> tuple[MinGRUModel, TrainConfig]:
-    """Rebuild ``MinGRUModel`` from a saved Phase 1.3 checkpoint."""
+def load_torch_checkpoint(path: Path, device: torch.device) -> tuple[MinGRUModel, TrainConfig, str | None]:
+    """Rebuild ``MinGRUModel`` from a saved Phase 1.3 checkpoint.
+
+    Returns ``(model, cfg, tokenizer_json)`` — the third item is the
+    inline tokenizer JSON saved alongside the checkpoint, or ``None``
+    for older checkpoints that pre-date the embed.
+    """
     path = Path(path).resolve()
     data = torch.load(str(path), map_location=device, weights_only=False)
 
-    # The training checkpoint stashes the training config. Drop any
-    # fields that TrainConfig doesn't know about so forward-compat with
-    # older checkpoints stays graceful.
     cfg_dict = data.get("config", {})
     allowed = {f for f in TrainConfig.__dataclass_fields__.keys()}
     cfg_kwargs = {k: v for k, v in cfg_dict.items() if k in allowed}
@@ -151,33 +153,70 @@ def load_torch_checkpoint(path: Path, device: torch.device) -> tuple[MinGRUModel
     model.load_state_dict(state)
     model.eval()
 
-    meta = {
-        "step": int(data.get("step", 0)) if "step" in data else None,
-        "best_val": float(data["best_val"]) if "best_val" in data else None,
-    }
+    tokenizer_json = data.get("tokenizer_json")
+
     print(f"  loaded checkpoint: {path.name}")
-    if meta["step"] is not None:
-        print(f"    step: {meta['step']:,}")
-    if meta["best_val"] is not None:
+    if "step" in data:
+        print(f"    step: {int(data['step']):,}")
+    if "best_val" in data:
         import math
-        print(f"    best val CE: {meta['best_val']:.4f}  "
-              f"PPL: {math.exp(min(meta['best_val'], 20)):.2f}")
+        bv = float(data["best_val"])
+        print(f"    best val CE: {bv:.4f}  PPL: {math.exp(min(bv, 20)):.2f}")
     print(f"    model: d={cfg.d_model} L={cfg.n_layers} d_ffn={cfg.d_ffn} "
           f"vocab={cfg.vocab_size} seq_len={cfg.seq_len}")
-    return model, cfg
+    print(f"    embedded tokenizer: "
+          f"{'yes' if tokenizer_json else 'no (will fall back to disk cache)'}")
+    return model, cfg, tokenizer_json
 
 
-def load_tokenizer(cfg: TrainConfig) -> HFTokenizer:
-    tok_path = _resolve_tokenizer_path(cfg)
-    if not tok_path.exists():
-        raise FileNotFoundError(
-            f"Tokenizer not found at {tok_path}.\n"
-            "Run `train_torch.py` once so the tokenizer gets cached, "
-            "or copy the tokenizer JSON alongside the checkpoint."
-        )
-    tokenizer = HFTokenizer.from_file(str(tok_path))
+def load_tokenizer(cfg: TrainConfig,
+                   embedded_json: str | None = None,
+                   override_path: Path | None = None) -> HFTokenizer:
+    """Load the tokenizer in this priority order:
+
+    1. ``override_path`` (CLI ``--tokenizer``).
+    2. Inline ``embedded_json`` from the checkpoint (preferred — guaranteed
+       to match the trained model's BPE merges).
+    3. Disk cache at ``data/tokenizer_<source>_v<vocab>.json``.
+
+    Raises if all three fail. Mismatched tokenizer = the embedding
+    lookup maps every token id to garbage even with a valid checkpoint.
+    """
+    if override_path is not None:
+        path = Path(override_path).resolve()
+        if not path.exists():
+            raise FileNotFoundError(f"--tokenizer path does not exist: {path}")
+        print(f"  tokenizer: {path} (CLI override)")
+        tokenizer = HFTokenizer.from_file(str(path))
+    elif embedded_json:
+        print(f"  tokenizer: <embedded in checkpoint> "
+              f"({len(embedded_json):,} chars)")
+        tokenizer = HFTokenizer.from_str(embedded_json)
+    else:
+        tok_path = _resolve_tokenizer_path(cfg)
+        print(f"  tokenizer: {tok_path} (disk cache fallback)")
+        if not tok_path.exists():
+            raise FileNotFoundError(
+                f"No tokenizer source available.\n"
+                f"  - Checkpoint has no embedded tokenizer (older format).\n"
+                f"  - --tokenizer override not provided.\n"
+                f"  - Disk cache missing at {tok_path}.\n"
+                "Either pass --tokenizer path/to/tokenizer.json, or copy\n"
+                "the matching tokenizer file from the training environment.\n"
+                "Tokenizer mismatch silently produces garbage generations."
+            )
+        tokenizer = HFTokenizer.from_file(str(tok_path))
+
     if tokenizer.decoder is None:
         tokenizer.decoder = hf_decoders.ByteLevel()
+
+    actual_vocab = tokenizer.get_vocab_size()
+    if actual_vocab != cfg.vocab_size:
+        raise ValueError(
+            f"Tokenizer vocab size mismatch: "
+            f"checkpoint expects {cfg.vocab_size}, tokenizer has {actual_vocab}.\n"
+            "This will produce garbage generations — refuse to continue."
+        )
     return tokenizer
 
 
@@ -243,7 +282,8 @@ def grade(prompt: str, completion: str, judge: str) -> dict:
 def run(checkpoint: Path, prompts_path: Path, judge: str,
         out_path: Path, model_tag: str, temperature: float,
         top_p: float, max_new_tokens: int, greedy: bool,
-        device_str: str, skip_grade: bool) -> EvalRun:
+        device_str: str, skip_grade: bool,
+        tokenizer_path: Path | None = None) -> EvalRun:
     if device_str == "auto":
         device_str = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device_str)
@@ -251,8 +291,10 @@ def run(checkpoint: Path, prompts_path: Path, judge: str,
           + (f" ({torch.cuda.get_device_name(0)})"
              if device.type == "cuda" else ""))
 
-    model, cfg = load_torch_checkpoint(checkpoint, device)
-    tokenizer = load_tokenizer(cfg)
+    model, cfg, embedded_tok = load_torch_checkpoint(checkpoint, device)
+    tokenizer = load_tokenizer(
+        cfg, embedded_json=embedded_tok, override_path=tokenizer_path,
+    )
     prompts = [p.strip() for p in Path(prompts_path).read_text(
         encoding="utf-8").splitlines() if p.strip()]
     print(f"  prompts: {len(prompts)} from {prompts_path}")
@@ -335,6 +377,12 @@ def main() -> None:
     ap.add_argument("--skip-grade", action="store_true",
                     help="Generate + save completions without hitting "
                          "the LLM judge (smoke-test the pipeline).")
+    ap.add_argument("--tokenizer", type=Path, default=None,
+                    help="Override the tokenizer path. Use this when the "
+                         "checkpoint pre-dates inline-tokenizer embedding "
+                         "and the disk cache doesn't match the trained "
+                         "BPE (e.g. checkpoint trained on Colab HF corpus, "
+                         "evaluated locally where local50k cache exists).")
     args = ap.parse_args()
 
     run(
@@ -349,6 +397,7 @@ def main() -> None:
         greedy=args.greedy,
         device_str=args.device,
         skip_grade=args.skip_grade,
+        tokenizer_path=args.tokenizer,
     )
 
 
