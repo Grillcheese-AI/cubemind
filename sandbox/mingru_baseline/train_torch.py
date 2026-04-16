@@ -133,6 +133,13 @@ class TrainConfig:
     attn_window: int = 128
     attn_every_n: int = 3       # attention on every Nth layer (0, 3, 6, ...)
 
+    # Hippocampal episodic memory — dopamine-gated write, reward-weighted read
+    enable_memory: bool = False
+    mem_max: int = 200          # max memories in the store
+    mem_write_threshold: float = 0.4  # dopamine must exceed this to write
+    mem_every_n: int = 4        # inject memory every Nth layer
+    mem_consolidate_every: int = 1000  # sleep/consolidation interval (steps)
+
     # Runtime
     device: str = "auto"        # auto / cuda / cpu
     amp_dtype: str = "bf16"     # fp32 / bf16 / fp16
@@ -417,21 +424,162 @@ class LocalCausalAttention(nn.Module):
         return self.out_proj(out)
 
 
+class EpisodicMemory:
+    """Dopamine-gated hippocampal memory — stores hidden states that led to
+    coherent output, retrieves them to bias future generation.
+
+    Biological loop:
+      1. Model gets it right → loss drops → reward signal
+      2. Reward → dopamine spikes → memory write gate opens
+      3. Memory stores the hidden state that LED to the good output,
+         tagged with the dopamine level at write time
+      4. On retrieval, memories are ranked by ``cosine_sim × utility``
+         — high-dopamine memories get retrieved more aggressively
+      5. During sleep (consolidation), high-utility memories survive,
+         low-utility ones get pruned, near-duplicates get merged
+
+    Not differentiable — the gradient flows through the integration gate
+    (``mem_gate`` in ``HybridBlock``), not through the memory itself.
+    """
+
+    def __init__(self, d_model: int, max_memories: int = 200,
+                 write_threshold: float = 0.4, merge_threshold: float = 0.95):
+        self.d = d_model
+        self.max = max_memories
+        self.write_threshold = write_threshold
+        self.merge_threshold = merge_threshold
+
+        # Storage: parallel lists for efficiency (no class overhead)
+        self.keys: list[torch.Tensor] = []      # (D,) detached
+        self.values: list[torch.Tensor] = []     # (D,) detached
+        self.utilities: list[float] = []         # dopamine at write time
+        self.ages: list[int] = []                # steps since write
+        self._step = 0
+
+    @property
+    def size(self) -> int:
+        return len(self.keys)
+
+    @torch.no_grad()
+    def write(self, key: torch.Tensor, value: torch.Tensor,
+              dopamine: float) -> bool:
+        """Write if dopamine > threshold. Returns True if written."""
+        if dopamine < self.write_threshold:
+            return False
+        self.keys.append(key.detach().cpu().float())
+        self.values.append(value.detach().cpu().float())
+        self.utilities.append(dopamine)
+        self.ages.append(0)
+        # Evict oldest low-utility if at capacity
+        if len(self.keys) > self.max:
+            min_idx = min(range(len(self.utilities)),
+                          key=lambda i: self.utilities[i])
+            for lst in (self.keys, self.values, self.utilities, self.ages):
+                lst.pop(min_idx)
+        return True
+
+    @torch.no_grad()
+    def read(self, query: torch.Tensor, k: int = 3) -> torch.Tensor:
+        """Retrieve top-K memories ranked by ``cosine_sim × utility``.
+        Returns (D,) tensor on the same device as query."""
+        if not self.keys:
+            return torch.zeros(self.d, device=query.device, dtype=query.dtype)
+        keys_t = torch.stack(self.keys)                     # (N, D)
+        q = query.detach().cpu().float()
+        sims = F.cosine_similarity(q.unsqueeze(0), keys_t, dim=-1)  # (N,)
+        utils = torch.tensor(self.utilities, dtype=torch.float32)
+        scores = sims * utils                               # reward-weighted
+        top_k = min(k, len(self.keys))
+        vals, idx = scores.topk(top_k)
+        weights = F.softmax(vals, dim=-1)                   # (K,)
+        retrieved = torch.stack([self.values[i] for i in idx])  # (K, D)
+        result = (weights.unsqueeze(-1) * retrieved).sum(dim=0)  # (D,)
+        return result.to(device=query.device, dtype=query.dtype)
+
+    def tick(self) -> None:
+        """Advance age for all memories (call once per training step)."""
+        self._step += 1
+        for i in range(len(self.ages)):
+            self.ages[i] += 1
+
+    @torch.no_grad()
+    def consolidate(self) -> dict:
+        """Sleep-phase consolidation:
+          1. Merge near-duplicate memories (cosine > merge_threshold)
+          2. Decay utilities by age (older → less utility unless refreshed)
+          3. Prune lowest-utility memories down to 80% capacity
+
+        Returns stats dict for logging.
+        """
+        if not self.keys:
+            return {"merged": 0, "pruned": 0, "remaining": 0}
+
+        # 1. Merge near-duplicates
+        merged = 0
+        keys_t = torch.stack(self.keys)
+        i = 0
+        while i < len(self.keys):
+            if i + 1 >= len(self.keys):
+                break
+            sims = F.cosine_similarity(
+                self.keys[i].unsqueeze(0),
+                torch.stack(self.keys[i + 1:]), dim=-1,
+            )
+            dups = (sims > self.merge_threshold).nonzero(as_tuple=True)[0]
+            for j in sorted(dups.tolist(), reverse=True):
+                real_j = i + 1 + j
+                # Merge: keep higher utility, average the vectors
+                self.keys[i] = (self.keys[i] + self.keys[real_j]) / 2
+                self.values[i] = (self.values[i] + self.values[real_j]) / 2
+                self.utilities[i] = max(self.utilities[i],
+                                        self.utilities[real_j])
+                for lst in (self.keys, self.values, self.utilities, self.ages):
+                    lst.pop(real_j)
+                merged += 1
+            i += 1
+
+        # 2. Age-based utility decay (half-life = 500 steps)
+        for i in range(len(self.utilities)):
+            decay = 0.5 ** (self.ages[i] / 500.0)
+            self.utilities[i] *= decay
+            self.ages[i] = 0  # reset age after consolidation
+
+        # 3. Prune to 80% capacity
+        target = int(self.max * 0.8)
+        pruned = 0
+        while len(self.keys) > target:
+            min_idx = min(range(len(self.utilities)),
+                          key=lambda i: self.utilities[i])
+            for lst in (self.keys, self.values, self.utilities, self.ages):
+                lst.pop(min_idx)
+            pruned += 1
+
+        return {"merged": merged, "pruned": pruned,
+                "remaining": len(self.keys)}
+
+
 class HybridBlock(nn.Module):
-    """MinGRU (or MoE-MinGRU) + optional local attention + GLU.
+    """MinGRU (or MoE-MinGRU) + optional local attention + optional
+    hippocampal memory injection + GLU.
 
     Architecture per block::
 
         x = x + Mixer(RMSNorm(x))         # MinGRU or MoE-MinGRU
         x = x + Attn(RMSNorm(x))          # local attention (if enabled)
+        x = x + MemGate(hippo.read(x))    # memory injection (if enabled)
         x = x + GLU(RMSNorm(x))           # channel mixing
 
-    Attention activates only on layers where ``layer_idx % attn_every_n == 0``.
+    Memory injection: the block's mean hidden state queries the episodic
+    memory; retrieved memories are projected through a learned gate and
+    broadcast to all positions. This doesn't affect gradients on the
+    memory itself — only the gate is trainable.
     """
 
-    def __init__(self, cfg: "TrainConfig", layer_idx: int):
+    def __init__(self, cfg: "TrainConfig", layer_idx: int,
+                 memory: "EpisodicMemory | None" = None):
         super().__init__()
         d = cfg.d_model
+        self.layer_idx = layer_idx
 
         # Sequence mixer
         self.rms_mix = RMSNorm(d)
@@ -447,6 +595,14 @@ class HybridBlock(nn.Module):
             self.rms_attn = RMSNorm(d)
             self.attn = LocalCausalAttention(d, cfg.attn_n_heads, cfg.attn_window)
 
+        # Hippocampal memory injection (on selected layers)
+        self.memory = None
+        self.mem_gate = None
+        if memory is not None and cfg.enable_memory and layer_idx % cfg.mem_every_n == 0:
+            self.memory = memory
+            self.mem_gate = nn.Linear(d, d, bias=False)
+            nn.init.zeros_(self.mem_gate.weight)  # start as no-op
+
         # FFN
         self.rms_ffn = RMSNorm(d)
         self.ffn = GLUChannelMix(d, cfg.d_ffn)
@@ -455,6 +611,12 @@ class HybridBlock(nn.Module):
         x = x + self.mix(self.rms_mix(x))
         if self.attn is not None:
             x = x + self.attn(self.rms_attn(x))
+        if self.memory is not None and self.memory.size > 0:
+            # Query memory with sequence-mean hidden state
+            x_mean = x.mean(dim=1)                          # (B, D)
+            retrieved = self.memory.read(x_mean[0])          # (D,) from batch[0]
+            mem_inject = self.mem_gate(retrieved)             # (D,) — learned gate
+            x = x + mem_inject.unsqueeze(0).unsqueeze(0)     # broadcast (1, 1, D)
         x = x + self.ffn(self.rms_ffn(x))
         return x
 
@@ -475,7 +637,13 @@ class MinGRUBlock(nn.Module):
 
 
 class MinGRUModel(nn.Module):
-    """PyTorch MinGRU language model — selects pure or hybrid blocks."""
+    """PyTorch MinGRU language model — selects pure or hybrid blocks.
+
+    When ``enable_memory`` is True, an ``EpisodicMemory`` instance is
+    shared across selected layers. The training loop is responsible for
+    calling ``dopamine_write()`` after each step and ``consolidate()``
+    every ``mem_consolidate_every`` steps.
+    """
 
     def __init__(self, cfg: TrainConfig):
         super().__init__()
@@ -483,10 +651,19 @@ class MinGRUModel(nn.Module):
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
         nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
 
-        use_hybrid = cfg.enable_moe or cfg.enable_attention
+        # Shared episodic memory (if enabled)
+        self.memory: EpisodicMemory | None = None
+        if cfg.enable_memory:
+            self.memory = EpisodicMemory(
+                cfg.d_model, max_memories=cfg.mem_max,
+                write_threshold=cfg.mem_write_threshold,
+            )
+
+        use_hybrid = cfg.enable_moe or cfg.enable_attention or cfg.enable_memory
         if use_hybrid:
             self.blocks = nn.ModuleList([
-                HybridBlock(cfg, i) for i in range(cfg.n_layers)
+                HybridBlock(cfg, i, memory=self.memory)
+                for i in range(cfg.n_layers)
             ])
         else:
             self.blocks = nn.ModuleList([
@@ -497,11 +674,92 @@ class MinGRUModel(nn.Module):
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.head.weight = self.embed.weight
 
+        # Dopamine state — prediction-error model (Schultz 1997).
+        # Dopamine encodes *surprise* (actual reward - expected reward),
+        # not absolute reward. When loss stabilizes on familiar tokens,
+        # the reward becomes predicted → dopamine → 0 → memory gate closes.
+        # Only novel successes (unexpected loss drops) spike dopamine and
+        # trigger memory writes.
+        self._prev_loss: float = 10.0
+        self._dopamine: float = 0.0
+        self._expected_reward: float = 0.0  # running baseline for TD error
+
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         h = self.embed(tokens)
         for block in self.blocks:
             h = block(h)
-        return self.head(self.rms_f(h))
+        h = self.rms_f(h)
+        # Cache the sequence-mean hidden state for dopamine_write.
+        # Detached — no gradient through the memory system.
+        self._cached_h_mean = h.detach().mean(dim=1).mean(dim=0)  # (D,)
+        return self.head(h)
+
+    def dopamine_write(self, loss: float) -> dict:
+        """Call after each training step. Computes dopamine from loss
+        improvement and writes to episodic memory if dopamine is high enough.
+
+        The biological loop:
+          loss drops → reward → dopamine spikes → memory gate opens →
+          store the hidden state that led to the good output, tagged
+          with the dopamine level → future retrieval biased toward
+          patterns that worked.
+
+        Returns dict with dopamine, wrote, mem_size for logging.
+        """
+        if self.memory is None:
+            return {"dopamine": 0.0, "wrote": False, "mem_size": 0}
+
+        # Reward = loss improvement (raw signal)
+        reward = max(0.0, self._prev_loss - loss)
+        self._prev_loss = loss
+
+        # Expected reward tracks the running baseline — what the model
+        # "predicts" it will get on an average step. Slow EMA (α=0.05)
+        # so it adapts over ~20 steps.
+        self._expected_reward = (0.95 * self._expected_reward
+                                 + 0.05 * reward)
+
+        # Dopamine = temporal-difference prediction error.
+        # Positive surprise: got more reward than expected → spike → write!
+        # Zero surprise: habituated → multiplicative decay → gate closes.
+        # Negative surprise: expected reward missed → fast decay.
+        prediction_error = reward - self._expected_reward
+
+        if prediction_error > 0:
+            # Positive surprise: additive spike (fast rise)
+            self._dopamine = self._dopamine + 0.4 * prediction_error
+        else:
+            # Habituation: multiplicative decay — DA × 0.92 per step.
+            # From DA=1.0: 10 stable steps → 0.43, 20 → 0.19, 30 → 0.08.
+            # This is the "gets used to the novelty" effect — repeated
+            # good performance on the same tokens stops triggering writes.
+            self._dopamine = self._dopamine * 0.92
+
+        # Write: commit the cached hidden state if dopamine is high.
+        # The memory key = value = the mean hidden representation of the
+        # sequence that just trained well. Tagged with dopamine level so
+        # high-reward memories get retrieved more aggressively later.
+        wrote = False
+        if (self._cached_h_mean is not None
+                and self._dopamine > self.memory.write_threshold):
+            wrote = self.memory.write(
+                key=self._cached_h_mean,
+                value=self._cached_h_mean,
+                dopamine=self._dopamine,
+            )
+
+        self.memory.tick()
+        return {
+            "dopamine": self._dopamine,
+            "wrote": wrote,
+            "mem_size": self.memory.size,
+        }
+
+    def consolidate(self) -> dict:
+        """Sleep-phase consolidation. Call every ``mem_consolidate_every`` steps."""
+        if self.memory is None:
+            return {}
+        return self.memory.consolidate()
 
 
 # ── Training utilities ───────────────────────────────────────────────────
@@ -827,6 +1085,18 @@ def train(cfg: TrainConfig, args) -> dict:
             optimizer.step()
         step += 1
 
+        # ── Dopamine-gated memory write ─────────────────────────────────
+        mem_info = model.dopamine_write(loss_val / cfg.grad_accum)
+
+        # ── Sleep consolidation ─────────────────────────────────────────
+        if (cfg.enable_memory and cfg.mem_consolidate_every > 0
+                and step % cfg.mem_consolidate_every == 0):
+            cons = model.consolidate()
+            print(f"  [sleep] step {step:,}: "
+                  f"merged={cons.get('merged', 0)} "
+                  f"pruned={cons.get('pruned', 0)} "
+                  f"remaining={cons.get('remaining', 0)}")
+
         log_ce += loss_val / cfg.grad_accum
         log_n += 1
 
@@ -941,6 +1211,18 @@ def main() -> None:
     ap.add_argument("--gen-temp", type=float, default=cfg.gen_temperature)
     ap.add_argument("--gen-top-p", type=float, default=cfg.gen_top_p)
     # Hybrid architecture
+    # Hippocampal memory
+    ap.add_argument("--memory", action="store_true",
+                    help="Enable dopamine-gated hippocampal episodic memory")
+    ap.add_argument("--mem-max", type=int, default=cfg.mem_max)
+    ap.add_argument("--mem-write-threshold", type=float,
+                    default=cfg.mem_write_threshold)
+    ap.add_argument("--mem-every-n", type=int, default=cfg.mem_every_n,
+                    help="Inject memory every Nth layer")
+    ap.add_argument("--mem-consolidate-every", type=int,
+                    default=cfg.mem_consolidate_every,
+                    help="Sleep/consolidation interval in steps")
+    # MoE recurrence
     ap.add_argument("--moe", action="store_true",
                     help="Enable MoE-MinGRU (4 experts, top-2 routing)")
     ap.add_argument("--moe-experts", type=int, default=cfg.moe_n_experts)
@@ -972,6 +1254,10 @@ def main() -> None:
         ckpt_every=args.ckpt_every,
         gen_max_tokens=args.gen_tokens,
         gen_temperature=args.gen_temp, gen_top_p=args.gen_top_p,
+        enable_memory=args.memory, mem_max=args.mem_max,
+        mem_write_threshold=args.mem_write_threshold,
+        mem_every_n=args.mem_every_n,
+        mem_consolidate_every=args.mem_consolidate_every,
         enable_moe=args.moe, moe_n_experts=args.moe_experts,
         moe_top_k=args.moe_top_k,
         enable_attention=args.attention, attn_n_heads=args.attn_heads,
