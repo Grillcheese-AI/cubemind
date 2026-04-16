@@ -201,9 +201,10 @@ _FUSED_MINGRU = _has_fused_mingru()
 class MinGRULayer:
     """MinGRU sequence mixer, GPU autograd-wired via prefix_scan_causal.
 
-    Bounded decay (``a ∈ [0.05, 0.95]``) keeps ``log(a)`` in a numerically
-    safe range for the scan's log-space accumulation — same trick as the
-    existing ``CausalSequenceMixer`` in grilly.
+    Wide decay range (``a ∈ [0.001, 0.999]``) lets some hidden dims act
+    as near-perfect memory registers (0.999^30 ≈ 0.97 retention) while
+    others forget quickly (0.001 → near-zero after 1 step). Sequential
+    scan handles the range safely; log-space parallel scan would not.
     """
 
     def __init__(self, d_model: int, bias_init: float = 1.0):
@@ -258,7 +259,7 @@ class MinGRULayer:
         # Composed fallback — see module docstring for the math.
         from grilly.nn.autograd import sigmoid, tanh
         x_scan = sigmoid(g) * tanh(v)
-        a = 0.05 + sigmoid(d) * 0.9
+        a = 0.001 + sigmoid(d) * 0.998
         return prefix_scan_causal(x_scan, a)
 
 
@@ -409,7 +410,310 @@ class MinGRUModel:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Legacy VSA-LM path (Phase 2+ extensions live downstream of MinGRUBlock)
+# VSALMModel — Phase 2: MinGRU backbone + config-gated CubeMind extensions
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Wraps the Phase 1 MinGRU backbone with optional cognitive extensions:
+#   - SNN gating (GIFNeuron) every 3 layers
+#   - MindForge LoRA adapter injection every 3 layers
+#   - Hippocampal episodic memory every 6 layers
+#   - Neurochemistry ODE (5-hormone modulation)
+#   - Neurogenesis (grow/prune neuron controller)
+#   - VSA-VM reasoning path (symbolic mode, detached from autograd)
+#
+# All extensions disabled by default — with every flag off, VSALMModel
+# produces identical output to MinGRUModel. Phase 4 ablations enable
+# them one at a time to measure their individual contribution.
+#
+# The primary Phase 2 success metric: consistency gap from Phase 1.4
+# (2.25/5 via gpt-4o) — hippocampal memory is hypothesized to close it.
+
+
+@dataclass
+class VSALMConfig(MinGRUConfig):
+    """MinGRU backbone + CubeMind extension configuration.
+
+    Inherits all MinGRU backbone params. Extension flags default to False
+    so ``VSALMModel(VSALMConfig())`` behaves identically to ``MinGRUModel``.
+    """
+
+    # ── Extension enable flags (all off by default) ─────────────────────
+    enable_snn: bool = False
+    enable_forge: bool = False
+    enable_mem: bool = False
+    enable_neurochemistry: bool = False
+    enable_neurogenesis: bool = False
+    enable_vm: bool = False
+
+    # ── VSA dimensions ──────────────────────────────────────────────────
+    k_blocks: int = 16
+    l_block: int = 24
+
+    # ── SNN (GIFNeuron gating, activated every 3 layers) ────────────────
+    gif_L: int = 8
+    gif_tau: float = 10.0
+    gif_threshold: float = 1.0
+
+    # ── MindForge (LoRA adapter injection, every 3 layers) ──────────────
+    forge_rank: int = 8
+    forge_n_basis: int = 16
+    forge_d_hidden: int = 256
+    forge_scale: float = 1.0
+
+    # ── Hippocampal Formation (episodic memory, every 6 layers) ─────────
+    hippo_max_memories: int = 50_000
+    hippo_n_place: int = 500
+    hippo_n_time: int = 50
+    hippo_n_grid: int = 100
+
+    # ── Neurogenesis Controller ─────────────────────────────────────────
+    neuro_initial_neurons: int = 32
+    neuro_max_neurons: int = 2000
+    neuro_growth_threshold: float = 0.3
+
+    # ── Neurochemistry ODE ──────────────────────────────────────────────
+    neurochemistry_dt: float = 0.8
+
+    # ── Step counter ────────────────────────────────────────────────────
+    step: int = 0
+
+
+class VSALMBlock:
+    """MinGRU block + optional CubeMind extensions.
+
+    When all extensions are disabled, this is functionally identical to
+    ``MinGRUBlock``. Extensions are instantiated in ``__init__`` only when
+    their config flag is True; the forward path checks for their presence.
+    """
+
+    def __init__(self, cfg: VSALMConfig, layer_idx: int,
+                 forge: "MindForge | None" = None,
+                 hippo: "HippocampalFormation | None" = None):
+        from grilly import nn
+
+        self.cfg = cfg
+        self.layer_idx = layer_idx
+        self.d = cfg.d_model
+
+        # ── Core backbone (always present) ──────────────────────────────
+        self.rms_mix = nn.RMSNorm(cfg.d_model)
+        self.rms_ffn = nn.RMSNorm(cfg.d_model)
+        self.mix = MinGRULayer(cfg.d_model, bias_init=cfg.decay_bias_init)
+        self.ffn = GLUChannelMix(cfg.d_model, cfg.d_ffn)
+
+        # ── Conditional extensions (lazy import, config-gated) ──────────
+        self.snn = None
+        if cfg.enable_snn and layer_idx % 3 == 0:
+            from cubemind.brain.gif_neuron import GIFNeuron
+            self.snn = GIFNeuron(
+                input_dim=cfg.d_model, hidden_dim=cfg.d_model,
+                L=cfg.gif_L, tau=cfg.gif_tau,
+                threshold=cfg.gif_threshold, seed=cfg.seed + layer_idx,
+            )
+
+        # MindForge and HippocampalFormation are SHARED across layers;
+        # the block just stores a reference + its layer_idx for dispatch.
+        self.forge = forge if (cfg.enable_forge and layer_idx % 3 == 0) else None
+        self.hippo = hippo if (cfg.enable_mem and layer_idx % 6 == 0) else None
+
+    def parameters(self):
+        yield from self.rms_mix.parameters()
+        yield from self.rms_ffn.parameters()
+        yield from self.mix.parameters()
+        yield from self.ffn.parameters()
+        # SNN params (if present)
+        if self.snn is not None and hasattr(self.snn, "parameters"):
+            yield from self.snn.parameters()
+
+    def __call__(self, x, neuro_state=None):
+        """Forward pass. Returns x (Variable or ndarray).
+
+        Phase 2.1: extensions are instantiated but NOT wired into the
+        forward path yet. That happens in Phase 2.3. For now, the forward
+        is identical to MinGRUBlock.__call__.
+        """
+        # ── Core backbone (always runs) ─────────────────────────────────
+        x = x + self.mix(self.rms_mix(x))
+        x = x + self.ffn(self.rms_ffn(x))
+        return x
+
+
+class VSALMModel:
+    """MinGRU backbone + config-gated CubeMind cognitive extensions.
+
+    With all extensions disabled (the default), this produces identical
+    output to ``MinGRUModel`` — same embed, same blocks, same tied head.
+
+    Extensions are instantiated at construction but only participate in
+    the forward pass when their config flag is True. Phase 2.2-2.3 wire
+    the signal routing; Phase 4 ablates each extension in isolation.
+    """
+
+    def __init__(self, cfg: VSALMConfig | None = None, **kwargs):
+        from grilly import nn
+        if cfg is None:
+            cfg = VSALMConfig(**kwargs)
+        self.cfg = cfg
+        self._step = cfg.step
+
+        # ── Backbone (same as MinGRUModel) ──────────────────────────────
+        self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
+        try:
+            from grilly.nn._helpers import _get_param_array
+            emb_arr = _get_param_array(self.embed.weight)
+            rng = np.random.default_rng(cfg.seed)
+            emb_arr[:] = rng.standard_normal(emb_arr.shape).astype(np.float32) * 0.02
+        except Exception:
+            pass
+        self.rms_f = nn.RMSNorm(cfg.d_model)
+        self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
+        if cfg.tie_embeddings:
+            self.head.weight = self.embed.weight
+
+        # ── Shared extension instances (lazy import, config-gated) ──────
+        self.forge_inst = None
+        self.hippo_inst = None
+        self.neuro = None
+        self.neurogenesis = None
+        self.bc = None
+        self.vm = None
+
+        if cfg.enable_forge:
+            from cubemind.execution.mindforge import MindForge
+            self.forge_inst = MindForge(
+                k=cfg.k_blocks, l=cfg.l_block, n_layers=cfg.n_layers,
+                d_target=cfg.d_model, rank=cfg.forge_rank,
+                n_basis=cfg.forge_n_basis, d_hidden=cfg.forge_d_hidden,
+                scale=cfg.forge_scale, seed=cfg.seed,
+            )
+
+        if cfg.enable_mem:
+            from cubemind.memory.formation import HippocampalFormation
+            self.hippo_inst = HippocampalFormation(
+                feature_dim=cfg.d_model,
+                max_memories=cfg.hippo_max_memories,
+                n_place_cells=cfg.hippo_n_place,
+                n_time_cells=cfg.hippo_n_time,
+                n_grid_cells=cfg.hippo_n_grid,
+                seed=cfg.seed,
+            )
+
+        if cfg.enable_neurochemistry:
+            from cubemind.brain.neurochemistry import Neurochemistry
+            self.neuro = Neurochemistry(dt=cfg.neurochemistry_dt)
+
+        if cfg.enable_neurogenesis:
+            from cubemind.brain.neurogenesis import NeurogenesisController
+            self.neurogenesis = NeurogenesisController(
+                initial_neurons=cfg.neuro_initial_neurons,
+                max_neurons=cfg.neuro_max_neurons,
+                feature_dim=min(cfg.d_model, 32),
+                growth_threshold=cfg.neuro_growth_threshold,
+                seed=cfg.seed,
+            )
+
+        if cfg.enable_vm:
+            from cubemind.reasoning.vm import VSAVM
+            self.bc = BlockCodes(k=cfg.k_blocks, l=cfg.l_block)
+            self.vm = VSAVM(bc=self.bc, seed=cfg.seed)
+
+        # ── Blocks (use shared forge/hippo references) ──────────────────
+        self.blocks = [
+            VSALMBlock(cfg, i, forge=self.forge_inst, hippo=self.hippo_inst)
+            for i in range(cfg.n_layers)
+        ]
+
+    def parameters(self):
+        seen: set = set()
+
+        def _new(p) -> bool:
+            pid = id(p)
+            if pid in seen:
+                return False
+            seen.add(pid)
+            return True
+
+        for p in self.embed.parameters():
+            if _new(p): yield p
+        for block in self.blocks:
+            for p in block.parameters():
+                if _new(p): yield p
+        for p in self.rms_f.parameters():
+            if _new(p): yield p
+        for p in self.head.parameters():
+            if _new(p): yield p
+        # MindForge params (if present)
+        if self.forge_inst is not None and hasattr(self.forge_inst, "parameters"):
+            for p in self.forge_inst.parameters():
+                if _new(p): yield p
+
+    def num_parameters(self) -> int:
+        from grilly.nn._helpers import _get_param_array
+        total = 0
+        seen: set = set()
+        for p in self.parameters():
+            arr = _get_param_array(p)
+            if id(arr) in seen:
+                continue
+            seen.add(id(arr))
+            total += int(arr.size)
+        return total
+
+    def __call__(self, tokens, mode: str = "default"):
+        """Forward pass.
+
+        Args:
+            tokens: int (B, S) or (S,)
+            mode: "default" for standard LM forward, "symbolic" for
+                  VSA-VM reasoning path (Phase 2.4, detached from autograd).
+
+        Returns:
+            logits Variable (B, S, V) when extensions are off.
+            When extensions are on, a tuple (logits, result_dict) where
+            result_dict matches the ``live_brain.py`` structure:
+            ``step, confidence, memories_retrieved, neurogenesis,
+            neurochemistry, spatial_context, input_hv``.
+        """
+        tokens = np.asarray(tokens)
+        if tokens.ndim == 1:
+            tokens = tokens[None, :]
+
+        self._step += 1
+        any_ext = (self.neuro is not None or self.hippo_inst is not None
+                   or self.neurogenesis is not None)
+
+        # ── Neurochemistry update (Phase 2.2 wires real signals) ────────
+        neuro_state = None
+        if self.neuro is not None:
+            self.neuro.update()
+            neuro_state = self.neuro.to_dict()
+
+        # ── Backbone forward ────────────────────────────────────────────
+        h = self.embed(tokens)
+        for block in self.blocks:
+            h = block(h, neuro_state=neuro_state)
+        h = self.rms_f(h)
+        logits = self.head(h)
+
+        # ── Result dict (only when extensions are active) ───────────────
+        if not any_ext:
+            return logits
+
+        result = {
+            "step": self._step,
+            "confidence": 0.0,
+            "memories_retrieved": 0,
+            "neurogenesis": (self.neurogenesis.stats()
+                            if self.neurogenesis else {}),
+            "neurochemistry": neuro_state or {},
+            "spatial_context": {},
+            "input_hv": None,
+        }
+        return logits, result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Legacy VSA-LM path
 # ═══════════════════════════════════════════════════════════════════════════
 
 # ── VSA Layer (CPU path — used when GPU unavailable) ─────────────────────

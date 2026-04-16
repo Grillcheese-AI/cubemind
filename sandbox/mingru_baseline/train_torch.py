@@ -302,7 +302,7 @@ class MinGRULayer(nn.Module):
         v = self.proj_v(x)
         d = self.proj_d(x)
         x_scan = torch.sigmoid(g) * torch.tanh(v)
-        a = 0.05 + 0.9 * torch.sigmoid(d)
+        a = 0.001 + 0.998 * torch.sigmoid(d)
         return prefix_scan_causal(x_scan, a)
 
 
