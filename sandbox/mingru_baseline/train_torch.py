@@ -121,6 +121,18 @@ class TrainConfig:
     gen_top_p: float = 0.9
     gen_greedy_too: bool = True
 
+    # ── Hybrid architecture (experimental) ─────────────────────────────
+    # MoE recurrence: M small MinGRU experts + top-K routing per token
+    enable_moe: bool = False
+    moe_n_experts: int = 4
+    moe_top_k: int = 2
+
+    # Local sliding-window attention (supplements recurrence every N layers)
+    enable_attention: bool = False
+    attn_n_heads: int = 4
+    attn_window: int = 128
+    attn_every_n: int = 3       # attention on every Nth layer (0, 3, 6, ...)
+
     # Runtime
     device: str = "auto"        # auto / cuda / cpu
     amp_dtype: str = "bf16"     # fp32 / bf16 / fp16
@@ -319,7 +331,136 @@ class GLUChannelMix(nn.Module):
         return self.W_out(F.silu(self.W_gate(x)) * self.W_up(x))
 
 
+class MoEMinGRULayer(nn.Module):
+    """Mixture of MinGRU experts — each expert has its own proj_g/v/d.
+
+    Different experts can specialize: one learns high-decay "character
+    register" behavior, another learns fast-forget "verb dynamics." The
+    router selects top-K experts per token, so specialization is explicit.
+
+    All experts run on the full ``d_model`` (not split dims). With M=4
+    and top_k=2, compute is 4× the recurrence but routing adds
+    specialization that a single MinGRU can't express.
+    """
+
+    def __init__(self, d_model: int, n_experts: int = 4, top_k: int = 2,
+                 decay_bias_init: float = 1.0):
+        super().__init__()
+        self.n_experts = n_experts
+        self.top_k = top_k
+        self.experts = nn.ModuleList([
+            MinGRULayer(d_model, decay_bias_init) for _ in range(n_experts)
+        ])
+        self.gate = nn.Linear(d_model, n_experts, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, S, D = x.shape
+        # Router: per-token expert selection
+        gate_logits = self.gate(x)                          # (B, S, M)
+        top_vals, top_idx = gate_logits.topk(self.top_k, dim=-1)  # (B, S, K)
+        weights = torch.softmax(top_vals, dim=-1)           # (B, S, K)
+
+        # Run ALL experts (simple prototype; token-dispatch version later)
+        expert_outs = torch.stack([exp(x) for exp in self.experts], dim=-1)
+        # expert_outs: (B, S, D, M)
+
+        # Gather top-K and weighted sum
+        # Expand indices for gather: (B, S, D, K)
+        idx = top_idx.unsqueeze(2).expand(B, S, D, self.top_k)
+        selected = expert_outs.gather(-1, idx)              # (B, S, D, K)
+        weights_exp = weights.unsqueeze(2)                  # (B, S, 1, K)
+        return (selected * weights_exp).sum(dim=-1)         # (B, S, D)
+
+
+class LocalCausalAttention(nn.Module):
+    """Sliding-window causal self-attention.
+
+    Supplements MinGRU's recurrence with precise local token-to-token
+    lookups within a window of W positions. The recurrence handles
+    global context decay; attention handles "who said what" precision.
+
+    Uses PyTorch's ``scaled_dot_product_attention`` with ``is_causal=True``
+    — efficient on A100/Blackwell via FlashAttention-2 kernel fusion.
+    """
+
+    def __init__(self, d_model: int, n_heads: int = 4, window: int = 128):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.window = window
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, S, D = x.shape
+        qkv = self.qkv(x).reshape(B, S, 3, self.n_heads, self.d_head)
+        q, k, v = qkv.unbind(dim=2)                        # each (B, S, H, Dh)
+        q = q.transpose(1, 2)                               # (B, H, S, Dh)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+
+        # Sliding-window: mask positions beyond W tokens back.
+        # Build additive attention mask where out-of-window = -inf.
+        if S <= self.window:
+            # Full causal — window covers everything
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            # Build sliding-window causal mask
+            mask = torch.full((S, S), float("-inf"), device=x.device, dtype=x.dtype)
+            for i in range(S):
+                start = max(0, i - self.window + 1)
+                mask[i, start:i + 1] = 0.0
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+        out = out.transpose(1, 2).reshape(B, S, D)          # (B, S, D)
+        return self.out_proj(out)
+
+
+class HybridBlock(nn.Module):
+    """MinGRU (or MoE-MinGRU) + optional local attention + GLU.
+
+    Architecture per block::
+
+        x = x + Mixer(RMSNorm(x))         # MinGRU or MoE-MinGRU
+        x = x + Attn(RMSNorm(x))          # local attention (if enabled)
+        x = x + GLU(RMSNorm(x))           # channel mixing
+
+    Attention activates only on layers where ``layer_idx % attn_every_n == 0``.
+    """
+
+    def __init__(self, cfg: "TrainConfig", layer_idx: int):
+        super().__init__()
+        d = cfg.d_model
+
+        # Sequence mixer
+        self.rms_mix = RMSNorm(d)
+        if cfg.enable_moe:
+            self.mix = MoEMinGRULayer(d, cfg.moe_n_experts, cfg.moe_top_k)
+        else:
+            self.mix = MinGRULayer(d)
+
+        # Local attention (on selected layers)
+        self.attn = None
+        self.rms_attn = None
+        if cfg.enable_attention and layer_idx % cfg.attn_every_n == 0:
+            self.rms_attn = RMSNorm(d)
+            self.attn = LocalCausalAttention(d, cfg.attn_n_heads, cfg.attn_window)
+
+        # FFN
+        self.rms_ffn = RMSNorm(d)
+        self.ffn = GLUChannelMix(d, cfg.d_ffn)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.mix(self.rms_mix(x))
+        if self.attn is not None:
+            x = x + self.attn(self.rms_attn(x))
+        x = x + self.ffn(self.rms_ffn(x))
+        return x
+
+
 class MinGRUBlock(nn.Module):
+    """Original pure-MinGRU block (no MoE, no attention)."""
     def __init__(self, cfg: TrainConfig):
         super().__init__()
         self.rms_mix = RMSNorm(cfg.d_model)
@@ -334,16 +475,25 @@ class MinGRUBlock(nn.Module):
 
 
 class MinGRUModel(nn.Module):
-    """PyTorch mirror of ``cubemind.training.vsa_lm.MinGRUModel``."""
+    """PyTorch MinGRU language model — selects pure or hybrid blocks."""
 
     def __init__(self, cfg: TrainConfig):
         super().__init__()
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
         nn.init.normal_(self.embed.weight, mean=0.0, std=0.02)
-        self.blocks = nn.ModuleList([MinGRUBlock(cfg) for _ in range(cfg.n_layers)])
+
+        use_hybrid = cfg.enable_moe or cfg.enable_attention
+        if use_hybrid:
+            self.blocks = nn.ModuleList([
+                HybridBlock(cfg, i) for i in range(cfg.n_layers)
+            ])
+        else:
+            self.blocks = nn.ModuleList([
+                MinGRUBlock(cfg) for i in range(cfg.n_layers)
+            ])
+
         self.rms_f = RMSNorm(cfg.d_model)
-        # Tied output head: share weight matrix with embedding.
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.head.weight = self.embed.weight
 
@@ -790,6 +940,17 @@ def main() -> None:
     ap.add_argument("--gen-tokens", type=int, default=cfg.gen_max_tokens)
     ap.add_argument("--gen-temp", type=float, default=cfg.gen_temperature)
     ap.add_argument("--gen-top-p", type=float, default=cfg.gen_top_p)
+    # Hybrid architecture
+    ap.add_argument("--moe", action="store_true",
+                    help="Enable MoE-MinGRU (4 experts, top-2 routing)")
+    ap.add_argument("--moe-experts", type=int, default=cfg.moe_n_experts)
+    ap.add_argument("--moe-top-k", type=int, default=cfg.moe_top_k)
+    ap.add_argument("--attention", action="store_true",
+                    help="Enable local sliding-window attention every N layers")
+    ap.add_argument("--attn-heads", type=int, default=cfg.attn_n_heads)
+    ap.add_argument("--attn-window", type=int, default=cfg.attn_window)
+    ap.add_argument("--attn-every-n", type=int, default=cfg.attn_every_n)
+    # Runtime
     ap.add_argument("--device", default=cfg.device,
                     help="auto / cuda / cuda:0 / cpu")
     ap.add_argument("--dtype", default=cfg.amp_dtype,
@@ -811,6 +972,10 @@ def main() -> None:
         ckpt_every=args.ckpt_every,
         gen_max_tokens=args.gen_tokens,
         gen_temperature=args.gen_temp, gen_top_p=args.gen_top_p,
+        enable_moe=args.moe, moe_n_experts=args.moe_experts,
+        moe_top_k=args.moe_top_k,
+        enable_attention=args.attention, attn_n_heads=args.attn_heads,
+        attn_window=args.attn_window, attn_every_n=args.attn_every_n,
         device=args.device, amp_dtype=args.dtype,
         compile_model=args.compile, seed=args.seed,
     )
