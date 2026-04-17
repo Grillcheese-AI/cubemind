@@ -462,15 +462,20 @@ class EpisodicMemory:
 
     @torch.no_grad()
     def write(self, key: torch.Tensor, value: torch.Tensor,
-              dopamine: float) -> bool:
-        """Write if dopamine > threshold. Returns True if written."""
-        if dopamine < self.write_threshold:
+              utility: float) -> bool:
+        """Write a memory tagged with its utility (loss improvement gap).
+
+        Bigger gap = more important memory = survives consolidation longer.
+        When at capacity, evicts the lowest-utility entry — naturally
+        creates a "hall of fame" of the biggest training breakthroughs.
+        """
+        if utility <= 0:
             return False
         self.keys.append(key.detach().cpu().float())
         self.values.append(value.detach().cpu().float())
-        self.utilities.append(dopamine)
+        self.utilities.append(utility)
         self.ages.append(0)
-        # Evict oldest low-utility if at capacity
+        # Evict lowest-utility if at capacity
         if len(self.keys) > self.max:
             min_idx = min(range(len(self.utilities)),
                           key=lambda i: self.utilities[i])
@@ -674,15 +679,12 @@ class MinGRUModel(nn.Module):
         self.head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self.head.weight = self.embed.weight
 
-        # Dopamine state — prediction-error model (Schultz 1997).
-        # Dopamine encodes *surprise* (actual reward - expected reward),
-        # not absolute reward. When loss stabilizes on familiar tokens,
-        # the reward becomes predicted → dopamine → 0 → memory gate closes.
-        # Only novel successes (unexpected loss drops) spike dopamine and
-        # trigger memory writes.
+        # Memory write state — simple loss-improvement gating.
+        # Every step where loss improves, the hidden state is stored
+        # with utility = gap size. Biggest breakthroughs get highest
+        # utility and survive consolidation; small improvements get
+        # evicted when memory fills.
         self._prev_loss: float = 10.0
-        self._dopamine: float = 0.0
-        self._expected_reward: float = 0.0  # running baseline for TD error
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         h = self.embed(tokens)
@@ -695,62 +697,32 @@ class MinGRUModel(nn.Module):
         return self.head(h)
 
     def dopamine_write(self, loss: float) -> dict:
-        """Call after each training step. Computes dopamine from loss
-        improvement and writes to episodic memory if dopamine is high enough.
+        """Call after each training step. If loss improved, store the
+        hidden state that led to the improvement, tagged with the gap
+        size as utility. Bigger improvements → higher utility → survive
+        consolidation longer → get recalled more aggressively.
 
-        The biological loop:
-          loss drops → reward → dopamine spikes → memory gate opens →
-          store the hidden state that led to the good output, tagged
-          with the dopamine level → future retrieval biased toward
-          patterns that worked.
-
-        Returns dict with dopamine, wrote, mem_size for logging.
+        No prediction-error complexity — just: did loss improve? By how
+        much? Store it. The memory naturally becomes a "hall of fame" of
+        the model's biggest training breakthroughs.
         """
         if self.memory is None:
-            return {"dopamine": 0.0, "wrote": False, "mem_size": 0}
+            return {"improvement": 0.0, "wrote": False, "mem_size": 0}
 
-        # Reward = loss improvement (raw signal)
-        reward = max(0.0, self._prev_loss - loss)
+        improvement = max(0.0, self._prev_loss - loss)
         self._prev_loss = loss
 
-        # Expected reward tracks the running baseline — what the model
-        # "predicts" it will get on an average step. Slow EMA (α=0.05)
-        # so it adapts over ~20 steps.
-        self._expected_reward = (0.95 * self._expected_reward
-                                 + 0.05 * reward)
-
-        # Dopamine = temporal-difference prediction error.
-        # Positive surprise: got more reward than expected → spike → write!
-        # Zero surprise: habituated → multiplicative decay → gate closes.
-        # Negative surprise: expected reward missed → fast decay.
-        prediction_error = reward - self._expected_reward
-
-        if prediction_error > 0:
-            # Positive surprise: additive spike (fast rise)
-            self._dopamine = self._dopamine + 0.4 * prediction_error
-        else:
-            # Habituation: multiplicative decay — DA × 0.92 per step.
-            # From DA=1.0: 10 stable steps → 0.43, 20 → 0.19, 30 → 0.08.
-            # This is the "gets used to the novelty" effect — repeated
-            # good performance on the same tokens stops triggering writes.
-            self._dopamine = self._dopamine * 0.92
-
-        # Write: commit the cached hidden state if dopamine is high.
-        # The memory key = value = the mean hidden representation of the
-        # sequence that just trained well. Tagged with dopamine level so
-        # high-reward memories get retrieved more aggressively later.
         wrote = False
-        if (self._cached_h_mean is not None
-                and self._dopamine > self.memory.write_threshold):
+        if improvement > 0 and self._cached_h_mean is not None:
             wrote = self.memory.write(
                 key=self._cached_h_mean,
                 value=self._cached_h_mean,
-                dopamine=self._dopamine,
+                utility=improvement,
             )
 
         self.memory.tick()
         return {
-            "dopamine": self._dopamine,
+            "improvement": improvement,
             "wrote": wrote,
             "mem_size": self.memory.size,
         }
