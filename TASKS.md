@@ -190,6 +190,24 @@ has no Vulkan ICD so PyTorch was used as a same-architecture mirror; Phase
 **Done when:** Coherence scores logged. Decision: PASS (model tells a story) or
 FAIL (model produces word soup). Do not proceed to Phase 2 on a FAIL.
 
+✅ **2026-04-16:** Full architecture sweep completed. Ablation table:
+
+| Variant | Consistency (gpt-4o) | Δ |
+|---|---:|---:|
+| Pure MinGRU [0.05, 0.95] | 2.25 | — |
+| Wide decay [0.001, 0.999] | 2.60 | +0.35 |
+| MoE + attention (dormant memory) | 2.80 | +0.55 |
+| **MoE + attn + active memory** | **2.95** | **+0.70** |
+
+Cross-judge: gpt-4.1-mini scores consistency **3.90** on the same
+checkpoint (H2 ✅). Grammar 3.65-3.85 across variants (H1 remains a
+scale problem, not architectural).
+
+**PASS with documented limitation.** The +0.70 consistency improvement
+validates the CubeMind architectural thesis: dense cortex + sparse
+hippocampus + dopamine gating > cortex alone. See
+`sandbox/mingru_baseline/results.md` for full ablation table + analysis.
+
 ---
 
 ### 1.5 Port to AMD RX 6750 XT via grilly

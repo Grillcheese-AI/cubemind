@@ -180,6 +180,14 @@ class MinGRUConfig:
     decay_bias_init: float = 1.0  # sigmoid(1) ≈ 0.73 retention at t=0
     dropout: float = 0.0
     seed: int = 42
+    # Neuromodulation — when paired with AutoHypergradientAdamW, each
+    # MinGRULayer learns a per-layer scalar α so the optimizer's
+    # ``current_surprise_gain`` S modulates the input as
+    # ``x' = x * (1 + α·S)``. At init α≈0.1 → mild scaling; the network
+    # can suppress or amplify the signal. Set ``enable_hypergrad`` False
+    # to freeze α at 0 and get the plain MinGRU backbone.
+    enable_hypergrad: bool = False
+    hypergrad_scale_init: float = 0.1
 
 
 def _has_fused_mingru() -> bool:
@@ -205,10 +213,24 @@ class MinGRULayer:
     as near-perfect memory registers (0.999^30 ≈ 0.97 retention) while
     others forget quickly (0.001 → near-zero after 1 step). Sequential
     scan handles the range safely; log-space parallel scan would not.
+
+    Optional neuromodulation: when ``enable_hypergrad`` is set, the layer
+    owns a single learnable scalar ``surprise_scale`` (α). Callers pass
+    the optimizer's ``current_surprise_gain`` S each forward; the input
+    is scaled as ``x' = x · (1 + α·S)`` before projection. This lets the
+    network learn how much each layer should amplify/suppress the input
+    when the gradient landscape shifts (Yerkes-Dodson / OSGM).
     """
 
-    def __init__(self, d_model: int, bias_init: float = 1.0):
+    def __init__(
+        self,
+        d_model: int,
+        bias_init: float = 1.0,
+        enable_hypergrad: bool = False,
+        hypergrad_scale_init: float = 0.1,
+    ):
         from grilly import nn
+        from grilly.nn.autograd import Variable
         self.d_model = d_model
         self.proj_g = nn.Linear(d_model, d_model, bias=True)
         self.proj_v = nn.Linear(d_model, d_model, bias=True)
@@ -223,12 +245,28 @@ class MinGRULayer:
         except Exception:
             pass
 
+        self.enable_hypergrad = bool(enable_hypergrad)
+        if self.enable_hypergrad:
+            # Single learnable scalar α per layer. Lives as a Variable
+            # so autograd wires its gradient automatically when callers
+            # pass a non-zero surprise gain. AdamW iterates it via
+            # parameters() and updates via ``p.data`` / ``p.grad`` like
+            # any other leaf.
+            self.surprise_scale = Variable(
+                np.array([float(hypergrad_scale_init)], dtype=np.float32),
+                requires_grad=True,
+            )
+        else:
+            self.surprise_scale = None
+
     def parameters(self):
         yield from self.proj_g.parameters()
         yield from self.proj_v.parameters()
         yield from self.proj_d.parameters()
+        if self.surprise_scale is not None:
+            yield self.surprise_scale
 
-    def __call__(self, x):
+    def __call__(self, x, surprise_gain: float = 0.0):
         """x: Variable or ndarray of shape (B, S, D). Returns Variable (B, S, D).
 
         Two GPU paths:
@@ -247,6 +285,14 @@ class MinGRULayer:
         exist.
         """
         from grilly.nn.prefix_scan import prefix_scan_causal
+
+        # Yerkes-Dodson input modulation: when the optimizer reports a
+        # surprise spike, amplify the input by (1 + α·S). α is learned,
+        # S is supplied by the caller (0 → no-op). Skip the broadcast
+        # entirely when neuromodulation is off.
+        if self.surprise_scale is not None and surprise_gain != 0.0:
+            scalar = 1.0 + self.surprise_scale * float(surprise_gain)
+            x = x * scalar
 
         g = self.proj_g(x)
         v = self.proj_v(x)
@@ -300,7 +346,12 @@ class MinGRUBlock:
         from grilly import nn
         self.rms_mix = nn.RMSNorm(cfg.d_model)
         self.rms_ffn = nn.RMSNorm(cfg.d_model)
-        self.mix = MinGRULayer(cfg.d_model, bias_init=cfg.decay_bias_init)
+        self.mix = MinGRULayer(
+            cfg.d_model,
+            bias_init=cfg.decay_bias_init,
+            enable_hypergrad=cfg.enable_hypergrad,
+            hypergrad_scale_init=cfg.hypergrad_scale_init,
+        )
         self.ffn = GLUChannelMix(cfg.d_model, cfg.d_ffn)
 
     def parameters(self):
@@ -309,8 +360,8 @@ class MinGRUBlock:
         yield from self.mix.parameters()
         yield from self.ffn.parameters()
 
-    def __call__(self, x):
-        x = x + self.mix(self.rms_mix(x))
+    def __call__(self, x, surprise_gain: float = 0.0):
+        x = x + self.mix(self.rms_mix(x), surprise_gain=surprise_gain)
         x = x + self.ffn(self.rms_ffn(x))
         return x
 
@@ -420,14 +471,19 @@ class MinGRUModel:
         _apply(self)
         return self
 
-    def __call__(self, tokens):
-        """tokens: int (B, S) or (S,). Returns logits Variable (B, S, V)."""
+    def __call__(self, tokens, surprise_gain: float = 0.0):
+        """tokens: int (B, S) or (S,). Returns logits Variable (B, S, V).
+
+        ``surprise_gain`` is the optimizer's ``current_surprise_gain``
+        read from AutoHypergradientAdamW at the top of each training
+        step. Default 0.0 = no modulation (inference, eval, plain AdamW).
+        """
         tokens = np.asarray(tokens)
         if tokens.ndim == 1:
             tokens = tokens[None, :]
         h = self.embed(tokens)
         for block in self.blocks:
-            h = block(h)
+            h = block(h, surprise_gain=surprise_gain)
         h = self.rms_f(h)
         return self.head(h)
 

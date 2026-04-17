@@ -136,6 +136,13 @@ class TrainConfig:
 
     seed: int = 42
 
+    # Neuromodulated input scaling via AutoHypergradientAdamW
+    # (x' = x · (1 + α·S), where α is per-layer learnable and S is the
+    # optimizer's ``current_surprise_gain``).
+    enable_hypergrad: bool = False
+    hypergrad_scale_init: float = 0.1
+    hypergrad_trauma_threshold: float = 0.5
+
     # ── Derived ─────────────────────────────────────────────────────────
     def model_cfg(self) -> MinGRUConfig:
         return MinGRUConfig(
@@ -145,6 +152,8 @@ class TrainConfig:
             n_layers=self.n_layers,
             seq_len=self.seq_len,
             seed=self.seed,
+            enable_hypergrad=self.enable_hypergrad,
+            hypergrad_scale_init=self.hypergrad_scale_init,
         )
 
 
@@ -649,15 +658,30 @@ def train(cfg: TrainConfig, args) -> dict:
     print(f"  gpu_mode: ON (DEVICE_LOCAL resident tensors)")
 
     print("\n--- optimizer ---")
-    from grilly.optim import AdamW
     params = list(model.parameters())
-    optimizer = AdamW(
-        params,
-        lr=cfg.max_lr,
-        betas=(0.9, 0.95),
-        eps=1e-8,
-        weight_decay=cfg.weight_decay,
-    )
+    if cfg.enable_hypergrad:
+        from grilly.optim import AutoHypergradientAdamW
+        optimizer = AutoHypergradientAdamW(
+            params,
+            lr=cfg.max_lr,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            weight_decay=cfg.weight_decay,
+            track_surprise=True,
+            trauma_threshold=cfg.hypergrad_trauma_threshold,
+            warmup_steps=max(10, cfg.warmup_steps // 50),
+        )
+        print(f"  AutoHypergradientAdamW: track_surprise=True, "
+              f"trauma={cfg.hypergrad_trauma_threshold}")
+    else:
+        from grilly.optim import AdamW
+        optimizer = AdamW(
+            params,
+            lr=cfg.max_lr,
+            betas=(0.9, 0.95),
+            eps=1e-8,
+            weight_decay=cfg.weight_decay,
+        )
 
     # Resume
     ckpt_path = OUT_DIR / "checkpoint.npz"
@@ -691,10 +715,15 @@ def train(cfg: TrainConfig, args) -> dict:
 
         zero_grads(params)
 
+        # Read the neuromodulatory gain set by the previous optimizer.step().
+        # AutoHypergradientAdamW returns 0.0 during warmup or when track_surprise
+        # is off; plain AdamW lacks the attribute entirely, so we default to 0.0.
+        surprise_gain = float(getattr(optimizer, "current_surprise_gain", 0.0))
+
         loss_val_accum = 0.0
         for _ in range(cfg.grad_accum):
             x, y = sample_batch(train_data, cfg.batch_size, cfg.seq_len, rng)
-            logits = model(x)
+            logits = model(x, surprise_gain=surprise_gain)
             loss = compute_loss(logits, y)
             # Scale for grad accumulation
             loss_scaled_data = float(loss.data)
@@ -882,6 +911,17 @@ def main() -> None:
     ap.add_argument("--gen-tokens", type=int, default=cfg.gen_max_tokens)
     ap.add_argument("--gen-temp", type=float, default=cfg.gen_temperature)
     ap.add_argument("--gen-top-p", type=float, default=cfg.gen_top_p)
+    # Hypergradient (AutoHypergradientAdamW + per-layer α modulation)
+    ap.add_argument("--hypergrad", action="store_true",
+                    help="Use AutoHypergradientAdamW and feed "
+                         "current_surprise_gain into each MinGRULayer's "
+                         "learnable α (Yerkes-Dodson / OSGM).")
+    ap.add_argument("--hypergrad-scale-init", type=float,
+                    default=cfg.hypergrad_scale_init,
+                    help="Initial value for the per-layer α (default 0.1).")
+    ap.add_argument("--hypergrad-trauma", type=float,
+                    default=cfg.hypergrad_trauma_threshold,
+                    help="S_bar level where gain peaks before suppression.")
     # Misc
     ap.add_argument("--seed", type=int, default=cfg.seed)
     ap.add_argument("--resume", action="store_true",
@@ -902,6 +942,9 @@ def main() -> None:
         gen_max_tokens=args.gen_tokens, gen_temperature=args.gen_temp,
         gen_top_p=args.gen_top_p,
         seed=args.seed,
+        enable_hypergrad=args.hypergrad,
+        hypergrad_scale_init=args.hypergrad_scale_init,
+        hypergrad_trauma_threshold=args.hypergrad_trauma,
     )
     train(cfg, args)
 

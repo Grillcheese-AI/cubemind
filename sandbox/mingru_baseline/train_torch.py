@@ -73,7 +73,7 @@ from tokenizers import trainers as hf_trainers
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / "data"
 OUT_DIR = SCRIPT_DIR / "results_torch"
-PROMPTS_PATH = SCRIPT_DIR / "prompts.txt"
+PROMPTS_PATH = SCRIPT_DIR / "prompts_tinystories.txt"  # default for TinyStories runs
 
 REPO_ROOT = SCRIPT_DIR.parents[1]
 LOCAL_JSON = REPO_ROOT / "data" / "tinystories_50k.json"
@@ -122,6 +122,9 @@ class TrainConfig:
     gen_temperature: float = 0.8
     gen_top_p: float = 0.9
     gen_greedy_too: bool = True
+    # Prompt file for gen_step_*.md output. Default: TinyStories prompts.
+    # For non-fiction corpora (e.g. C4 news), pass prompts_news.txt.
+    prompts_path: str = ""
 
     # ── Hybrid architecture (experimental) ─────────────────────────────
     # MoE recurrence: M small MinGRU experts + top-K routing per token
@@ -141,6 +144,13 @@ class TrainConfig:
     mem_write_threshold: float = 0.4  # dopamine must exceed this to write
     mem_every_n: int = 4        # inject memory every Nth layer
     mem_consolidate_every: int = 1000  # sleep/consolidation interval (steps)
+
+    # Neuromodulated input scaling (Yerkes-Dodson / OSGM). Pairs with
+    # AutoHypergradientAdamW: the optimizer reports a ``current_surprise_gain``
+    # S ≥ 0 each step; each MinGRULayer owns a learnable α and scales its
+    # input as ``x' = x · (1 + α·S)``. Disable for the plain baseline.
+    enable_hypergrad: bool = False
+    hypergrad_scale_init: float = 0.1
 
     # Runtime
     device: str = "auto"        # auto / cuda / cpu
@@ -355,9 +365,10 @@ def prepare_data(cfg: TrainConfig):
     return tokenizer, vocab, train_data, val_data
 
 
-def load_prompts() -> list[str]:
+def load_prompts(path: Path | None = None) -> list[str]:
+    p = Path(path) if path else PROMPTS_PATH
     return [
-        line.strip() for line in PROMPTS_PATH.read_text(encoding="utf-8").splitlines()
+        line.strip() for line in p.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
 
@@ -406,9 +417,21 @@ def prefix_scan_causal(x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
 
 
 class MinGRULayer(nn.Module):
-    """MinGRU sequence mixer — see module docstring for math."""
+    """MinGRU sequence mixer — see module docstring for math.
 
-    def __init__(self, d_model: int, decay_bias_init: float = 1.0):
+    When ``enable_hypergrad`` is set, the layer owns a learnable scalar
+    ``surprise_scale`` (α) and scales the input as ``x' = x · (1 + α·S)``
+    before projection. S is the optimizer's ``current_surprise_gain``
+    from AutoHypergradientAdamW (or 0.0 when not paired).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        decay_bias_init: float = 1.0,
+        enable_hypergrad: bool = False,
+        hypergrad_scale_init: float = 0.1,
+    ):
         super().__init__()
         self.proj_g = nn.Linear(d_model, d_model, bias=True)
         self.proj_v = nn.Linear(d_model, d_model, bias=True)
@@ -416,7 +439,17 @@ class MinGRULayer(nn.Module):
         # Decay gate bias → sigmoid ≈ 0.73 retention at t=0.
         nn.init.constant_(self.proj_d.bias, decay_bias_init)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.enable_hypergrad = bool(enable_hypergrad)
+        if self.enable_hypergrad:
+            self.surprise_scale = nn.Parameter(
+                torch.tensor([float(hypergrad_scale_init)])
+            )
+        else:
+            self.register_parameter("surprise_scale", None)
+
+    def forward(self, x: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
+        if self.surprise_scale is not None and surprise_gain != 0.0:
+            x = x * (1.0 + self.surprise_scale * float(surprise_gain))
         g = self.proj_g(x)
         v = self.proj_v(x)
         d = self.proj_d(x)
@@ -451,24 +484,31 @@ class MoEMinGRULayer(nn.Module):
     """
 
     def __init__(self, d_model: int, n_experts: int = 4, top_k: int = 2,
-                 decay_bias_init: float = 1.0):
+                 decay_bias_init: float = 1.0,
+                 enable_hypergrad: bool = False,
+                 hypergrad_scale_init: float = 0.1):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
         self.experts = nn.ModuleList([
-            MinGRULayer(d_model, decay_bias_init) for _ in range(n_experts)
+            MinGRULayer(
+                d_model, decay_bias_init,
+                enable_hypergrad=enable_hypergrad,
+                hypergrad_scale_init=hypergrad_scale_init,
+            )
+            for _ in range(n_experts)
         ])
         self.gate = nn.Linear(d_model, n_experts, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
         B, S, D = x.shape
         # Router: per-token top-K expert selection
         gate_logits = self.gate(x)                          # (B, S, M)
         top_vals, top_idx = gate_logits.topk(self.top_k, dim=-1)  # (B, S, K)
         weights = torch.softmax(top_vals, dim=-1)           # (B, S, K)
 
-        # Run all experts
-        expert_outs = [exp(x) for exp in self.experts]      # M × (B, S, D)
+        # Run all experts — each sees the same surprise_gain
+        expert_outs = [exp(x, surprise_gain=surprise_gain) for exp in self.experts]      # M × (B, S, D)
 
         # Weighted sum via explicit loop — no gather/scatter, works on
         # any backend (CUDA, CPU, DirectML). K=2 × M=4 = 8 iterations
@@ -693,9 +733,17 @@ class HybridBlock(nn.Module):
         # Sequence mixer
         self.rms_mix = RMSNorm(d)
         if cfg.enable_moe:
-            self.mix = MoEMinGRULayer(d, cfg.moe_n_experts, cfg.moe_top_k)
+            self.mix = MoEMinGRULayer(
+                d, cfg.moe_n_experts, cfg.moe_top_k,
+                enable_hypergrad=cfg.enable_hypergrad,
+                hypergrad_scale_init=cfg.hypergrad_scale_init,
+            )
         else:
-            self.mix = MinGRULayer(d)
+            self.mix = MinGRULayer(
+                d,
+                enable_hypergrad=cfg.enable_hypergrad,
+                hypergrad_scale_init=cfg.hypergrad_scale_init,
+            )
 
         # Local attention (on selected layers)
         self.attn = None
@@ -716,8 +764,8 @@ class HybridBlock(nn.Module):
         self.rms_ffn = RMSNorm(d)
         self.ffn = GLUChannelMix(d, cfg.d_ffn)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.mix(self.rms_mix(x))
+    def forward(self, x: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
+        x = x + self.mix(self.rms_mix(x), surprise_gain=surprise_gain)
         if self.attn is not None:
             x = x + self.attn(self.rms_attn(x))
         if self.memory is not None and self.memory.size > 0:
@@ -736,11 +784,15 @@ class MinGRUBlock(nn.Module):
         super().__init__()
         self.rms_mix = RMSNorm(cfg.d_model)
         self.rms_ffn = RMSNorm(cfg.d_model)
-        self.mix = MinGRULayer(cfg.d_model)
+        self.mix = MinGRULayer(
+            cfg.d_model,
+            enable_hypergrad=cfg.enable_hypergrad,
+            hypergrad_scale_init=cfg.hypergrad_scale_init,
+        )
         self.ffn = GLUChannelMix(cfg.d_model, cfg.d_ffn)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.mix(self.rms_mix(x))
+    def forward(self, x: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
+        x = x + self.mix(self.rms_mix(x), surprise_gain=surprise_gain)
         x = x + self.ffn(self.rms_ffn(x))
         return x
 
@@ -790,10 +842,10 @@ class MinGRUModel(nn.Module):
         # evicted when memory fills.
         self._prev_loss: float = 10.0
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
         h = self.embed(tokens)
         for block in self.blocks:
-            h = block(h)
+            h = block(h, surprise_gain=surprise_gain)
         h = self.rms_f(h)
         # Cache the sequence-mean hidden state for dopamine_write.
         # Detached — no gradient through the memory system.
@@ -839,6 +891,67 @@ class MinGRUModel(nn.Module):
 
 
 # ── Training utilities ───────────────────────────────────────────────────
+
+class SurpriseTracker:
+    """Minimal port of AutoHypergradientAdamW's surprise signal.
+
+    The grilly optimizer uses per-parameter gradient-direction prediction
+    error; here we use the scalar global grad-norm that the train loop
+    already computes, which is a reasonable proxy (captures "gradient
+    magnitude shifted unexpectedly") without flattening every parameter.
+
+    S_instant = tanh((||g|| - EMA_norm)^2 / (EMA_sq + eps))
+    S_bar     = alpha * S_instant + (1 - alpha) * S_bar_prev
+    gain      = S_bar * exp(-S_bar / trauma_threshold)
+
+    Reads from ``after_step()`` into ``current_surprise_gain`` for the
+    next forward pass. Returns 0.0 during warmup.
+    """
+
+    def __init__(
+        self,
+        warmup_steps: int = 10,
+        gamma: float = 0.9,       # EMA decay for gradient tracking
+        alpha: float = 0.1,       # EMA decay for accumulated surprise
+        trauma_threshold: float = 0.5,
+        eps: float = 1e-8,
+    ):
+        self.warmup_steps = warmup_steps
+        self.gamma = gamma
+        self.alpha = alpha
+        self.trauma_threshold = trauma_threshold
+        self.eps = eps
+        self._step = 0
+        self._ema_norm = 0.0
+        self._ema_sq = 0.0
+        self._s_bar = 0.0
+        self.current_surprise_gain: float = 0.0
+
+    def after_step(self, grad_norm: float) -> float:
+        self._step += 1
+        gn = float(grad_norm)
+        # Defensive: a non-finite grad-norm (exploding gradient, skipped
+        # batch) would poison the EMA forever. Drop the update and reuse
+        # the previous gain.
+        if not math.isfinite(gn):
+            return self.current_surprise_gain
+        if self._step < self.warmup_steps:
+            # Build the baseline during warmup; no gain yet.
+            self._ema_norm = self.gamma * self._ema_norm + (1 - self.gamma) * gn
+            self._ema_sq   = self.gamma * self._ema_sq   + (1 - self.gamma) * gn * gn
+            self.current_surprise_gain = 0.0
+            return 0.0
+        diff = gn - self._ema_norm
+        s_instant = math.tanh((diff * diff) / (self._ema_sq + self.eps))
+        self._s_bar = self.alpha * s_instant + (1 - self.alpha) * self._s_bar
+        # Yerkes-Dodson inverted-U: gain rises, then trauma suppresses it.
+        gain = self._s_bar * math.exp(-self._s_bar / max(self.trauma_threshold, 1e-6))
+        # Update the EMA for next step AFTER using the prior baseline.
+        self._ema_norm = self.gamma * self._ema_norm + (1 - self.gamma) * gn
+        self._ema_sq   = self.gamma * self._ema_sq   + (1 - self.gamma) * gn * gn
+        self.current_surprise_gain = float(gain)
+        return self.current_surprise_gain
+
 
 def get_lr(step: int, cfg: TrainConfig) -> float:
     if step < cfg.warmup_steps:
@@ -1004,7 +1117,7 @@ def write_generations(model: MinGRUModel, tokenizer, path: Path,
                       cfg: TrainConfig, device: torch.device, step: int,
                       val_ce: float, val_ppl: float,
                       include_greedy: bool = False) -> None:
-    prompts = load_prompts()
+    prompts = load_prompts(cfg.prompts_path or None)
     params = GenParams(
         temperature=cfg.gen_temperature, top_p=cfg.gen_top_p,
         max_new_tokens=cfg.gen_max_tokens,
@@ -1109,6 +1222,9 @@ def train(cfg: TrainConfig, args) -> dict:
         model.parameters(), lr=cfg.max_lr, betas=(0.9, 0.95),
         eps=1e-8, weight_decay=cfg.weight_decay,
     )
+    surprise_tracker = SurpriseTracker() if cfg.enable_hypergrad else None
+    if surprise_tracker is not None:
+        print("  SurpriseTracker: on (gradient-norm EMA, Yerkes-Dodson gain)")
     autocast_ctx = _autocast_ctx(device, cfg.amp_dtype)
     scaler = (torch.amp.GradScaler(device.type)
               if cfg.amp_dtype == "fp16" and device.type == "cuda"
@@ -1145,13 +1261,16 @@ def train(cfg: TrainConfig, args) -> dict:
 
         optimizer.zero_grad(set_to_none=True)
 
+        surprise_gain = (surprise_tracker.current_surprise_gain
+                         if surprise_tracker is not None else 0.0)
+
         loss_val = 0.0
         for _ in range(cfg.grad_accum):
             x, y = sample_batch(train_data, cfg.batch_size, cfg.seq_len, rng)
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             with autocast_ctx():
-                logits = model(x)
+                logits = model(x, surprise_gain=surprise_gain)
                 loss = compute_loss(logits, y) / cfg.grad_accum
             if not torch.isfinite(loss):
                 print(f"  WARN non-finite loss at step {step}, skipping")
@@ -1176,6 +1295,9 @@ def train(cfg: TrainConfig, args) -> dict:
         else:
             optimizer.step()
         step += 1
+
+        if surprise_tracker is not None:
+            surprise_tracker.after_step(gn)
 
         # ── Dopamine-gated memory write ─────────────────────────────────
         mem_info = model.dopamine_write(loss_val / cfg.grad_accum)
@@ -1330,6 +1452,13 @@ def main() -> None:
     ap.add_argument("--attn-heads", type=int, default=cfg.attn_n_heads)
     ap.add_argument("--attn-window", type=int, default=cfg.attn_window)
     ap.add_argument("--attn-every-n", type=int, default=cfg.attn_every_n)
+    # Hypergradient / neuromodulated input scaling
+    ap.add_argument("--hypergrad", action="store_true",
+                    help="Feed a Yerkes-Dodson surprise_gain (from "
+                         "grad-norm EMA) into each MinGRULayer's learnable α")
+    ap.add_argument("--hypergrad-scale-init", type=float,
+                    default=cfg.hypergrad_scale_init,
+                    help="Initial value for per-layer α (default 0.1)")
     # Runtime
     ap.add_argument("--device", default=cfg.device,
                     help="auto / cuda / cuda:0 / cpu")
@@ -1361,6 +1490,8 @@ def main() -> None:
         moe_top_k=args.moe_top_k,
         enable_attention=args.attention, attn_n_heads=args.attn_heads,
         attn_window=args.attn_window, attn_every_n=args.attn_every_n,
+        enable_hypergrad=args.hypergrad,
+        hypergrad_scale_init=args.hypergrad_scale_init,
         device=args.device, amp_dtype=args.dtype,
         compile_model=args.compile, seed=args.seed,
     )
