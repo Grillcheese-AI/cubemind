@@ -103,8 +103,10 @@ class TrainConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
 
-    # Data subset
+    # Data
     subset_tokens: int = 10_979_128  # full TinyStories-50k corpus by default
+    data_path: str = ""             # direct path to a .txt file (bypasses TinyStories download)
+    val_split: float = 0.05         # fraction held out for validation when using --data-path
 
     # Budget
     max_steps: int = 6_000
@@ -163,7 +165,105 @@ def _load_local_stories() -> list[str]:
     return stories
 
 
+def prepare_data_from_file(cfg: TrainConfig):
+    """Load training data from a raw .txt file at ``cfg.data_path``.
+
+    Trains a BPE tokenizer on the file, tokenizes to uint16 bins, and
+    splits into train/val by the ``cfg.val_split`` ratio. Caches
+    everything in ``DATA_DIR`` keyed by the file basename + vocab size
+    so subsequent runs with the same file skip tokenization.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    src = Path(cfg.data_path).resolve()
+    assert src.exists(), f"--data-path not found: {src}"
+    tag = src.stem.replace(".", "_")[:40]
+
+    tok_path  = DATA_DIR / f"tokenizer_{tag}_v{cfg.vocab_size}.json"
+    train_bin = DATA_DIR / f"train_{tag}_v{cfg.vocab_size}.bin"
+    val_bin   = DATA_DIR / f"val_{tag}_v{cfg.vocab_size}.bin"
+    meta_path = DATA_DIR / f"meta_{tag}_v{cfg.vocab_size}.json"
+
+    needs_build = not (
+        tok_path.exists() and train_bin.exists()
+        and val_bin.exists() and meta_path.exists()
+    )
+
+    if needs_build:
+        file_size = src.stat().st_size
+        print(f"  source: {src.name} ({file_size / 1e9:.2f} GB)")
+
+        # Train BPE on the source file directly
+        print(f"  training BPE tokenizer (vocab={cfg.vocab_size})")
+        tokenizer = HFTokenizer(hf_models.BPE())
+        tokenizer.pre_tokenizer = hf_pre.ByteLevel()
+        tokenizer.decoder = hf_decoders.ByteLevel()
+        tokenizer.train(
+            files=[str(src)],
+            trainer=hf_trainers.BpeTrainer(
+                vocab_size=cfg.vocab_size, min_frequency=2,
+                special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"],
+            ),
+        )
+        tokenizer.save(str(tok_path))
+        print(f"  vocab: {tokenizer.get_vocab_size()}")
+
+        # Tokenize the entire file in streaming chunks
+        print(f"  tokenizing {src.name}...")
+        all_ids: list[int] = []
+        with src.open("r", encoding="utf-8", errors="ignore") as f:
+            chunk_idx = 0
+            while True:
+                chunk = f.read(1_000_000)  # 1 MB chunks
+                if not chunk:
+                    break
+                ids = tokenizer.encode(chunk).ids
+                all_ids.extend(ids)
+                chunk_idx += 1
+                if chunk_idx % 100 == 0:
+                    print(f"    {len(all_ids):,} tokens ({chunk_idx} MB read)",
+                          end="\r")
+                gc.collect()
+        total = len(all_ids)
+        print(f"    total: {total:,} tokens                        ")
+
+        # Split into train / val
+        split_idx = int(total * (1.0 - cfg.val_split))
+        train_ids = np.array(all_ids[:split_idx], dtype=np.uint16)
+        val_ids   = np.array(all_ids[split_idx:], dtype=np.uint16)
+        train_ids.tofile(str(train_bin))
+        val_ids.tofile(str(val_bin))
+
+        meta_path.write_text(json.dumps({
+            "source": str(src), "tag": tag,
+            "vocab": tokenizer.get_vocab_size(),
+            "train_tokens": len(train_ids),
+            "val_tokens": len(val_ids),
+        }, indent=2))
+        print(f"  train: {len(train_ids):,} | val: {len(val_ids):,}")
+
+    tokenizer = HFTokenizer.from_file(str(tok_path))
+    if tokenizer.decoder is None:
+        tokenizer.decoder = hf_decoders.ByteLevel()
+    meta = json.loads(meta_path.read_text())
+    vocab = tokenizer.get_vocab_size()
+
+    train_mm = np.memmap(str(train_bin), dtype=np.uint16, mode="r")
+    n_total = int(train_mm.shape[0])
+    n_train = min(n_total, cfg.subset_tokens)
+    train_data = np.asarray(train_mm[:n_train]).astype(np.int64)
+    val_data = np.fromfile(str(val_bin), dtype=np.uint16).astype(np.int64)
+
+    print(f"  source: {meta.get('tag', '?')} | "
+          f"train {n_train:,} / {n_total:,} tokens | "
+          f"val {len(val_data):,}")
+    return tokenizer, vocab, train_data, val_data
+
+
 def prepare_data(cfg: TrainConfig):
+    # Route to direct-file loader if --data-path is set
+    if cfg.data_path:
+        return prepare_data_from_file(cfg)
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     source = "local50k" if LOCAL_JSON.exists() else "hf"
     tok_path  = DATA_DIR / f"tokenizer_{source}_v{cfg.vocab_size}.json"
@@ -362,21 +462,25 @@ class MoEMinGRULayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, D = x.shape
-        # Router: per-token expert selection
+        # Router: per-token top-K expert selection
         gate_logits = self.gate(x)                          # (B, S, M)
         top_vals, top_idx = gate_logits.topk(self.top_k, dim=-1)  # (B, S, K)
         weights = torch.softmax(top_vals, dim=-1)           # (B, S, K)
 
-        # Run ALL experts (simple prototype; token-dispatch version later)
-        expert_outs = torch.stack([exp(x) for exp in self.experts], dim=-1)
-        # expert_outs: (B, S, D, M)
+        # Run all experts
+        expert_outs = [exp(x) for exp in self.experts]      # M × (B, S, D)
 
-        # Gather top-K and weighted sum
-        # Expand indices for gather: (B, S, D, K)
-        idx = top_idx.unsqueeze(2).expand(B, S, D, self.top_k)
-        selected = expert_outs.gather(-1, idx)              # (B, S, D, K)
-        weights_exp = weights.unsqueeze(2)                  # (B, S, 1, K)
-        return (selected * weights_exp).sum(dim=-1)         # (B, S, D)
+        # Weighted sum via explicit loop — no gather/scatter, works on
+        # any backend (CUDA, CPU, DirectML). K=2 × M=4 = 8 iterations
+        # of cheap elementwise ops.
+        result = torch.zeros_like(x)
+        for k in range(self.top_k):
+            w_k = weights[:, :, k : k + 1]                 # (B, S, 1)
+            idx_k = top_idx[:, :, k]                        # (B, S)
+            for m in range(self.n_experts):
+                mask = (idx_k == m).unsqueeze(-1).to(x.dtype)  # (B, S, 1)
+                result = result + w_k * mask * expert_outs[m]
+        return result
 
 
 class LocalCausalAttention(nn.Module):
@@ -932,10 +1036,26 @@ def write_generations(model: MinGRUModel, tokenizer, path: Path,
 def train(cfg: TrainConfig, args) -> dict:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Device
-    if cfg.device == "auto":
-        cfg.device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(cfg.device)
+    # Device — supports cuda, cpu, dml (DirectML for AMD/Intel GPUs on Windows)
+    _dml_device = None
+    if cfg.device in ("auto", "dml"):
+        if cfg.device == "auto" and torch.cuda.is_available():
+            pass  # fall through to cuda
+        else:
+            try:
+                import torch_directml
+                _dml_device = torch_directml.device()
+                print(f"  DirectML: {torch_directml.device_name(0)}")
+            except ImportError:
+                if cfg.device == "dml":
+                    raise RuntimeError("--device dml requires: pip install torch-directml")
+
+    if _dml_device is not None:
+        device = _dml_device
+    elif cfg.device == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(cfg.device)
     print(f"\n{'=' * 72}")
     print(f"  MinGRU Phase 1.3 -- PyTorch backend")
     print(f"{'=' * 72}")
@@ -1176,6 +1296,12 @@ def main() -> None:
     ap.add_argument("--wd", type=float, default=cfg.weight_decay)
     ap.add_argument("--clip", type=float, default=cfg.grad_clip)
     ap.add_argument("--subset-tokens", type=int, default=cfg.subset_tokens)
+    ap.add_argument("--data-path", type=str, default="",
+                    help="Path to a raw .txt file. Bypasses TinyStories "
+                         "download — trains BPE on the file, tokenizes, "
+                         "caches bins. Use with --vocab for larger vocabs.")
+    ap.add_argument("--val-split", type=float, default=cfg.val_split,
+                    help="Fraction held out for val when using --data-path")
     ap.add_argument("--log-every", type=int, default=cfg.log_every)
     ap.add_argument("--eval-every", type=int, default=cfg.eval_every)
     ap.add_argument("--ckpt-every", type=int, default=cfg.ckpt_every)
@@ -1221,6 +1347,7 @@ def main() -> None:
         max_lr=args.lr, min_lr=args.min_lr, warmup_steps=args.warmup,
         weight_decay=args.wd, grad_clip=args.clip,
         subset_tokens=args.subset_tokens,
+        data_path=args.data_path, val_split=args.val_split,
         max_steps=args.steps, max_minutes=args.minutes,
         log_every=args.log_every, eval_every=args.eval_every,
         ckpt_every=args.ckpt_every,

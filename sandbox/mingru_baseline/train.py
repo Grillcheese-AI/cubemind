@@ -114,8 +114,10 @@ class TrainConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
 
-    # Data subset
+    # Data
     subset_tokens: int = 5_000_000
+    data_path: str = ""             # direct path to a .txt file (bypasses TinyStories)
+    val_split: float = 0.05
 
     # Budget
     max_steps: int = 20_000
@@ -148,6 +150,91 @@ class TrainConfig:
 
 # ── Data prep ────────────────────────────────────────────────────────────
 
+def prepare_data_from_file(cfg: TrainConfig):
+    """Load training data from a raw .txt file at ``cfg.data_path``.
+
+    Trains BPE on the file, tokenizes to uint16 bins, splits train/val.
+    Caches everything in DATA_DIR keyed by filename + vocab size.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    src = Path(cfg.data_path).resolve()
+    assert src.exists(), f"--data-path not found: {src}"
+    tag = src.stem.replace(".", "_")[:40]
+
+    tok_path  = DATA_DIR / f"tokenizer_{tag}_v{cfg.vocab_size}.json"
+    train_bin = DATA_DIR / f"train_{tag}_v{cfg.vocab_size}.bin"
+    val_bin   = DATA_DIR / f"val_{tag}_v{cfg.vocab_size}.bin"
+    meta_path = DATA_DIR / f"meta_{tag}_v{cfg.vocab_size}.json"
+
+    needs_build = not (
+        tok_path.exists() and train_bin.exists()
+        and val_bin.exists() and meta_path.exists()
+    )
+
+    if needs_build:
+        file_size = src.stat().st_size
+        print(f"  source: {src.name} ({file_size / 1e9:.2f} GB)")
+
+        print(f"  training BPE tokenizer (vocab={cfg.vocab_size})")
+        tokenizer = HFTokenizer(hf_models.BPE())
+        tokenizer.pre_tokenizer = hf_pre.ByteLevel()
+        tokenizer.decoder = hf_decoders.ByteLevel()
+        tokenizer.train(
+            files=[str(src)],
+            trainer=hf_trainers.BpeTrainer(
+                vocab_size=cfg.vocab_size, min_frequency=2,
+                special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"],
+            ),
+        )
+        tokenizer.save(str(tok_path))
+        print(f"  vocab: {tokenizer.get_vocab_size()}")
+
+        print(f"  tokenizing {src.name}...")
+        all_ids: list = []
+        with src.open("r", encoding="utf-8", errors="ignore") as f:
+            chunk_idx = 0
+            while True:
+                chunk = f.read(1_000_000)
+                if not chunk:
+                    break
+                ids = tokenizer.encode(chunk).ids
+                all_ids.extend(ids)
+                chunk_idx += 1
+                if chunk_idx % 100 == 0:
+                    print(f"    {len(all_ids):,} tokens ({chunk_idx} MB read)",
+                          end="\r")
+                gc.collect()
+        total = len(all_ids)
+        print(f"    total: {total:,} tokens                        ")
+
+        split_idx = int(total * (1.0 - cfg.val_split))
+        np.array(all_ids[:split_idx], dtype=np.uint16).tofile(str(train_bin))
+        np.array(all_ids[split_idx:], dtype=np.uint16).tofile(str(val_bin))
+
+        meta_path.write_text(json.dumps({
+            "source": str(src), "tag": tag,
+            "vocab": tokenizer.get_vocab_size(),
+            "train_tokens": split_idx,
+            "val_tokens": total - split_idx,
+        }, indent=2))
+        print(f"  train: {split_idx:,} | val: {total - split_idx:,}")
+
+    tokenizer = HFTokenizer.from_file(str(tok_path))
+    if tokenizer.decoder is None:
+        tokenizer.decoder = hf_decoders.ByteLevel()
+    vocab = tokenizer.get_vocab_size()
+
+    train_mm = np.memmap(str(train_bin), dtype=np.uint16, mode="r")
+    n_total = int(train_mm.shape[0])
+    n_train = min(n_total, cfg.subset_tokens)
+    train_data = np.asarray(train_mm[:n_train]).astype(np.int64)
+    val_data = np.fromfile(str(val_bin), dtype=np.uint16).astype(np.int64)
+
+    print(f"  source: {tag} | train {n_train:,} / {n_total:,} tokens | "
+          f"val {len(val_data):,}")
+    return tokenizer, vocab, train_data, val_data
+
+
 def _download(url: str, dst: Path) -> None:
     import urllib.request
     print(f"  downloading {url.rsplit('/', 1)[-1]} -> {dst}")
@@ -176,14 +263,18 @@ def _load_hf_txt() -> tuple[Path, Path]:
 
 
 def prepare_data(cfg: TrainConfig):
-    """Prepare TinyStories training data.
+    """Prepare training data.
 
-    Prefers the local 50k-story JSON at ``data/tinystories_50k.json``.
+    Routes to ``prepare_data_from_file`` if ``--data-path`` is set.
+    Otherwise prefers the local 50k-story JSON at ``data/tinystories_50k.json``.
     Falls back to the HuggingFace V2 split if the local file is missing.
 
     Caches: BPE tokenizer, uint16 token bins, and a small meta.json in
     ``sandbox/mingru_baseline/data/`` keyed by (source, vocab_size).
     """
+    if cfg.data_path:
+        return prepare_data_from_file(cfg)
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     source = "local50k" if LOCAL_JSON.exists() else "hf"
@@ -552,8 +643,10 @@ def train(cfg: TrainConfig, args) -> dict:
     model_cfg = cfg.model_cfg()
     model_cfg.vocab_size = vocab  # reflect tokenizer-actual vocab
     model = MinGRUModel(model_cfg)
+    model.gpu_mode(True)  # keep tensors in VRAM between ops (no PCIe round-trip)
     n_params = model.num_parameters()
     print(f"  params: {n_params:,} ({n_params / 1e6:.2f}M)")
+    print(f"  gpu_mode: ON (DEVICE_LOCAL resident tensors)")
 
     print("\n--- optimizer ---")
     from grilly.optim import AdamW
@@ -777,6 +870,10 @@ def main() -> None:
     ap.add_argument("--clip", type=float, default=cfg.grad_clip)
     # Data
     ap.add_argument("--subset-tokens", type=int, default=cfg.subset_tokens)
+    ap.add_argument("--data-path", type=str, default="",
+                    help="Path to a raw .txt file — bypasses TinyStories, "
+                         "trains BPE on the file, tokenizes, caches bins.")
+    ap.add_argument("--val-split", type=float, default=cfg.val_split)
     # Schedule
     ap.add_argument("--log-every", type=int, default=cfg.log_every)
     ap.add_argument("--eval-every", type=int, default=cfg.eval_every)
@@ -798,6 +895,7 @@ def main() -> None:
         max_lr=args.lr, min_lr=args.min_lr, warmup_steps=args.warmup,
         weight_decay=args.wd, grad_clip=args.clip,
         subset_tokens=args.subset_tokens,
+        data_path=args.data_path, val_split=args.val_split,
         max_steps=args.steps, max_minutes=args.minutes,
         log_every=args.log_every, eval_every=args.eval_every,
         ckpt_every=args.ckpt_every,
