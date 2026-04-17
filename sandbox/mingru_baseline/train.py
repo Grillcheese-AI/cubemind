@@ -82,7 +82,7 @@ from cubemind.training.vsa_lm import MinGRUConfig, MinGRUModel
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = SCRIPT_DIR / "data"
 OUT_DIR = SCRIPT_DIR / "results"
-PROMPTS_PATH = SCRIPT_DIR / "prompts.txt"
+PROMPTS_PATH = SCRIPT_DIR / "prompts_tinystories.txt"  # default for TinyStories runs
 
 # Primary source: local 50k-story TinyStories JSON in the repo root
 # (cubemind/data/tinystories_50k.json). Fallback: HuggingFace V2 split.
@@ -142,6 +142,9 @@ class TrainConfig:
     enable_hypergrad: bool = False
     hypergrad_scale_init: float = 0.1
     hypergrad_trauma_threshold: float = 0.5
+
+    # Prompt file for gen_step_*.md output. Default: TinyStories prompts.
+    prompts_path: str = ""
 
     # ── Derived ─────────────────────────────────────────────────────────
     def model_cfg(self) -> MinGRUConfig:
@@ -537,9 +540,10 @@ def generate(model, tokenizer, prompt: str, params: GenParams,
     return text.replace("\u0120", " ").replace("\u010a", "\n")
 
 
-def load_prompts() -> list[str]:
+def load_prompts(path: str | Path | None = None) -> list[str]:
+    p = Path(path) if path else PROMPTS_PATH
     return [
-        line.strip() for line in PROMPTS_PATH.read_text().splitlines()
+        line.strip() for line in p.read_text().splitlines()
         if line.strip()
     ]
 
@@ -845,7 +849,7 @@ def train(cfg: TrainConfig, args) -> dict:
 def write_generations(model, tokenizer, path: Path, cfg: TrainConfig,
                       step: int, val_ce: float, val_ppl: float,
                       include_greedy: bool = False) -> None:
-    prompts = load_prompts()
+    prompts = load_prompts(cfg.prompts_path or None)
     rng = np.random.default_rng(cfg.seed + step * 17)
     params = GenParams(
         temperature=cfg.gen_temperature, top_p=cfg.gen_top_p,
@@ -911,6 +915,11 @@ def main() -> None:
     ap.add_argument("--gen-tokens", type=int, default=cfg.gen_max_tokens)
     ap.add_argument("--gen-temp", type=float, default=cfg.gen_temperature)
     ap.add_argument("--gen-top-p", type=float, default=cfg.gen_top_p)
+    # Prompts for gen_step_*.md (eval samples written during training)
+    ap.add_argument("--prompts", default=cfg.prompts_path,
+                    help="Path to a .txt file of newline-separated prompts. "
+                         "Default: sandbox/mingru_baseline/prompts_tinystories.txt. "
+                         "For news-style corpora, pass prompts_news.txt.")
     # Hypergradient (AutoHypergradientAdamW + per-layer α modulation)
     ap.add_argument("--hypergrad", action="store_true",
                     help="Use AutoHypergradientAdamW and feed "
@@ -945,6 +954,7 @@ def main() -> None:
         enable_hypergrad=args.hypergrad,
         hypergrad_scale_init=args.hypergrad_scale_init,
         hypergrad_trauma_threshold=args.hypergrad_trauma,
+        prompts_path=args.prompts,
     )
     train(cfg, args)
 

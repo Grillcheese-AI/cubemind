@@ -1452,6 +1452,11 @@ def main() -> None:
     ap.add_argument("--attn-heads", type=int, default=cfg.attn_n_heads)
     ap.add_argument("--attn-window", type=int, default=cfg.attn_window)
     ap.add_argument("--attn-every-n", type=int, default=cfg.attn_every_n)
+    # Prompts for gen_step_*.md (eval samples written during training)
+    ap.add_argument("--prompts", default=cfg.prompts_path,
+                    help="Path to a .txt file of newline-separated prompts. "
+                         "Default: sandbox/mingru_baseline/prompts_tinystories.txt. "
+                         "For news-style corpora, pass prompts_news.txt.")
     # Hypergradient / neuromodulated input scaling
     ap.add_argument("--hypergrad", action="store_true",
                     help="Feed a Yerkes-Dodson surprise_gain (from "
@@ -1492,6 +1497,7 @@ def main() -> None:
         attn_window=args.attn_window, attn_every_n=args.attn_every_n,
         enable_hypergrad=args.hypergrad,
         hypergrad_scale_init=args.hypergrad_scale_init,
+        prompts_path=args.prompts,
         device=args.device, amp_dtype=args.dtype,
         compile_model=args.compile, seed=args.seed,
     )
