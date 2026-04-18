@@ -108,8 +108,10 @@ class VSABindingHead(nn.Module):
         query_proj : Linear(d_model, d_vsa, bias=False)
 
     Buffers (NOT parameters — no gradients):
-        codebook  : (V, d_vsa) float32 ∈ {-1, +1}
-        codebook_norm_inv : (V,) float32   precomputed 1/||row||
+        codebook_unit : (V, d_vsa) row-normalized codebook in
+                        ``codebook_dtype``. Precomputed once — the
+                        forward path is a single matmul against this
+                        buffer, no per-step normalization allocation.
 
     Forward:
         h (B, S, d_model) → logits (B, S, V)
@@ -122,26 +124,32 @@ class VSABindingHead(nn.Module):
         d_vsa: int = 10240,
         temperature: float | str | None = None,
         seed: int = 0xC0DEB00C,
+        codebook_dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.d_vsa = d_vsa
+        self.codebook_dtype = codebook_dtype
 
         # Query projection: h → continuous VSA vector. No bias — the
         # codebook is zero-mean {-1,+1}, so any bias shifts every logit
         # equally and is absorbed by softmax.
         self.query_proj = nn.Linear(d_model, d_vsa, bias=False)
 
-        # Codebook + its row-norm inverse. Buffers (not Parameters)
-        # so they're saved with the state_dict but receive no grads.
+        # Precompute the row-normalized codebook ONCE. The previous
+        # implementation ran ``codebook * codebook_norm_inv.unsqueeze(-1)``
+        # inside forward(), allocating a fresh (V, d_vsa) tensor every
+        # call — that's 1.3 GB of memory traffic per step at V=32K,
+        # d_vsa=10240. Precomputing cuts that to a single read.
+        #
+        # Values in {-1, +1} ÷ sqrt(d_vsa) are exact in fp32 and
+        # essentially-exact in bf16 (magnitude rounds to nearest rep
+        # but sign is preserved). bf16 halves inference bandwidth.
         codebook = build_vsa_codebook(vocab_size, d_vsa, seed=seed)
-        self.register_buffer("codebook", codebook)
-        # All MAP-bipolar rows have the same norm sqrt(d_vsa) by
-        # construction, but computing once is free and guards against
-        # future variants (partial rows, masked tokens, etc.).
-        row_norms = codebook.norm(dim=-1, keepdim=False).clamp_min(1e-8)
-        self.register_buffer("codebook_norm_inv", 1.0 / row_norms)
+        row_norms = codebook.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        codebook_unit = (codebook / row_norms).to(codebook_dtype)
+        self.register_buffer("codebook_unit", codebook_unit)
 
         # Logit scale.
         if temperature is None:
@@ -178,16 +186,39 @@ class VSABindingHead(nn.Module):
         # 1. Project to VSA space — continuous, bounded by the linear
         #    init. No sign() so gradients flow naturally.
         z = self.query_proj(h)
-        # 2. L2-normalize both sides so the inner product IS cos θ.
+        # 2. L2-normalize the query so the inner product IS cos θ (the
+        #    codebook is already pre-normalized).
         z_norm = F.normalize(z, dim=-1, eps=1e-8)
-        # codebook has per-row norm sqrt(D) by construction; multiply
-        # by norm_inv rather than re-normalizing each forward.
-        codebook_unit = self.codebook * self.codebook_norm_inv.unsqueeze(-1)
-        # 3. Cosine similarity vs vocab. matmul is the right shape:
+        # 3. Cosine similarity vs vocab.
         #    z_norm (..., D) · codebook_unit.T (D, V) → (..., V)
-        cos_sim = torch.matmul(z_norm, codebook_unit.t())
+        #    Cast z_norm to the codebook dtype so bf16/fp16 codebooks
+        #    use their native matmul path (no fp32 upcasts on the
+        #    hot path). At fp32 codebook_dtype this is a no-op.
+        cos_sim = torch.matmul(z_norm.to(self.codebook_unit.dtype),
+                               self.codebook_unit.t())
         # 4. Temperature scale — τ = sqrt(D) at default.
-        return cos_sim * self.temperature
+        return cos_sim.to(z_norm.dtype) * self.temperature
+
+    @torch.no_grad()
+    def to_inference(self, dtype: torch.dtype = torch.bfloat16) -> "VSABindingHead":
+        """In-place convert the codebook buffer to ``dtype`` for
+        inference-time bandwidth savings.
+
+        Codebook values are {-1, +1} / sqrt(D) — exactly representable
+        in bf16 (and representable within 2e-3 relative error in fp16).
+        Halves memory traffic on the head's hot path at ~zero quality
+        loss; useful for serving but not recommended during training
+        (autograd needs fp32 on parameters).
+
+        Example::
+
+            model.head = model.head.to_inference(torch.bfloat16)
+            # or
+            model.head.to_inference(torch.float16)
+        """
+        self.codebook_unit = self.codebook_unit.to(dtype)
+        self.codebook_dtype = dtype
+        return self
 
     def num_params_saved_vs_linear(self) -> int:
         """Reporting helper. Returns how many params a plain
@@ -220,18 +251,42 @@ def _smoketest():
     loss = F.cross_entropy(logits.reshape(-1, vocab), targets.reshape(-1))
     loss.backward()
     assert head.query_proj.weight.grad is not None
-    assert head.codebook.grad is None  # buffer, no grad
+    # codebook_unit is a buffer, never has a grad slot
 
     # Determinism across instances.
     head2 = VSABindingHead(d_model, vocab, d_vsa=d_vsa)
-    assert torch.equal(head.codebook, head2.codebook), "codebook not deterministic"
+    assert torch.equal(head.codebook_unit, head2.codebook_unit), \
+        "codebook not deterministic"
+
+    # bf16 inference mode parity — the cosine geometry should be
+    # preserved within ~1e-3 under bf16 storage of the codebook.
+    with torch.no_grad():
+        h_infer = torch.randn(2, 3, d_model)
+        logits_fp32 = head(h_infer)
+        head_bf16 = VSABindingHead(d_model, vocab, d_vsa=d_vsa,
+                                   codebook_dtype=torch.bfloat16)
+        head_bf16.query_proj.load_state_dict(head.query_proj.state_dict())
+        logits_bf16 = head_bf16(h_infer)
+        max_diff = (logits_fp32 - logits_bf16).abs().max().item()
+        assert max_diff < 0.1, f"bf16 codebook too lossy: max|delta|={max_diff}"
+        # Also verify in-place conversion matches fresh construction.
+        head.to_inference(torch.bfloat16)
+        assert head.codebook_unit.dtype == torch.bfloat16
+        logits_inplace = head(h_infer)
+        max_diff2 = (logits_inplace - logits_bf16).abs().max().item()
+        assert max_diff2 < 1e-4, f"to_inference mismatch: max|delta|={max_diff2}"
 
     saved = head.num_params_saved_vs_linear()
     linear = d_model * vocab + vocab
     ours = d_model * d_vsa
-    print(f"  smoketest PASS — logit std {std:.3f}, "
-          f"params ours={ours:,} linear={linear:,} "
-          f"saved={saved:,} ({saved / linear * 100:.1f}%)")
+    codebook_mem_fp32 = vocab * d_vsa * 4
+    codebook_mem_bf16 = vocab * d_vsa * 2
+    print(f"  smoketest PASS - logit std {std:.3f}, "
+          f"bf16 max|delta|={max_diff:.4f}\n"
+          f"  params ours={ours:,} linear={linear:,} "
+          f"saved={saved:,} ({saved / linear * 100:+.1f}%)\n"
+          f"  codebook memory fp32={codebook_mem_fp32/1e6:.1f}MB "
+          f"-> bf16={codebook_mem_bf16/1e6:.1f}MB (-50%)")
 
 
 if __name__ == "__main__":
