@@ -732,6 +732,8 @@ class MixedBatcher:
         self._mt_loader = DataLoader(
             bundle.mt_train, batch_size=batch_size,
             shuffle=True, drop_last=True,
+            num_workers=2, persistent_workers=True,
+            pin_memory=(device.type == "cuda"),
         )
         self._mt_iter = iter(self._mt_loader)
         # Counters — logged each log step.
@@ -1143,20 +1145,32 @@ class HybridBlock(nn.Module):
                 hypergrad_scale_init=cfg.hypergrad_scale_init,
             )
 
-        # Local attention (on selected layers)
-        self.attn = None
-        self.rms_attn = None
-        if cfg.enable_attention and layer_idx % cfg.attn_every_n == 0:
+        # Local attention (on selected layers).
+        # Always register placeholders (nn.Identity) so the module's
+        # _modules dict has a stable shape across all block instances.
+        # Dynamo guards on attribute location — mixing __dict__-stored
+        # `None` and _modules-stored Module triggers per-layer recompiles
+        # and blows the cache_size_limit.
+        self.has_attn = bool(cfg.enable_attention
+                             and layer_idx % cfg.attn_every_n == 0)
+        if self.has_attn:
             self.rms_attn = RMSNorm(d)
             self.attn = LocalCausalAttention(d, cfg.attn_n_heads, cfg.attn_window)
+        else:
+            self.rms_attn = nn.Identity()
+            self.attn = nn.Identity()
 
-        # Hippocampal memory injection (on selected layers)
-        self.memory = None
-        self.mem_gate = None
-        if memory is not None and cfg.enable_memory and layer_idx % cfg.mem_every_n == 0:
+        # Hippocampal memory injection (on selected layers). Same dict-
+        # location stability concern as attention above.
+        self.has_memory = bool(memory is not None and cfg.enable_memory
+                               and layer_idx % cfg.mem_every_n == 0)
+        if self.has_memory:
             self.memory = memory
             self.mem_gate = nn.Linear(d, d, bias=False)
             nn.init.zeros_(self.mem_gate.weight)  # start as no-op
+        else:
+            self.memory = None  # external state, not a Module — kept in __dict__
+            self.mem_gate = nn.Identity()
 
         # FFN
         self.rms_ffn = RMSNorm(d)
@@ -1164,9 +1178,9 @@ class HybridBlock(nn.Module):
 
     def forward(self, x: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
         x = x + self.mix(self.rms_mix(x), surprise_gain=surprise_gain)
-        if self.attn is not None:
+        if self.has_attn:
             x = x + self.attn(self.rms_attn(x))
-        if self.memory is not None and self.memory.size > 0:
+        if self.has_memory and self.memory is not None and self.memory.size > 0:
             # Query memory with sequence-mean hidden state
             x_mean = x.mean(dim=1)                          # (B, D)
             retrieved = self.memory.read(x_mean[0])          # (D,) from batch[0]
@@ -1234,11 +1248,19 @@ class MinGRUModel(nn.Module):
             # Untied VSA binding head — embedding stays learned, output
             # side uses a fixed MAP-bipolar codebook cosine lookup.
             from vsa_binding_head import VSABindingHead
+            # bf16 codebook when training in bf16 — the codebook is a
+            # buffer (no grads), so fp32 buys nothing here. Storing it
+            # bf16 makes the head matmul a pure bf16 TensorCore op
+            # (~50% less head-side bandwidth).
+            _cb_dtype = (torch.bfloat16
+                         if getattr(cfg, "amp_dtype", "fp32") == "bf16"
+                         else torch.float32)
             self.head = VSABindingHead(
                 d_model=cfg.d_model,
                 vocab_size=cfg.vocab_size,
                 d_vsa=getattr(cfg, "vsa_binding_d", 10240),
                 seed=getattr(cfg, "vsa_binding_seed", 0xC0DEB00C),
+                codebook_dtype=_cb_dtype,
             )
             # No tying — the binding head has no weight matrix to tie to.
         else:
@@ -1958,6 +1980,7 @@ def train(cfg: TrainConfig, args) -> dict:
     if device.type == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True  # autotune kernels for fixed shapes
         total_mb = torch.cuda.get_device_properties(0).total_memory / 1e6
         print(f"  vram  : {total_mb:,.0f} MB total")
     print(f"  model : d={cfg.d_model} L={cfg.n_layers} d_ffn={cfg.d_ffn} "
@@ -2040,15 +2063,22 @@ def train(cfg: TrainConfig, args) -> dict:
 
     if cfg.compile_model and hasattr(torch, "compile"):
         try:
-            model = torch.compile(model, mode="default")
-            print("  torch.compile: on")
+            # Raise the recompile cache — MoE expert top-k routing and
+            # the per-layer hybrid block variants can produce a handful
+            # of distinct compiled versions. Default 8 is too tight for
+            # a 6-layer hybrid stack; 64 leaves headroom.
+            import torch._dynamo as _dynamo
+            _dynamo.config.cache_size_limit = 64
+            model = torch.compile(model, mode="default", dynamic=False)
+            print("  torch.compile: on (cache_size_limit=64)")
         except Exception as e:
             print(f"  torch.compile failed, continuing eager: {e}")
 
     print("\n--- optimizer ---")
+    _fused_ok = device.type == "cuda"
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.max_lr, betas=(0.9, 0.95),
-        eps=1e-8, weight_decay=cfg.weight_decay,
+        eps=1e-8, weight_decay=cfg.weight_decay, fused=_fused_ok,
     )
     surprise_tracker = SurpriseTracker() if cfg.enable_hypergrad else None
     if surprise_tracker is not None:
@@ -2089,9 +2119,12 @@ def train(cfg: TrainConfig, args) -> dict:
         sd = ckpt.get("model_state", ckpt)
         # ``model`` may be a torch.compiled wrapper — strip the prefix.
         clean_sd = {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
-        result = (model.backbone.load_state_dict(clean_sd, strict=False)
-                  if isinstance(model, MinGRUMultiTask)
-                  else model.load_state_dict(clean_sd, strict=False))
+        # Peel torch.compile's OptimizedModule wrapper so isinstance
+        # checks see the real module.
+        _inner = getattr(model, "_orig_mod", model)
+        result = (_inner.backbone.load_state_dict(clean_sd, strict=False)
+                  if isinstance(_inner, MinGRUMultiTask)
+                  else _inner.load_state_dict(clean_sd, strict=False))
         missing = len(result.missing_keys)
         unexpected = len(result.unexpected_keys)
         print(f"\n  *** init_from {init_path.name}: "
@@ -2101,8 +2134,11 @@ def train(cfg: TrainConfig, args) -> dict:
 
     # ── Optional backbone freeze ───────────────────────────────────────
     if args.freeze_backbone:
-        backbone_for_freeze = (model.backbone if isinstance(model, MinGRUMultiTask)
-                               else model)
+        # Peel torch.compile's OptimizedModule wrapper — without this
+        # isinstance fails and we'd freeze the heads too.
+        _inner = getattr(model, "_orig_mod", model)
+        backbone_for_freeze = (_inner.backbone if isinstance(_inner, MinGRUMultiTask)
+                               else _inner)
         n_frozen = 0
         for p in backbone_for_freeze.parameters():
             if p.requires_grad:
@@ -2122,7 +2158,7 @@ def train(cfg: TrainConfig, args) -> dict:
         optimizer = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
             lr=cfg.max_lr, betas=(0.9, 0.95), eps=1e-8,
-            weight_decay=cfg.weight_decay,
+            weight_decay=cfg.weight_decay, fused=_fused_ok,
         )
 
     rng = np.random.default_rng(cfg.seed + step)
@@ -2141,16 +2177,20 @@ def train(cfg: TrainConfig, args) -> dict:
         )
         # Multitask val loader (iterating the MT val slice).
         val_loader = DataLoader(bundle.mt_val, batch_size=cfg.batch_size,
-                                shuffle=False)
+                                shuffle=False, num_workers=2,
+                                persistent_workers=True,
+                                pin_memory=(device.type == "cuda"))
         lm_val_data = bundle.lm_val
         print(f"  mixed: LM ratio {cfg.mix_lm_ratio} → expect "
               f"{int(cfg.mix_lm_ratio*100)}% LM / "
               f"{int((1-cfg.mix_lm_ratio)*100)}% multitask steps")
     elif mode == "multitask_only":
+        _dl_kwargs = dict(num_workers=2, persistent_workers=True,
+                          pin_memory=(device.type == "cuda"))
         train_loader = DataLoader(train_data, batch_size=cfg.batch_size,
-                                  shuffle=True, drop_last=True)
+                                  shuffle=True, drop_last=True, **_dl_kwargs)
         val_loader   = DataLoader(val_data,   batch_size=cfg.batch_size,
-                                  shuffle=False)
+                                  shuffle=False, **_dl_kwargs)
         train_iter = iter(train_loader)
 
     header = (f"  {'step':>6} {'lr':>9} {'CE':>8} {'PPL':>9} "
