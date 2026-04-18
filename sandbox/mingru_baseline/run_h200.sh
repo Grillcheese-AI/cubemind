@@ -1,101 +1,169 @@
 #!/usr/bin/env bash
 #
-# H200 RunPod kickoff — first real big-model run.
+# H200 RunPod kickoff — full two-stage cubemind training, single session.
 #
-# Phase 1 of the H200 rollout: LM pretraining on c4_realnewslike with:
-#   - Pretrained SentencePiece (grillcheese_spm32k_v2, 32128 vocab)
-#   - VSA binding head (instead of tied Linear — structural regularization,
-#     lexical decisiveness, faster inference, Colab H100 validated)
-#   - Scaled model (~200M params) — 7x the Colab validation size
-#   - Full 500M-token c4_realnewslike corpus (NO --subset-tokens trap)
+# STAGE 1 — LM pretrain on c4_realnewslike with the full hybrid stack:
+#   - MinGRU backbone, GLU FFN
+#   - MoE-MinGRU mixer (specialization)
+#   - Local sliding-window attention every 3 layers
+#   - Hippocampal episodic memory every 4 layers + dopamine-gated writes
+#   - SurpriseTracker hypergrad scaling on each MinGRU layer
+#   - VSA binding head (fixed bipolar codebook, bf16-ready)
+#   - Pretrained grillcheese_spm32k_v2 tokenizer (32128 vocab, opcodes
+#     + multitask tags + VSA roles all single-token)
 #
-# Phase 2 (separate run) will add mixed LM + multitask training on the
-# 366K multitask rows from Gemini + SVC once phase 1 validates.
+# STAGE 2 — Multitask head fine-tune on combined Gemini + SVC rows:
+#   - Same architecture, backbone + LM head FROZEN
+#   - Only the 5 MindForge LoRA aux heads (opcode/intent/schema/rule/
+#     validity) and the binding head's query projection update
+#   - Trains in ~30 min on the 366K multitask rows
 #
-# Expected runtime on H200: ~4-6 hours for 25K steps
-# Expected cost: ~$15-25 at RunPod H200 pricing
+# Total: ~5-7 hours on H200, single pod, ~$15-25.
 #
-# Prereqs on the pod:
-#   - git clone cubemind (dev branch)
-#   - uv sync + pip install -e .[dev]
-#   - /workspace/tokenizer/grillcheese_spm32k_v2.model uploaded
-#   - /workspace/data/allenai_c4_realnewslike.500m_tokens.txt uploaded
+# Adding new heads later (future-VSA, MoQE, hippocampal forge, etc.):
+# each becomes its own cheap stage-2 run reusing the same stage-1
+# checkpoint — Colab/local fine, no H200 required.
 #
-# Run:
-#   bash sandbox/mingru_baseline/run_h200.sh
+# Prereqs on the pod (after scripts/runpod_h200_bootstrap.sh):
+#   /workspace/tokenizer/grillcheese_spm32k_v2.model
+#   /workspace/data/allenai_c4_realnewslike.500m_tokens.txt
+#   /workspace/data/multitask_combined.jsonl
+#     (concat of multitask_gemini_v1.jsonl + multitask_svc_v1.jsonl —
+#      see "data prep" section at the bottom for the cat command)
 
 set -euo pipefail
 
-# ── Paths (override via env vars for different pod layouts) ────────────
+# ── Paths ──────────────────────────────────────────────────────────────
 : "${TOKENIZER_PATH:=/workspace/tokenizer/grillcheese_spm32k_v2.model}"
-: "${DATA_PATH:=/workspace/data/allenai_c4_realnewslike.500m_tokens.txt}"
+: "${LM_DATA_PATH:=/workspace/data/allenai_c4_realnewslike.500m_tokens.txt}"
+: "${MT_DATA_PATH:=/workspace/data/multitask_combined.jsonl}"
 : "${RESULTS_DIR:=/workspace/results_h200}"
 
-# ── Model config (200M params, d=768/L=12/d_ffn=3072) ──────────────────
+# ── Model ──────────────────────────────────────────────────────────────
 D_MODEL=768
 N_LAYERS=12
 D_FFN=3072
 SEQ_LEN=1024
-VOCAB=32128          # matches grillcheese_spm32k_v2
+VOCAB=32128
 
-# ── Training schedule ──────────────────────────────────────────────────
-STEPS=25000          # ~6.5B tokens at bs=256/seq=1024
-BATCH_SIZE=32        # per-step; grad accum brings effective batch to 256
-GRAD_ACCUM=8
-LR=6e-4              # slightly below Colab's 8e-4 (bigger model)
-MIN_LR=6e-5
-WARMUP=1500
+# ── Hybrid stack toggles (all ON for full cubemind architecture) ───────
+HYBRID_FLAGS=(
+    --vsa-binding-head --vsa-binding-d 10240
+    --moe --moe-experts 4 --moe-top-k 2
+    --attention --attn-heads 4 --attn-window 128 --attn-every-n 3
+    --memory --mem-max 200 --mem-write-threshold 0.4 --mem-every-n 4
+    --mem-consolidate-every 1000
+    --hypergrad
+)
+
+# ── Stage 1: LM pretrain ───────────────────────────────────────────────
+S1_STEPS=20000        # ~5.2B tokens at bs=256/seq=1024
+S1_BATCH=32           # effective 256 with grad-accum 8
+S1_GRAD_ACCUM=8
+S1_LR=6e-4
+S1_MIN_LR=6e-5
+S1_WARMUP=1500
+
+# ── Stage 2: multitask head fine-tune ──────────────────────────────────
+S2_STEPS=3000         # 366K rows / bs=64 ≈ 5700 rows/epoch → ~33 epochs
+S2_BATCH=64           # smaller batch, multitask rows are short
+S2_GRAD_ACCUM=2
+S2_LR=2e-4            # smaller LR — only heads + binding query train
+S2_MIN_LR=2e-5
+S2_WARMUP=200
+
+# ── Common ─────────────────────────────────────────────────────────────
+DTYPE=bf16
 WD=0.01
 CLIP=1.0
-DTYPE=bf16
-
-# ── Eval / logging ─────────────────────────────────────────────────────
 LOG_EVERY=50
 EVAL_EVERY=500
 CKPT_EVERY=1000
 
 # ── Guardrails ─────────────────────────────────────────────────────────
-if [[ ! -f "$TOKENIZER_PATH" ]]; then
-  echo "FATAL: tokenizer not found at $TOKENIZER_PATH" >&2
-  echo "  upload it from D:/grillcheese_training_data/tokenizer/grillcheese_spm32k_v2.model" >&2
-  exit 1
-fi
-if [[ ! -f "$DATA_PATH" ]]; then
-  echo "FATAL: data file not found at $DATA_PATH" >&2
-  exit 1
-fi
+[[ -f "$TOKENIZER_PATH" ]] || { echo "FATAL: tokenizer at $TOKENIZER_PATH" >&2; exit 1; }
+[[ -f "$LM_DATA_PATH"   ]] || { echo "FATAL: LM data at $LM_DATA_PATH" >&2; exit 1; }
+[[ -f "$MT_DATA_PATH"   ]] || { echo "FATAL: multitask data at $MT_DATA_PATH (run cat to combine)" >&2; exit 1; }
 
-mkdir -p "$RESULTS_DIR"
-cd "$(dirname "$0")/../.."   # repo root
+cd "$(dirname "$0")/../.."
+
+S1_DIR="$RESULTS_DIR/stage1_lm"
+S2_DIR="$RESULTS_DIR/stage2_multitask"
+mkdir -p "$S1_DIR" "$S2_DIR"
 
 echo "========================================================================"
-echo "  H200 — phase 1 LM pretraining"
+echo "  H200 — full two-stage cubemind training"
 echo "========================================================================"
-echo "  tokenizer: $TOKENIZER_PATH"
-echo "  data:      $DATA_PATH"
-echo "  results:   $RESULTS_DIR"
-echo "  model:     d=$D_MODEL L=$N_LAYERS d_ffn=$D_FFN vocab=$VOCAB seq=$SEQ_LEN"
-echo "  schedule:  steps=$STEPS warmup=$WARMUP lr=$LR->$MIN_LR dtype=$DTYPE"
-echo "  batch:     $BATCH_SIZE x accum=$GRAD_ACCUM = $(( BATCH_SIZE * GRAD_ACCUM )) eff"
+echo "  tokenizer:    $TOKENIZER_PATH"
+echo "  LM data:      $LM_DATA_PATH"
+echo "  MT data:      $MT_DATA_PATH"
+echo "  results:      $RESULTS_DIR"
+echo "  model:        d=$D_MODEL L=$N_LAYERS d_ffn=$D_FFN vocab=$VOCAB seq=$SEQ_LEN"
+echo "  hybrid:       MoE + local attn + hippocampal + hypergrad + binding"
+echo ""
+echo "  stage 1:      $S1_STEPS steps × bs=$S1_BATCH × accum=$S1_GRAD_ACCUM"
+echo "  stage 2:      $S2_STEPS steps × bs=$S2_BATCH × accum=$S2_GRAD_ACCUM (frozen base)"
+echo "========================================================================"
 echo ""
 
-# Redirect the script's output dir to the results volume so checkpoints
-# survive pod restarts.
-export RESULTS_DIR_OVERRIDE="$RESULTS_DIR"
+# ── STAGE 1 ────────────────────────────────────────────────────────────
+echo ""; echo ">>> STAGE 1: LM pretrain (~5-6 hours)"; echo ""
+RESULTS_DIR_OVERRIDE="$S1_DIR" python -u sandbox/mingru_baseline/train_torch.py \
+    --tokenizer-path "$TOKENIZER_PATH" \
+    --d-model $D_MODEL --n-layers $N_LAYERS --d-ffn $D_FFN \
+    --vocab $VOCAB --seq-len $SEQ_LEN \
+    --steps $S1_STEPS --batch-size $S1_BATCH --grad-accum $S1_GRAD_ACCUM \
+    --lr $S1_LR --min-lr $S1_MIN_LR --warmup $S1_WARMUP \
+    --wd $WD --clip $CLIP --dtype $DTYPE \
+    --log-every $LOG_EVERY --eval-every $EVAL_EVERY --ckpt-every $CKPT_EVERY \
+    --prompts sandbox/mingru_baseline/prompts_news.txt \
+    --data-path "$LM_DATA_PATH" \
+    "${HYBRID_FLAGS[@]}"
 
-python -u sandbox/mingru_baseline/train_torch.py \
-  --tokenizer-path "$TOKENIZER_PATH" \
-  --vsa-binding-head --vsa-binding-d 10240 \
-  --d-model $D_MODEL --n-layers $N_LAYERS --d-ffn $D_FFN \
-  --vocab $VOCAB --seq-len $SEQ_LEN \
-  --steps $STEPS --batch-size $BATCH_SIZE --grad-accum $GRAD_ACCUM \
-  --lr $LR --min-lr $MIN_LR --warmup $WARMUP \
-  --wd $WD --clip $CLIP --dtype $DTYPE \
-  --log-every $LOG_EVERY --eval-every $EVAL_EVERY --ckpt-every $CKPT_EVERY \
-  --prompts sandbox/mingru_baseline/prompts_news.txt \
-  --data-path "$DATA_PATH"
+# Move the stage-1 best checkpoint somewhere stage 2 won't clobber.
+S1_BEST="$S1_DIR/best.pt"
+[[ -f "$S1_BEST" ]] || { echo "FATAL: stage 1 produced no best.pt" >&2; exit 1; }
+echo ""; echo ">>> STAGE 1 done. Best checkpoint: $S1_BEST"
+
+# ── STAGE 2 ────────────────────────────────────────────────────────────
+echo ""; echo ">>> STAGE 2: multitask head fine-tune on frozen base (~30-60 min)"; echo ""
+RESULTS_DIR_OVERRIDE="$S2_DIR" python -u sandbox/mingru_baseline/train_torch.py \
+    --tokenizer-path "$TOKENIZER_PATH" \
+    --d-model $D_MODEL --n-layers $N_LAYERS --d-ffn $D_FFN \
+    --vocab $VOCAB --seq-len $SEQ_LEN \
+    --steps $S2_STEPS --batch-size $S2_BATCH --grad-accum $S2_GRAD_ACCUM \
+    --lr $S2_LR --min-lr $S2_MIN_LR --warmup $S2_WARMUP \
+    --wd $WD --clip $CLIP --dtype $DTYPE \
+    --log-every $LOG_EVERY --eval-every $EVAL_EVERY --ckpt-every $CKPT_EVERY \
+    --use-jsonl-dataset --jsonl-path "$MT_DATA_PATH" \
+    --aux-opcode-loss-weight   0.4 \
+    --aux-intent-loss-weight   0.2 \
+    --aux-schema-loss-weight   0.2 \
+    --aux-rule-loss-weight     0.0 \
+    --aux-validity-loss-weight 0.0 \
+    --init-from "$S1_BEST" --freeze-backbone \
+    "${HYBRID_FLAGS[@]}"
 
 echo ""
 echo "========================================================================"
-echo "  DONE — results in $RESULTS_DIR"
+echo "  DONE — stage 1 in $S1_DIR, stage 2 in $S2_DIR"
+echo "  Pull both back with:"
+echo "    scp -r root@<pod-ip>:$RESULTS_DIR ./"
 echo "========================================================================"
+
+# ── Data-prep notes (run on the pod ONCE before this script) ───────────
+#
+# Combine the Gemini and SVC multitask outputs into one JSONL the
+# trainer can read. The two sources have aligned schemas — Gemini's
+# 36K + SVC's 330K = 366K rows total.
+#
+#   cat /workspace/data/multitask_gemini_v1.jsonl \
+#       /workspace/data/multitask_svc_v1.jsonl \
+#       > /workspace/data/multitask_combined.jsonl
+#
+# Optional: post-process to bucket low-frequency schemas into "other":
+#   python sandbox/mingru_baseline/postprocess_multitask.py \
+#       --input  /workspace/data/multitask_combined.jsonl \
+#       --output /workspace/data/multitask_combined_clean.jsonl \
+#       --top-schemas 16 --top-rules 32
+#   # then point MT_DATA_PATH at the _clean.jsonl

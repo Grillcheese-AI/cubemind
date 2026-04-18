@@ -161,6 +161,17 @@ class TrainConfig:
     # fresh per-dataset BPE would have to re-discover and may miss.
     tokenizer_path: str = ""
 
+    # Mixed LM + multitask training. When ``mix_multitask_path`` is set
+    # ALONGSIDE ``data_path``, each training step randomly picks:
+    #   - an LM batch from the flat memmap bin (prob = mix_lm_ratio)
+    #   - a multitask batch from the JSONL (prob = 1 - mix_lm_ratio)
+    # LM steps apply only the token-level CE loss; multitask steps apply
+    # LM CE + weighted aux losses from the classification heads. The
+    # multitask heads still train on the multitask portion of the run,
+    # while the backbone keeps seeing the large LM corpus.
+    mix_multitask_path: str = ""
+    mix_lm_ratio: float = 0.8       # 80% LM, 20% multitask by default
+
     # ── Hybrid architecture (experimental) ─────────────────────────────
     # MoE recurrence: M small MinGRU experts + top-K routing per token
     enable_moe: bool = False
@@ -631,6 +642,125 @@ def prepare_structured_data(cfg: "TrainConfig"):
     print(f"  multitask jsonl: {len(train_ds):,} train rows / "
           f"{len(val_ds):,} val rows from {src.name}")
     return tokenizer, vocab, train_ds, val_ds
+
+
+# ── Mixed LM + multitask data bundle ────────────────────────────────────
+#
+# When both ``--data-path`` AND ``--mix-multitask-path`` are given, the
+# trainer builds BOTH:
+#   - a flat LM bin (via prepare_data_from_file) backing a memmap
+#   - a StructuredTraceDataset from the multitask JSONL
+#
+# At each training step the MixedBatcher rolls a coin: with probability
+# ``lm_ratio`` it returns an LM batch (for backbone + LM head training),
+# else a multitask batch (for the full multitask wrapper + aux heads).
+#
+# The model is always the MultitaskWrapper in mixed mode — on LM steps
+# we call it with lm_only=True to skip the aux-head forward and save
+# compute. On multitask steps we get the full head output plus the
+# weighted aux losses.
+
+class MixedBundle:
+    """Return value from ``prepare_mixed_data`` — wraps the two source
+    containers + the single shared tokenizer and vocab."""
+    def __init__(self, tokenizer, vocab: int,
+                 lm_train: np.ndarray, lm_val: np.ndarray,
+                 mt_train: StructuredTraceDataset,
+                 mt_val: StructuredTraceDataset):
+        self.tokenizer = tokenizer
+        self.vocab = vocab
+        self.lm_train = lm_train
+        self.lm_val = lm_val
+        self.mt_train = mt_train
+        self.mt_val = mt_val
+
+
+def prepare_mixed_data(cfg: "TrainConfig") -> MixedBundle:
+    """Build both the LM corpus AND the multitask dataset, sharing the
+    SAME pretrained tokenizer so token IDs are consistent across the
+    two data streams."""
+    # Build LM side first — this also produces the tokenizer that the
+    # multitask side will reuse.
+    lm_tok, lm_vocab, lm_train, lm_val = prepare_data_from_file(cfg)
+
+    # Multitask side: load JSONL, reuse the same tokenizer (pass it
+    # through a temporary cfg so prepare_structured_data doesn't try
+    # to re-train BPE on the JSONL's text corpus).
+    assert cfg.mix_multitask_path, "MixedBundle requires mix_multitask_path"
+    mt_rows = load_jsonl_rows(Path(cfg.mix_multitask_path).resolve())
+    if not mt_rows:
+        raise RuntimeError(f"no rows in {cfg.mix_multitask_path}")
+
+    # Split 95/5 train/val, tokenize with the SHARED tokenizer.
+    rng = np.random.default_rng(cfg.seed)
+    idx = np.arange(len(mt_rows))
+    rng.shuffle(idx)
+    split_n = max(1, int(len(mt_rows) * (1.0 - cfg.val_split)))
+    train_rows = [mt_rows[i] for i in idx[:split_n]]
+    val_rows   = [mt_rows[i] for i in idx[split_n:]]
+    if not val_rows:
+        val_rows = train_rows[: max(1, len(train_rows) // 10)]
+
+    mt_train = StructuredTraceDataset(train_rows, lm_tok, cfg.seq_len)
+    mt_val   = StructuredTraceDataset(val_rows,   lm_tok, cfg.seq_len)
+    print(f"  multitask jsonl: {len(mt_train):,} train / {len(mt_val):,} val "
+          f"rows from {Path(cfg.mix_multitask_path).name}")
+    return MixedBundle(lm_tok, lm_vocab, lm_train, lm_val, mt_train, mt_val)
+
+
+class MixedBatcher:
+    """At each step, return either an LM batch or a multitask batch.
+
+    ``lm_ratio`` controls the expected fraction of LM steps. The
+    multitask iterator auto-resets when exhausted (the 366K JSONL rows
+    get multiple passes across a 25K-step training run).
+
+    Returned dict has ``kind`` set to ``"lm"`` or ``"multitask"`` so
+    the train loop can dispatch to the right forward path + loss.
+    """
+
+    def __init__(self, bundle: MixedBundle, cfg: "TrainConfig",
+                 batch_size: int, seq_len: int, device: torch.device):
+        self.bundle = bundle
+        self.cfg = cfg
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.device = device
+        self.lm_ratio = float(cfg.mix_lm_ratio)
+        self._rng = np.random.default_rng(cfg.seed + 7919)  # private stream
+        # Multitask DataLoader + lazy iterator (re-created on StopIteration).
+        self._mt_loader = DataLoader(
+            bundle.mt_train, batch_size=batch_size,
+            shuffle=True, drop_last=True,
+        )
+        self._mt_iter = iter(self._mt_loader)
+        # Counters — logged each log step.
+        self.lm_steps = 0
+        self.mt_steps = 0
+
+    def next_batch(self) -> dict:
+        if self._rng.random() < self.lm_ratio:
+            x, y = sample_batch(self.bundle.lm_train, self.batch_size,
+                                self.seq_len, self._rng)
+            self.lm_steps += 1
+            return {
+                "kind": "lm",
+                "x": x.to(self.device, non_blocking=True),
+                "y": y.to(self.device, non_blocking=True),
+            }
+        try:
+            batch = next(self._mt_iter)
+        except StopIteration:
+            self._mt_iter = iter(self._mt_loader)
+            batch = next(self._mt_iter)
+        self.mt_steps += 1
+        moved = {"kind": "multitask"}
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                moved[k] = v.to(self.device, non_blocking=True)
+            else:
+                moved[k] = v
+        return moved
 
 
 def load_prompts(path: Path | None = None) -> list[str]:
@@ -1413,14 +1543,23 @@ class MinGRUMultiTask(nn.Module):
     def forward(self, tokens: torch.Tensor,
                 surprise_gain: float = 0.0,
                 last_idx: torch.Tensor | None = None,
+                lm_only: bool = False,
                 ) -> dict[str, torch.Tensor]:
+        """``lm_only=True`` skips the auxiliary head compute entirely —
+        only ``token_logits`` is produced. Used by mixed-mode LM steps
+        (which drive the backbone + LM head but don't need aux heads
+        firing on unlabeled LM text). At the default 0.8 LM ratio this
+        saves ~80% of head-forward FLOPs across the run."""
         h = self.backbone.forward_features(tokens, surprise_gain=surprise_gain)
+        out: dict[str, torch.Tensor] = {"token_logits": self.backbone.head(h)}
+        if lm_only:
+            return out
         if last_idx is None:
             pooled = h[:, -1, :]
         else:
             B = h.size(0)
             pooled = h[torch.arange(B, device=h.device), last_idx]
-        out = {"token_logits": self.backbone.head(h), "_pooled": pooled}
+        out["_pooled"] = pooled
         for name, head in self.heads.items():
             out[f"{name}_logits"] = head(pooled)
         return out
@@ -1832,8 +1971,39 @@ def train(cfg: TrainConfig, args) -> dict:
     print(f"  batch : {cfg.batch_size} x accum={cfg.grad_accum} "
           f"= {cfg.batch_size * cfg.grad_accum * cfg.seq_len:,} toks/step")
 
+    # ── Mode detection ─────────────────────────────────────────────────
+    #
+    # Three training modes, determined by the flag combination:
+    #
+    #   flat_lm        : --data-path only
+    #                    → MinGRUModel backbone, LM CE only
+    #   multitask_only : --use-jsonl-dataset + --jsonl-path
+    #                    → MultitaskWrapper, full multitask loss
+    #   mixed          : --data-path + --mix-multitask-path
+    #                    → MultitaskWrapper, per-step alternation between
+    #                      LM batches (lm_only forward, LM CE) and
+    #                      multitask batches (full forward, full loss)
+    #
+    # Mixed is the H200 default — backbone sees the big LM corpus for
+    # pretraining AND the aux heads get supervised on the multitask
+    # rows, all in a single session.
+    is_mixed = bool(cfg.mix_multitask_path and cfg.data_path)
+    if is_mixed:
+        mode = "mixed"
+    elif cfg.use_jsonl_dataset:
+        mode = "multitask_only"
+    else:
+        mode = "flat_lm"
+    print(f"\n--- mode: {mode} ---")
+
     print("\n--- data ---")
-    if cfg.use_jsonl_dataset:
+    if mode == "mixed":
+        bundle = prepare_mixed_data(cfg)
+        tokenizer = bundle.tokenizer
+        vocab = bundle.vocab
+        train_data = None           # not used directly in mixed mode
+        val_data = bundle.lm_val    # for final LM eval
+    elif mode == "multitask_only":
         tokenizer, vocab, train_data, val_data = prepare_structured_data(cfg)
     else:
         tokenizer, vocab, train_data, val_data = prepare_data(cfg)
@@ -1845,7 +2015,7 @@ def train(cfg: TrainConfig, args) -> dict:
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     backbone = MinGRUModel(cfg)
-    if cfg.use_jsonl_dataset:
+    if mode in ("multitask_only", "mixed"):
         model = MinGRUMultiTask(
             backbone=backbone,
             d_model=cfg.d_model,
@@ -1888,7 +2058,18 @@ def train(cfg: TrainConfig, args) -> dict:
               if cfg.amp_dtype == "fp16" and device.type == "cuda"
               else None)
 
-    # Resume
+    # ── Init / Resume ──────────────────────────────────────────────────
+    #
+    # Two distinct concepts:
+    #   --resume           : continue THIS training run from where it
+    #                        stopped — preserves step counter, optimizer
+    #                        state, best_val. Used to restart after a
+    #                        crash or scheduled break.
+    #   --init-from PATH   : start a NEW run with weights from another
+    #                        checkpoint. Step counter resets to 0,
+    #                        optimizer state is fresh. Used for stage-2
+    #                        head training where the backbone comes
+    #                        from a stage-1 LM pretrain.
     ckpt_path = OUT_DIR / "checkpoint.pt"
     step, best_val, tokens_seen, elapsed_prev = 0, float("inf"), 0, 0.0
     if args.resume and ckpt_path.exists():
@@ -1897,11 +2078,75 @@ def train(cfg: TrainConfig, args) -> dict:
         tokens_seen = meta["tokens_seen"]; elapsed_prev = meta["elapsed"]
         print(f"\n  *** resumed from step {step:,} "
               f"({elapsed_prev/60:.1f}m done) ***")
+    elif args.init_from:
+        init_path = Path(args.init_from).resolve()
+        assert init_path.exists(), f"--init-from not found: {init_path}"
+        # Load weights only — step counter stays 0, optimizer state
+        # is fresh. Multitask heads (added by MinGRUMultiTask wrapper)
+        # don't exist in a stage-1 checkpoint, so use strict=False.
+        ckpt = torch.load(str(init_path), map_location=device,
+                          weights_only=False)
+        sd = ckpt.get("model_state", ckpt)
+        # ``model`` may be a torch.compiled wrapper — strip the prefix.
+        clean_sd = {k.replace("_orig_mod.", ""): v for k, v in sd.items()}
+        result = (model.backbone.load_state_dict(clean_sd, strict=False)
+                  if isinstance(model, MinGRUMultiTask)
+                  else model.load_state_dict(clean_sd, strict=False))
+        missing = len(result.missing_keys)
+        unexpected = len(result.unexpected_keys)
+        print(f"\n  *** init_from {init_path.name}: "
+              f"loaded backbone weights "
+              f"({missing} missing, {unexpected} unexpected — "
+              f"missing are new heads/buffers, unexpected are stage-1-only) ***")
+
+    # ── Optional backbone freeze ───────────────────────────────────────
+    if args.freeze_backbone:
+        backbone_for_freeze = (model.backbone if isinstance(model, MinGRUMultiTask)
+                               else model)
+        n_frozen = 0
+        for p in backbone_for_freeze.parameters():
+            if p.requires_grad:
+                p.requires_grad = False
+                n_frozen += 1
+        # The LM head is part of the backbone — freezing it locks the
+        # LM signal too. This is correct for stage-2 multitask training:
+        # we want only the aux heads + the binding head's query_proj
+        # to update.
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total_p   = sum(p.numel() for p in model.parameters())
+        print(f"\n  *** freeze_backbone: froze {n_frozen} tensors → "
+              f"{trainable:,} trainable / {total_p:,} total "
+              f"({trainable/total_p*100:.1f}%) ***")
+        # Rebuild the optimizer to drop frozen params from its state
+        # (otherwise AdamW maintains pointless m/v buffers on them).
+        optimizer = torch.optim.AdamW(
+            [p for p in model.parameters() if p.requires_grad],
+            lr=cfg.max_lr, betas=(0.9, 0.95), eps=1e-8,
+            weight_decay=cfg.weight_decay,
+        )
 
     rng = np.random.default_rng(cfg.seed + step)
 
+    # ── Batchers / loaders per mode ────────────────────────────────────
     train_loader = val_loader = train_iter = None
-    if cfg.use_jsonl_dataset:
+    mixed_batcher: "MixedBatcher | None" = None
+    lm_val_data = None  # populated in mixed mode for LM-side eval
+
+    if mode == "mixed":
+        mixed_batcher = MixedBatcher(
+            bundle, cfg,
+            batch_size=cfg.batch_size,
+            seq_len=cfg.seq_len,
+            device=device,
+        )
+        # Multitask val loader (iterating the MT val slice).
+        val_loader = DataLoader(bundle.mt_val, batch_size=cfg.batch_size,
+                                shuffle=False)
+        lm_val_data = bundle.lm_val
+        print(f"  mixed: LM ratio {cfg.mix_lm_ratio} → expect "
+              f"{int(cfg.mix_lm_ratio*100)}% LM / "
+              f"{int((1-cfg.mix_lm_ratio)*100)}% multitask steps")
+    elif mode == "multitask_only":
         train_loader = DataLoader(train_data, batch_size=cfg.batch_size,
                                   shuffle=True, drop_last=True)
         val_loader   = DataLoader(val_data,   batch_size=cfg.batch_size,
@@ -1931,8 +2176,35 @@ def train(cfg: TrainConfig, args) -> dict:
                          if surprise_tracker is not None else 0.0)
 
         loss_val = 0.0
+        step_lm_substeps = 0   # per-step tally for logging mixed-mode split
+        step_mt_substeps = 0
         for _ in range(cfg.grad_accum):
-            if cfg.use_jsonl_dataset:
+            if mode == "mixed":
+                batch = mixed_batcher.next_batch()
+                if batch["kind"] == "lm":
+                    step_lm_substeps += 1
+                    x, y = batch["x"], batch["y"]
+                    with autocast_ctx():
+                        # lm_only=True skips aux-head compute entirely —
+                        # at ~80% of steps this is where throughput lives.
+                        out = model(x, surprise_gain=surprise_gain, lm_only=True)
+                        loss = compute_loss(out["token_logits"], y) / cfg.grad_accum
+                else:
+                    step_mt_substeps += 1
+                    x = batch["x"]; y = batch["y"]
+                    last_idx = batch["last_idx"]
+                    head_targets = {}
+                    for spec in model.head_specs:
+                        key = spec["label_key"]
+                        if key in batch:
+                            head_targets[spec["name"]] = batch[key]
+                    with autocast_ctx():
+                        out = model(x, surprise_gain=surprise_gain,
+                                    last_idx=last_idx)
+                        loss = compute_multitask_loss(
+                            out, y, head_targets, model.head_specs, cfg,
+                        ) / cfg.grad_accum
+            elif mode == "multitask_only":
                 try:
                     batch = next(train_iter)
                 except StopIteration:
@@ -1941,9 +2213,6 @@ def train(cfg: TrainConfig, args) -> dict:
                 x = batch["x"].to(device, non_blocking=True)
                 y = batch["y"].to(device, non_blocking=True)
                 last_idx = batch["last_idx"].to(device, non_blocking=True)
-                # Build the head_targets dict from the spec registry —
-                # heads added via add_head() at runtime get picked up
-                # automatically as long as their label_key is in the batch.
                 head_targets = {}
                 for spec in model.head_specs:
                     key = spec["label_key"]
@@ -2022,14 +2291,26 @@ def train(cfg: TrainConfig, args) -> dict:
                 print(divider); print(header); print(divider)
 
         if step % cfg.eval_every == 0 or step == cfg.max_steps:
-            if cfg.use_jsonl_dataset:
+            metrics = None
+            lm_val_ce = None
+            if mode == "mixed":
+                # BOTH evals — multitask heads (incl. LM CE on MT val)
+                # and a separate LM-only eval on the big LM val bin so
+                # we can track LM progress on its own distribution.
+                metrics = evaluate_structured(model, val_loader, cfg,
+                                              device, autocast_ctx)
+                lm_val_ce = evaluate(model, lm_val_data, cfg, device,
+                                     autocast_ctx, max_batches=25)
+                # Use LM val CE as the "best" criterion in mixed mode —
+                # multitask val tracks aux head accuracy separately.
+                val_ce = lm_val_ce
+            elif mode == "multitask_only":
                 metrics = evaluate_structured(model, val_loader, cfg,
                                               device, autocast_ctx)
                 val_ce = metrics["val_ce"]
             else:
                 val_ce = evaluate(model, val_data, cfg, device, autocast_ctx,
                                   max_batches=25)
-                metrics = None
             val_ppl = math.exp(min(val_ce, 20))
             tag = ""
             if val_ce < best_val:
@@ -2040,7 +2321,24 @@ def train(cfg: TrainConfig, args) -> dict:
                                 elapsed_prev + (time.time() - t_start), cfg,
                                 tokenizer_json=tokenizer.to_str())
                 tag = " *"
-            if metrics is not None:
+            # Compose status line.
+            if mode == "mixed":
+                head_parts = []
+                for s in model.head_specs:
+                    v = metrics.get(f"{s['name']}_metric", 0.0)
+                    head_parts.append(f"{s['name']} {v:.3f}")
+                head_str = " | ".join(head_parts)
+                mt_ce = metrics.get("val_ce", float("nan"))
+                lm_steps = mixed_batcher.lm_steps
+                mt_steps = mixed_batcher.mt_steps
+                tot = max(lm_steps + mt_steps, 1)
+                print(f"\n  === step {step:,} ===  LM val CE {lm_val_ce:.4f}  "
+                      f"PPL {val_ppl:.2f}{tag}  "
+                      f"| MT val CE {mt_ce:.4f}  "
+                      f"| {head_str}\n  "
+                      f"mix: {lm_steps:,} LM ({lm_steps/tot*100:.0f}%) / "
+                      f"{mt_steps:,} MT ({mt_steps/tot*100:.0f}%)")
+            elif mode == "multitask_only":
                 parts = []
                 for s in model.head_specs:
                     v = metrics.get(f"{s['name']}_metric", 0.0)
@@ -2051,9 +2349,10 @@ def train(cfg: TrainConfig, args) -> dict:
             else:
                 print(f"\n  === step {step:,} ===  val CE {val_ce:.4f}  "
                       f"PPL {val_ppl:.2f}{tag}")
-            # Skip generation in structured mode — gen prompts assume
-            # free-text continuation, not labeled multitask rows.
-            if not cfg.use_jsonl_dataset:
+            # Generations only make sense in modes with a real LM val
+            # distribution (flat_lm + mixed). Multitask-only rows are
+            # tagged structures, not free-text prompts.
+            if mode in ("flat_lm", "mixed"):
                 gen_path = OUT_DIR / f"gen_step_{step:06d}.md"
                 write_generations(model, tokenizer, gen_path, cfg, device,
                                   step, val_ce, val_ppl)
@@ -2217,7 +2516,19 @@ def main() -> None:
                     choices=["fp32", "bf16", "fp16"])
     ap.add_argument("--compile", action="store_true")
     ap.add_argument("--seed", type=int, default=cfg.seed)
-    ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--resume", action="store_true",
+                    help="Continue THIS run from results/checkpoint.pt — "
+                         "keeps step counter + optimizer state.")
+    ap.add_argument("--init-from", default="",
+                    help="Initialize weights from another checkpoint and "
+                         "start a NEW run (step=0, fresh optimizer). Used "
+                         "for stage-2 head training where the backbone "
+                         "comes from a stage-1 LM pretrain.")
+    ap.add_argument("--freeze-backbone", action="store_true",
+                    help="Freeze the MinGRU backbone (and LM head) — only "
+                         "auxiliary heads (and the binding head's query "
+                         "projection) update. Pairs with --init-from for "
+                         "two-stage pretrain → multitask-finetune.")
     args = ap.parse_args()
 
     cfg = TrainConfig(
