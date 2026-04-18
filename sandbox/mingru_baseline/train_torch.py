@@ -115,7 +115,15 @@ class TrainConfig:
     grad_clip: float = 1.0
 
     # Data
-    subset_tokens: int = 10_979_128  # full TinyStories-50k corpus by default
+    #
+    # subset_tokens defaults to 10**10 = effectively unlimited. Any real
+    # file caps earlier via min(n_total, cfg.subset_tokens). Previous
+    # default of 10,979,128 was sized for TinyStories-50k but silently
+    # clamped the c4_realnewslike run to 11M of its 450M tokens — the
+    # model saw 7+ epochs of the same window by step 6500 and overfit
+    # (val CE 4.71 → 5.04). Now the default is "whole file"; opt IN to
+    # a subset via --subset-tokens for quick smoke tests.
+    subset_tokens: int = 10_000_000_000
     data_path: str = ""             # direct path to a .txt file (bypasses TinyStories download)
     val_split: float = 0.05         # fraction held out for validation when using --data-path
 
@@ -308,6 +316,14 @@ def prepare_data_from_file(cfg: TrainConfig):
     print(f"  source: {meta.get('tag', '?')} | "
           f"train {n_train:,} / {n_total:,} tokens | "
           f"val {len(val_data):,}")
+    # Loud warning when the --subset-tokens cap is doing something
+    # non-trivial — missing one of these is how the step-6500 overfit
+    # happened on the c4_realnewslike run.
+    if n_train < n_total:
+        pct = n_train / n_total * 100
+        print(f"  [!] --subset-tokens clamps training to {pct:.1f}% of the "
+              f"corpus ({(n_total - n_train)/1e6:.0f}M tokens unused). "
+              f"Remove --subset-tokens to use the full file.")
     return tokenizer, vocab, train_data, val_data
 
 

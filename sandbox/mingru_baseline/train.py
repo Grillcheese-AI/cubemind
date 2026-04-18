@@ -115,7 +115,10 @@ class TrainConfig:
     grad_clip: float = 1.0
 
     # Data
-    subset_tokens: int = 5_000_000
+    # Default "whole file" — opt IN to a subset via --subset-tokens for
+    # quick smoke tests. A too-low default caused 7+ epochs of the same
+    # window on c4_realnewslike and textbook overfitting at step 6500.
+    subset_tokens: int = 10_000_000_000
     data_path: str = ""             # direct path to a .txt file (bypasses TinyStories)
     val_split: float = 0.05
 
