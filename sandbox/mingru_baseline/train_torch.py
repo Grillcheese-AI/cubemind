@@ -153,6 +153,14 @@ class TrainConfig:
     vsa_binding_d: int = 10240       # VSA dimension (K_BLOCKS × L_BLOCK)
     vsa_binding_seed: int = 0xC0DEB00C
 
+    # Pretrained tokenizer (grillcheese_spm32k_v2.model or similar). When
+    # set, skip the per-dataset BPE training in prepare_data_from_file
+    # and load this SPM model instead. This is the H200 default because
+    # the pretrained tokenizer already has all 110 forced tokens
+    # (opcodes + multitask tags + VSA roles) as single tokens, which a
+    # fresh per-dataset BPE would have to re-discover and may miss.
+    tokenizer_path: str = ""
+
     # ── Hybrid architecture (experimental) ─────────────────────────────
     # MoE recurrence: M small MinGRU experts + top-K routing per token
     enable_moe: bool = False
@@ -225,6 +233,72 @@ def _load_local_stories() -> list[str]:
     return stories
 
 
+# ── Pretrained SentencePiece adapter ────────────────────────────────────
+#
+# The big-corpus H200 path loads a pretrained SentencePiece model
+# (grillcheese_spm32k_v2 — trained on the unified corpus with 58
+# canonical opcodes + 28 multitask tags + 8 VSA roles + 16 legacy chat
+# tokens as forced single-token symbols).
+#
+# Rest of the code uses HuggingFace ``tokenizers`` API — this thin
+# shim makes the SentencePiece model duck-type like HFTokenizer so
+# nothing downstream needs to change.
+
+class _SpmEncodeResult:
+    """Minimal stand-in for ``tokenizers.Encoding`` — the only attribute
+    the training code reads is ``.ids``."""
+    __slots__ = ("ids",)
+
+    def __init__(self, ids: list[int]):
+        self.ids = ids
+
+
+class SpmAdapter:
+    """Wraps a pretrained ``sentencepiece.SentencePieceProcessor`` to
+    duck-type like ``tokenizers.Tokenizer``.
+
+    Exposes: ``encode(text) -> _SpmEncodeResult`` with ``.ids`` list,
+    ``decode(ids) -> str``, ``get_vocab_size() -> int``, ``to_str()``
+    (returns path for checkpoint embedding), and a no-op ``decoder``
+    attribute so the existing ``prepare_data`` flow doesn't NPE.
+    """
+
+    def __init__(self, model_path: str):
+        import sentencepiece as spm
+        self._sp = spm.SentencePieceProcessor()
+        self._sp.Load(model_path)
+        self._path = str(model_path)
+        self.decoder = None  # HF compat — not used for SPM decode
+
+    def encode(self, text: str) -> _SpmEncodeResult:
+        return _SpmEncodeResult(self._sp.EncodeAsIds(text))
+
+    def decode(self, ids, skip_special_tokens: bool = False) -> str:
+        return self._sp.DecodeIds(list(ids))
+
+    def get_vocab_size(self) -> int:
+        return int(self._sp.GetPieceSize())
+
+    def to_str(self) -> str:
+        """For checkpoint embedding — return the model file path rather
+        than serializing the (large, binary) SPM model. The eval script
+        can resolve this back by re-loading the same file."""
+        return json.dumps({"spm_path": self._path,
+                           "vocab_size": self.get_vocab_size()})
+
+    def save(self, path: str) -> None:
+        """No-op for SPM — the .model file already exists on disk. The
+        cache dir gets a pointer file instead of a full serialization."""
+        Path(path).write_text(self.to_str(), encoding="utf-8")
+
+
+def _load_pretrained_tokenizer(path: Path):
+    """Load grillcheese_spm32k (or any SPM .model) via the adapter."""
+    if not path.exists():
+        raise FileNotFoundError(f"tokenizer not found: {path}")
+    return SpmAdapter(str(path))
+
+
 def prepare_data_from_file(cfg: TrainConfig):
     """Load training data from a raw .txt file at ``cfg.data_path``.
 
@@ -238,10 +312,19 @@ def prepare_data_from_file(cfg: TrainConfig):
     assert src.exists(), f"--data-path not found: {src}"
     tag = src.stem.replace(".", "_")[:40]
 
-    tok_path  = DATA_DIR / f"tokenizer_{tag}_v{cfg.vocab_size}.json"
-    train_bin = DATA_DIR / f"train_{tag}_v{cfg.vocab_size}.bin"
-    val_bin   = DATA_DIR / f"val_{tag}_v{cfg.vocab_size}.bin"
-    meta_path = DATA_DIR / f"meta_{tag}_v{cfg.vocab_size}.json"
+    # Pretrained tokenizer branch — key the cache by the tokenizer's
+    # file stem so switching between tokenizers doesn't re-use stale bins.
+    using_pretrained = bool(cfg.tokenizer_path)
+    if using_pretrained:
+        pre_path = Path(cfg.tokenizer_path).resolve()
+        tok_tag = f"spm_{pre_path.stem}"
+    else:
+        tok_tag = f"bpe_v{cfg.vocab_size}"
+
+    tok_path  = DATA_DIR / f"tokenizer_{tag}_{tok_tag}.json"
+    train_bin = DATA_DIR / f"train_{tag}_{tok_tag}.bin"
+    val_bin   = DATA_DIR / f"val_{tag}_{tok_tag}.bin"
+    meta_path = DATA_DIR / f"meta_{tag}_{tok_tag}.json"
 
     needs_build = not (
         tok_path.exists() and train_bin.exists()
@@ -252,20 +335,26 @@ def prepare_data_from_file(cfg: TrainConfig):
         file_size = src.stat().st_size
         print(f"  source: {src.name} ({file_size / 1e9:.2f} GB)")
 
-        # Train BPE on the source file directly
-        print(f"  training BPE tokenizer (vocab={cfg.vocab_size})")
-        tokenizer = HFTokenizer(hf_models.BPE())
-        tokenizer.pre_tokenizer = hf_pre.ByteLevel()
-        tokenizer.decoder = hf_decoders.ByteLevel()
-        tokenizer.train(
-            files=[str(src)],
-            trainer=hf_trainers.BpeTrainer(
-                vocab_size=cfg.vocab_size, min_frequency=2,
-                special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"],
-            ),
-        )
-        tokenizer.save(str(tok_path))
-        print(f"  vocab: {tokenizer.get_vocab_size()}")
+        if using_pretrained:
+            print(f"  loading pretrained tokenizer: {pre_path.name}")
+            tokenizer = _load_pretrained_tokenizer(pre_path)
+            tokenizer.save(str(tok_path))  # writes pointer file
+            print(f"  vocab: {tokenizer.get_vocab_size()}")
+        else:
+            # Train BPE on the source file directly
+            print(f"  training BPE tokenizer (vocab={cfg.vocab_size})")
+            tokenizer = HFTokenizer(hf_models.BPE())
+            tokenizer.pre_tokenizer = hf_pre.ByteLevel()
+            tokenizer.decoder = hf_decoders.ByteLevel()
+            tokenizer.train(
+                files=[str(src)],
+                trainer=hf_trainers.BpeTrainer(
+                    vocab_size=cfg.vocab_size, min_frequency=2,
+                    special_tokens=["<pad>", "<unk>", "<bos>", "<eos>"],
+                ),
+            )
+            tokenizer.save(str(tok_path))
+            print(f"  vocab: {tokenizer.get_vocab_size()}")
 
         # Tokenize the entire file in streaming chunks
         print(f"  tokenizing {src.name}...")
@@ -301,9 +390,12 @@ def prepare_data_from_file(cfg: TrainConfig):
         }, indent=2))
         print(f"  train: {len(train_ids):,} | val: {len(val_ids):,}")
 
-    tokenizer = HFTokenizer.from_file(str(tok_path))
-    if tokenizer.decoder is None:
-        tokenizer.decoder = hf_decoders.ByteLevel()
+    if using_pretrained:
+        tokenizer = _load_pretrained_tokenizer(pre_path)
+    else:
+        tokenizer = HFTokenizer.from_file(str(tok_path))
+        if tokenizer.decoder is None:
+            tokenizer.decoder = hf_decoders.ByteLevel()
     meta = json.loads(meta_path.read_text())
     vocab = tokenizer.get_vocab_size()
 
@@ -2102,6 +2194,15 @@ def main() -> None:
                          "Embedding stays learned (untied).")
     ap.add_argument("--vsa-binding-d", type=int, default=cfg.vsa_binding_d,
                     help="VSA hypervector dimension (default 10240)")
+    # Pretrained SentencePiece tokenizer (grillcheese_spm32k_v2 etc.)
+    ap.add_argument("--tokenizer-path", default=cfg.tokenizer_path,
+                    help="Path to a pretrained SentencePiece .model file. "
+                         "When set, skips per-dataset BPE training and loads "
+                         "this tokenizer instead — required for runs that "
+                         "need opcodes/multitask tags as single tokens. "
+                         "Example: "
+                         "D:/grillcheese_training_data/tokenizer/"
+                         "grillcheese_spm32k_v2.model")
     # Hypergradient / neuromodulated input scaling
     ap.add_argument("--hypergrad", action="store_true",
                     help="Feed a Yerkes-Dodson surprise_gain (from "
@@ -2156,6 +2257,7 @@ def main() -> None:
         num_rule_classes=args.num_rule_classes,
         vsa_binding_head=args.vsa_binding_head,
         vsa_binding_d=args.vsa_binding_d,
+        tokenizer_path=args.tokenizer_path,
         device=args.device, amp_dtype=args.dtype,
         compile_model=args.compile, seed=args.seed,
     )
