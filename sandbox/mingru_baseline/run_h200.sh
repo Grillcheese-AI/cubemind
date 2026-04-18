@@ -35,6 +35,15 @@ set -euo pipefail
 
 # ── Paths ──────────────────────────────────────────────────────────────
 : "${TOKENIZER_PATH:=/workspace/tokenizer/grillcheese_spm32k_v2.model}"
+# LM corpus for stage 1. Default = c4 alone, but you can concat
+# OpenThoughts-114k chat-formatted reasoning traces for richer signal:
+#
+#   python sandbox/mingru_baseline/extract_openthoughts.py \
+#       --input D:/grillcheese_training_data/jsonl/OpenThoughts-114k.jsonl \
+#       --output D:/grillcheese_training_data/openthoughts_chat.txt
+#   cat allenai_c4_realnewslike.500m_tokens.txt openthoughts_chat.txt \
+#       > stage1_lm_combined.txt
+#   # then point LM_DATA_PATH at stage1_lm_combined.txt
 : "${LM_DATA_PATH:=/workspace/data/allenai_c4_realnewslike.500m_tokens.txt}"
 : "${MT_DATA_PATH:=/workspace/data/multitask_combined.jsonl}"
 : "${RESULTS_DIR:=/workspace/results_h200}"
