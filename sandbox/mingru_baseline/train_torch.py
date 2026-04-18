@@ -46,6 +46,16 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# Ensure sibling modules (vsa_binding_head.py, vm_opcodes.py) are
+# importable regardless of how the script was launched. Colab / Jupyter
+# invoke via a kernel that doesn't always put the script's directory on
+# sys.path[0], so deferred imports inside classes fail with
+# ModuleNotFoundError. Inserting the parent directory here is
+# idempotent and cheap.
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
 # UTF-8 stdout so Windows consoles don't choke on BPE byte markers.
 for _stream in (sys.stdout, sys.stderr):
     try:
