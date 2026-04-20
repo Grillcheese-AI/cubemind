@@ -1,6 +1,9 @@
 # CubeMind Architecture Map — Post-Phase-0 Status
 
 Last updated: 2026-04-15 (Phase 0 complete)
+Modified: 2026-04-19 — Sandbox MinGRU baseline track added (see §"Sandbox additions
+since Phase 0" at the bottom). No changes to core `cubemind/` registry counts; all
+new code lives under `sandbox/mingru_baseline/` and `opcode-vsa-rs/examples/`.
 
 ## Summary
 
@@ -136,3 +139,43 @@ Tests surgically edited (archived classes removed, kept non-archived coverage):
 ## Next Steps
 
 See `TASKS.md` — Phase 1 (FlashLM baseline) is the gate for Phase 2+.
+
+---
+
+## Sandbox additions since Phase 0 *(2026-04-19)*
+
+These live entirely under `sandbox/mingru_baseline/` and `opcode-vsa-rs/examples/`.
+The core `cubemind/` registry is untouched — sandbox work is a parallel track for
+the H200/RunPod two-stage training experiment. Promotion to `cubemind/` happens
+only after H200 validates and a registered wrapper is designed.
+
+### Training pipeline
+| File | Status | Purpose |
+|---|---|---|
+| `sandbox/mingru_baseline/train_torch.py` | 🔧 modified | Multitask trainer; full hybrid stack (binding head + MoE + local attn + hippocampal mem + hypergrad). Two-stage support via `--init-from`/`--freeze-backbone`. Compile-stable `HybridBlock` (Identity placeholders), bf16 codebook in training, fused AdamW, cudnn.benchmark, DataLoader workers. Compile-wrapper-aware isinstance peeling for `OptimizedModule`. |
+| `sandbox/mingru_baseline/vsa_binding_head.py` | 🔧 modified | Precomputed row-normalized codebook; `to_inference(bf16)` for inference; bf16 codebook supported as a training default. |
+| `sandbox/mingru_baseline/run_h200.sh` | 🔧 modified | Two-stage launcher. Pre-flight label-range check (fails fast if data exceeds head sizes). All 5 head loss weights non-zero (rule 0.2, validity 0.1). |
+| `sandbox/mingru_baseline/colab_two_stage_validate.ipynb` | 🔧 modified | Speed knobs (`--compile`, bs=64, accum=1) for Colab Blackwell validation. |
+| `sandbox/mingru_baseline/runpod_5090_two_stage.ipynb` | ➕ new | Mid-scale validation on RunPod RTX 5090 (32GB) — exact H200 architecture (d=768, L=12) at bs=12/seq=512. Targets ~$1-1.50 per full run. |
+
+### Data pipeline
+| File | Status | Purpose |
+|---|---|---|
+| `opcode-vsa-rs/examples/emit_multitask_jsonl.rs` | 🔧 modified | Now emits `intent_id`/`intent_name` from a `verb_to_intent` 6-bucket map (inform/ask/produce/modify/evaluate/recall). Pairs with `--num-intent-classes=6` head. |
+| `sandbox/mingru_baseline/scrub_multitask.py` | ➕ new | Standalone label-range scrubber: top-K bucketing for schema/rule, opcode clamping, intent_id default injection. Mirrors what `run_h200.sh` pre-flight expects. |
+| `sandbox/mingru_baseline/gemini_classify_intents.py` | ➕ new | Verb-level intent classifier via Gemini (gemini-3.1-flash-lite-preview default). Top-N verbs → 6-class label map, applied in a second pass to upgrade the Rust emitter's coarse hand-rolled mapping. ~$0.05-0.15 per pipeline run. |
+
+### Live inference / online learning bridge
+| File | Status | Purpose |
+|---|---|---|
+| `sandbox/mingru_baseline/live_adapter.py` | ➕ new | Wraps a stage-2 checkpoint into an inference + online-learning API. Exposes `forward / online_update / write_memory / recall / generate / save / stats`. NLMS-on-`basis_B`-only plasticity, backbone always frozen at inference. |
+| `sandbox/mingru_baseline/live_session.py` | ➕ new | Keyboard REPL on top of LiveAdapter — `/teach`, `/recall`, `/write`, `/save` commands. Text-only smoke test for online learning before the full `scripts/live_brain.py` orchestrator integration. |
+| `docs/architecture/09-continuous-learning.md` | 🔧 modified | New §11 *Sandbox-trained → Live bridge* documents the relationship between LiveAdapter and the orchestrator-resident wake/sleep system. |
+
+### Promotion criteria (sandbox → registered cubemind module)
+
+Each of the above is sandbox-tier until:
+1. H200 stage-2 run completes with all 5 head accuracies above their non-trivial baselines
+2. A registered wrapper is designed (e.g. `processor/mingru_lm`) that fits the
+   orchestrator's DI contract from `cubemind/container.py`
+3. Tests covering the wrapper land in `cubemind/tests/`
