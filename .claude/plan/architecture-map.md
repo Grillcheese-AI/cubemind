@@ -172,6 +172,86 @@ only after H200 validates and a registered wrapper is designed.
 | `sandbox/mingru_baseline/live_session.py` | ➕ new | Keyboard REPL on top of LiveAdapter — `/teach`, `/recall`, `/write`, `/save` commands. Text-only smoke test for online learning before the full `scripts/live_brain.py` orchestrator integration. |
 | `docs/architecture/09-continuous-learning.md` | 🔧 modified | New §11 *Sandbox-trained → Live bridge* documents the relationship between LiveAdapter and the orchestrator-resident wake/sleep system. |
 
+### Long-context extension plan *(added 2026-04-20)*
+
+The sandbox architecture has no quadratic bottleneck, so extending context length
+is mostly a training + data problem, not an architecture redesign:
+
+- MinGRU backbone: O(N) compute, single hidden vector per layer
+- Local sliding-window attention (window=128): O(N × W) — bounded per-token cost
+- VSA binding head, MoE routing, MindForge LoRA heads: all per-token
+- Hippocampal episodic memory: O(K) per-token query (K top retrieved)
+- **No position encoding at all** — MinGRU encodes position implicitly; local attn
+  is position-agnostic within its window → no RoPE/ALiBi extrapolation problem
+
+Target: **32K-token context**, stream-inference friendly, trainable in a short
+fine-tune pass.
+
+| Phase | What | Cost (H200) |
+|---|---|---|
+| **P0** | Verify length generalization on the step-2 checkpoint — `bot.generate(..., max_new_tokens=32000)`, measure needle-in-haystack recall | $0 (inference only) |
+| **P1** | Long-context fine-tune: stage 1.5 at `--seq-len 4096` for ~1500 steps on long-doc data (PG-19 books, long OpenThoughts traces, code repos, ShareGPT multi-turn) | ~$5 |
+| **P2** | Fine-tune ladder: 4K → 16K → 32K, ~500 steps each | ~$15 |
+| **P3** | Streaming generate loop in `train_torch.generate()` + `live_adapter.forward()` — roll local-attn KV cache as fixed-size buffer, keep MinGRU state across tokens, periodic hippocampal queries | 0 (engineering only) |
+| **P4** | Bump `mem_max` from 200 → 1000-5000 for 32K-scale episodic coverage | 0 |
+| **P5** | **Port `cubemind/reasoning/combiner.py::HyperAxialAttention` to PyTorch and wire into `HybridBlock`** — see below | ~$10 (ablation run) |
+
+### HyperAxialAttention promotion *(added 2026-04-20)*
+
+`cubemind/reasoning/combiner.py:319` has `HyperAxialAttention` — an O(L) attention
+mechanism using LSH/SimHash bucketing that currently runs in pure numpy. At 32K
+context this gives **true long-range attention** (not just sliding-window + hippo
+memory). With `bucket_size=256`, 32K falls into ~128 buckets, each served by
+standard O(L²) attention within the bucket — net O(L × bucket) which is linear.
+
+Compared with the three long-range options available at 32K:
+
+| Mechanism | Complexity @ 32K | Long-range coverage |
+|---|---|---|
+| Local sliding (window=128) | O(L × 128) ≈ 4M ops | last 128 tokens only |
+| Full softmax attention | O(L²) ≈ 1B ops | full, but OOM + slow |
+| **HyperAxial (LSH)** | **O(L × bucket) ≈ 8M ops** | **full seq via similarity grouping** |
+| Hippocampal memory | O(K) per-token | sparse, episodic (≤5K stored) |
+
+The hybrid stack at 32K becomes three complementary long-range mechanisms:
+
+1. **HyperAxial every 4 layers** — semantic "find tokens like THIS query and attend" jumps
+2. **Local sliding window every 3 layers** — cheap nearby-token attention
+3. **Hippocampal memory every 4 layers** — dopamine-gated episodic recall
+
+That's arguably stronger long-range coverage than most modern LLMs — three
+distinct paths to information 30K tokens back, none of them quadratic.
+
+**Port plan (~4-6h effort):**
+
+1. **numpy → PyTorch with autograd.** Replace `np.matmul` / `np.argsort` /
+   `np.take` with `torch` equivalents. SimHash stays (bool ops on hashed vectors).
+2. **Wrap as `nn.Module`** — standard `(d_model, num_heads, bucket_size, num_projections)`
+   config + `forward(x, causal=True)`. SimHash projection matrix registered as a
+   fixed buffer (not a parameter) with per-layer deterministic seeding so gradients
+   don't depend on stochastic bucket assignment.
+3. **Add to `HybridBlock`** as a third attention option alongside `LocalCausalAttention`.
+   CLI flag: `--attn-type {local,hyperaxial,hybrid}`. Default stays `local` for
+   the existing runs.
+4. **Causal masking within buckets** — verify the sort-order preserves the
+   index→position mapping so causal masks are correct after bucketing. The numpy
+   reference has a TODO comment about this; needs PyTorch test.
+5. **Deterministic SimHash across forward calls** — matches the fixed-codebook
+   pattern from `vsa_binding_head.py`. Seed via `cfg.attn_hyperaxial_seed`.
+
+**Target ablation after port:** "windowed-only vs hyperaxial-augmented on long-doc
+QA." Paper-worthy result if hyperaxial gives +N% on needle-in-haystack at 32K.
+
+Files that will need edits:
+
+| File | Change |
+|---|---|
+| `sandbox/mingru_baseline/train_torch.py` | Import + `HybridBlock` dispatch on `cfg.attn_type` |
+| `sandbox/mingru_baseline/hyperaxial_attention.py` | ➕ new — PyTorch port of `cubemind/reasoning/combiner.py::HyperAxialAttention` |
+| `sandbox/mingru_baseline/run_h200.sh` | `--attn-type hybrid` for long-context runs |
+| `sandbox/mingru_baseline/runpod_h200_two_stage.ipynb` | Same flag |
+| `docs/architecture/05-python-orchestration.md` | Note the long-context attention path |
+
 ### Promotion criteria (sandbox → registered cubemind module)
 
 Each of the above is sandbox-tier until:
