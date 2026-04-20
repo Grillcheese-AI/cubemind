@@ -94,6 +94,44 @@ CKPT_EVERY=1000
 [[ -f "$LM_DATA_PATH"   ]] || { echo "FATAL: LM data at $LM_DATA_PATH" >&2; exit 1; }
 [[ -f "$MT_DATA_PATH"   ]] || { echo "FATAL: multitask data at $MT_DATA_PATH (run cat to combine)" >&2; exit 1; }
 
+# Validate multitask label ranges fit the head sizes — the Colab pre-flight
+# discovered the SVC+Gemini combined file has out-of-range schema/rule/opcode
+# IDs that crash CE with "t >= 0 && t < n_classes" on first batch. Run the
+# scrubber once if the ranges aren't safe.
+echo ""; echo ">>> Pre-flight: check multitask label ranges"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+"$PYTHON_BIN" - <<PY
+import json, io, sys
+limits = {"opcode_id": 55, "intent_id": 6, "schema_id": 16,
+          "rule_id": 32, "validity": 2}
+maxes = {}
+n = 0
+with io.open("$MT_DATA_PATH", "r", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        n += 1
+        try: row = json.loads(line)
+        except Exception: continue
+        for k, lim in limits.items():
+            if k in row: maxes[k] = max(maxes.get(k, 0), int(row[k]))
+ok = True
+for k, lim in limits.items():
+    seen = maxes.get(k)
+    if seen is None:
+        print(f"  WARN {k}: missing in all rows (head will get default 0)")
+    elif seen >= lim:
+        print(f"  FAIL {k}: max={seen} >= head size {lim}")
+        ok = False
+    else:
+        print(f"  OK   {k}: max={seen} < head size {lim}")
+if not ok:
+    print("\\n  → run the scrubber first:")
+    print(f"     python sandbox/mingru_baseline/scrub_multitask.py "
+          f"--input  $MT_DATA_PATH "
+          f"--output \${{MT_DATA_PATH%.jsonl}}_clean.jsonl")
+    print("     then point MT_DATA_PATH at the _clean.jsonl")
+    sys.exit(1)
+PY
+
 cd "$(dirname "$0")/../.."
 
 S1_DIR="$RESULTS_DIR/stage1_lm"
@@ -148,8 +186,8 @@ RESULTS_DIR_OVERRIDE="$S2_DIR" python -u sandbox/mingru_baseline/train_torch.py 
     --aux-opcode-loss-weight   0.4 \
     --aux-intent-loss-weight   0.2 \
     --aux-schema-loss-weight   0.2 \
-    --aux-rule-loss-weight     0.0 \
-    --aux-validity-loss-weight 0.0 \
+    --aux-rule-loss-weight     0.2 \
+    --aux-validity-loss-weight 0.1 \
     --init-from "$S1_BEST" --freeze-backbone \
     "${HYBRID_FLAGS[@]}"
 
