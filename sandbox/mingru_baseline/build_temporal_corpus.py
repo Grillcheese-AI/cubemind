@@ -98,7 +98,7 @@ def _normalize_text(s: str, max_chars: int = 4000) -> str:
     return s
 
 
-# ── NYT articles ────────────────────────────────────────────────────────────
+# ==NYT articles ────────────────────────────────────────────────────────────
 
 def emit_nyt(nyt_dir: Path, out, byte_budget: int) -> dict:
     """Walk every ``*.json`` (year/month bucket) under ``nyt_dir``, emit
@@ -160,7 +160,7 @@ def emit_nyt(nyt_dir: Path, out, byte_budget: int) -> dict:
             "n_records": n_out, "bytes_written": bytes_w}
 
 
-# ── Historical events JSONL ────────────────────────────────────────────────
+# ==Historical events JSONL ────────────────────────────────────────────────
 
 def emit_events(globs: list[str], out, byte_budget: int) -> dict:
     """Each line is a dict with at least one date-ish field and one
@@ -212,7 +212,7 @@ def emit_events(globs: list[str], out, byte_budget: int) -> dict:
             "n_records": n_out, "bytes_written": bytes_w}
 
 
-# ── Knowledge text books ───────────────────────────────────────────────────
+# ==Knowledge text books ───────────────────────────────────────────────────
 
 def emit_books(books_dir: Path, out, byte_budget: int,
                chunk_chars: int = 3000) -> dict:
@@ -262,7 +262,7 @@ def emit_books(books_dir: Path, out, byte_budget: int,
             "n_records": n_chunks, "bytes_written": bytes_w}
 
 
-# ── Driver ──────────────────────────────────────────────────────────────────
+# ==Driver ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
@@ -298,15 +298,15 @@ def main() -> None:
     summary: dict = {"sources": {}}
     with io.open(str(args.output), "wb") as out:
         if args.nyt_dir.exists():
-            print("  ── ingesting NYT archive ──")
+            print("  == ingesting NYT archive ──")
             summary["sources"]["nyt"] = emit_nyt(args.nyt_dir, out, nyt_budget)
             print(f"    done: {summary['sources']['nyt']}")
         if args.events_glob:
-            print("  ── ingesting historical events ──")
+            print("  == ingesting historical events ──")
             summary["sources"]["events"] = emit_events(args.events_glob, out, events_budget)
             print(f"    done: {summary['sources']['events']}")
         if args.books_dir.exists():
-            print("  ── ingesting knowledge books ──")
+            print("  == ingesting knowledge books ──")
             summary["sources"]["books"] = emit_books(
                 args.books_dir, out, books_budget,
                 chunk_chars=args.book_chunk_chars)
