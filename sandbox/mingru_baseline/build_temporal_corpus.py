@@ -137,6 +137,136 @@ def _extract_content_year(text: str,
     return max(candidates)
 
 
+# Subject-era extraction (B). Books frequently encode the period they
+# discuss in the title — these tags let the model distinguish between
+# the publication date (when written = register/style/lens) and the
+# subject date (what's being discussed = topics, named entities).
+#
+# Format: subj is a single year or a "YYYY-YYYY" range. Picked via
+# (1) explicit 4-digit year tokens in the title, then (2) era keyword
+# match against the table below. Title text comes from filename stem
+# minus author suffix (everything after " - " is treated as the byline).
+SUBJ_ERA_KEYWORDS: dict[str, str] = {
+    # Antiquity
+    "ancient egypt":     "-3000-30",
+    "pharaoh":           "-3000-30",
+    "ancient greece":    "-800--146",
+    "athens":            "-800--146",
+    "sparta":            "-800--146",
+    "ancient rome":      "-753-476",
+    "roman empire":      "-27-476",
+    "roman republic":    "-509--27",
+    "byzantine":         "330-1453",
+    "constantinople":    "330-1453",
+
+    # Medieval / early modern
+    "vikings":           "793-1066",
+    "viking":            "793-1066",
+    "norman":            "1066-1154",
+    "crusade":           "1095-1291",
+    "medieval":          "500-1500",
+    "middle ages":       "500-1500",
+    "renaissance":       "1400-1600",
+    "tudor":             "1485-1603",
+    "elizabethan":       "1558-1603",
+    "reformation":       "1517-1648",
+    "thirty years":      "1618-1648",  # War
+    "enlightenment":     "1685-1815",
+
+    # Conflicts (most-mentioned in this corpus)
+    "american revolution":  "1775-1783",
+    "revolutionary war":    "1775-1783",
+    "founding":             "1775-1789",   # Founding Brothers, etc.
+    "war of 1812":          "1812-1815",
+    "napoleon":             "1799-1815",
+    "civil war":            "1861-1865",   # American — most common context
+    "antebellum":           "1820-1861",
+    "reconstruction":       "1865-1877",
+    "wild west":            "1865-1895",
+    "gilded age":           "1870-1900",
+    "victorian":            "1837-1901",
+    "world war i":          "1914-1918",
+    "world war 1":          "1914-1918",
+    "world war one":        "1914-1918",
+    "great war":            "1914-1918",
+    "wwi":                  "1914-1918",
+    "russian revolution":   "1917-1923",
+    "interwar":             "1919-1939",
+    "weimar":               "1919-1933",
+    "great depression":     "1929-1939",
+    "world war ii":         "1939-1945",
+    "world war 2":          "1939-1945",
+    "world war two":        "1939-1945",
+    "wwii":                 "1939-1945",
+    "third reich":          "1933-1945",
+    "nazi":                 "1933-1945",
+    "holocaust":            "1933-1945",
+    "battle of britain":    "1940",
+    "cold war":             "1947-1991",
+    "korean war":           "1950-1953",
+    "vietnam":              "1955-1975",
+    "civil rights":         "1954-1968",
+    "gulf war":             "1990-1991",
+    "9/11":                 "2001",
+    "iraq war":             "2003-2011",
+    "afghanistan war":      "2001-2021",
+
+    # Periods / civilizations / discoveries
+    "columbus":             "1492-1506",
+    "conquistador":         "1492-1600",
+    "new world":            "1492-1607",
+    "colonial america":     "1607-1776",
+    "early america":        "1776-1815",
+    "industrial revolution": "1760-1840",
+    "atomic age":           "1945-1991",
+    "space race":           "1957-1975",
+    "internet":             "1990-2025",
+    "21st century":         "2001-2025",
+    "20th century":         "1901-2000",
+    "19th century":         "1801-1900",
+    "18th century":         "1701-1800",
+    "17th century":         "1601-1700",
+}
+
+
+# 4-digit year tokens in the title. Same range as the filename matcher
+# (1000-2029), but we accept anywhere in the title rather than only the
+# leading position. Returns ALL matches so the caller can pick (e.g.
+# "1491 / 1492 / 1493" trilogy → range).
+_TITLE_YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-2][0-9])\b")
+
+
+def _extract_title_subj(title_or_filename: str) -> str | None:
+    """Return a SUBJ tag value (single year or 'YYYY-YYYY' range) from
+    a book title. Tries (1) explicit 4-digit year(s), then (2) era
+    keyword match. None if nothing recognized."""
+    if not title_or_filename:
+        return None
+    # Strip author suffix (everything after " - ") — that's the byline,
+    # not the subject. Same for ".txt" extension.
+    title = title_or_filename
+    if " - " in title:
+        title = title.split(" - ", 1)[0]
+    title = title.replace(".txt", "").replace("_", " ").strip()
+
+    # 1. Year tokens — pick min/max if multiple, else single year.
+    years = [int(y) for y in _TITLE_YEAR_RE.findall(title)
+             if 1000 <= int(y) <= 2029]
+    if years:
+        if len(years) == 1:
+            return str(years[0])
+        return f"{min(years)}-{max(years)}"
+
+    # 2. Era keywords — match longest keyword first to avoid false
+    # positives like "WWII in Europe" matching the WWI pattern (which
+    # is a substring of WWII). Lowercase the title once.
+    title_lc = title.lower()
+    for kw in sorted(SUBJ_ERA_KEYWORDS, key=len, reverse=True):
+        if kw in title_lc:
+            return SUBJ_ERA_KEYWORDS[kw]
+    return None
+
+
 def _normalize_text(s: str, max_chars: int = 4000) -> str:
     """Collapse whitespace, strip, optionally truncate. Long passages
     truncated to ``max_chars`` to keep individual records manageable
@@ -194,7 +324,12 @@ def emit_nyt(nyt_dir: Path, out, byte_budget: int) -> dict:
             sec_tag = f" [SEC:{sec}]" if sec else ""
             head_tag = f" HEADLINE: {head}" if head else ""
             body_tag = f" BODY: {body}" if body else ""
-            record = f"[DATE:{pub_date}]{sec_tag}{head_tag}{body_tag}\n\n"
+            # NYT articles are primary sources — publication date IS the
+            # subject date. Emit both tags so the model learns the
+            # equivalence and downstream prompts work with either.
+            year_only = pub_date[:4]
+            record = (f"[PUB:{pub_date}] [SUBJ:{year_only}]"
+                      f"{sec_tag}{head_tag}{body_tag}\n\n")
 
             chunk = record.encode("utf-8")
             if bytes_w + len(chunk) > byte_budget:
@@ -253,7 +388,11 @@ def emit_events(globs: list[str], out, byte_budget: int) -> dict:
                             text = _normalize_text(v, 1500); break
                     if not text or year is None:
                         continue
-                    record = f"[DATE:{year}] HISTORICAL EVENT: {text}\n\n"
+                    # Historical events: the date IS the subject date
+                    # (when the event happened). The publication date of
+                    # the JSONL itself isn't meaningful — these are
+                    # post-hoc curated. So emit only [SUBJ:].
+                    record = f"[SUBJ:{year}] HISTORICAL EVENT: {text}\n\n"
                     chunk = record.encode("utf-8")
                     if bytes_w + len(chunk) > byte_budget:
                         return {"n_files": n_files, "n_lines_in": n_in,
@@ -271,22 +410,32 @@ def emit_events(globs: list[str], out, byte_budget: int) -> dict:
 # ==Knowledge text books ───────────────────────────────────────────────────
 
 def emit_books(books_dir: Path, out, byte_budget: int,
-               chunk_chars: int = 3000) -> dict:
+               chunk_chars: int = 3000,
+               subj_map: dict[str, str] | None = None) -> dict:
     """Walk every ``*.txt`` under ``books_dir``, split each book into
     overlap-free ``chunk_chars``-sized chunks, emit each as a separate
-    record. Books whose filename starts with a 4-digit year get a
-    ``[DATE:YYYY]`` tag (e.g. ``1066 - Andrew Bridgeford.txt``); others
-    are emitted as ``[BOOK]`` with no date — still useful as undated
-    historical context."""
+    record.
+
+    Tagging scheme (post pub/subj split):
+      * ``[PUB:YYYY]`` from filename-leading year OR content scan
+        (copyright/publication markers). Modern revisions push this
+        forward — represents the writing era.
+      * ``[SUBJ:YYYY]`` or ``[SUBJ:YYYY-YYYY]`` from:
+            (1) ``subj_map`` lookup by filename (Gemini-classified),
+            (2) title-hint extraction (4-digit years or era keywords),
+        in that priority. None if neither yields a result.
+
+    Books with neither tag emit as bare ``[BOOK]`` — still feeds the
+    corpus as undated historical context.
+    """
     files = sorted(books_dir.glob("*.txt"))
-    n_files = n_chunks = n_dated = n_dated_filename = n_dated_content = bytes_w = 0
+    n_files = n_chunks = n_pub = n_pub_fn = n_pub_ct = 0
+    n_subj = n_subj_map = n_subj_title = bytes_w = 0
     for path in files:
         n_files += 1
-        # Try filename-leading year first (rare, ~6% in this corpus); fall
-        # back to scanning the first 8 KB of book content for explicit
-        # copyright / "First published" markers.
-        year = _extract_book_year(path.name)
-        year_source = "filename" if year else None
+        # Publication date — filename leading year first, then content scan.
+        pub_year = _extract_book_year(path.name)
+        pub_source = "filename" if pub_year else None
         try:
             with io.open(str(path), "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -296,18 +445,40 @@ def emit_books(books_dir: Path, out, byte_budget: int,
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
-        if year is None:
-            year = _extract_content_year(text)
-            if year is not None:
-                year_source = "content"
+        if pub_year is None:
+            pub_year = _extract_content_year(text)
+            if pub_year is not None:
+                pub_source = "content"
+
+        # Subject era — priority is Gemini map (--subj-map) over title hints.
+        subj_era: str | None = None
+        subj_source: str | None = None
+        if subj_map is not None and path.name in subj_map:
+            subj_era = subj_map[path.name]
+            if subj_era:
+                subj_source = "map"
+        if subj_era is None:
+            subj_era = _extract_title_subj(path.name)
+            if subj_era is not None:
+                subj_source = "title"
+
         title = _normalize_text(path.stem, 200)
-        date_tag = f"[DATE:{year}] " if year else "[BOOK] "
-        if year:
-            n_dated += 1
-            if year_source == "filename":
-                n_dated_filename += 1
-            else:
-                n_dated_content += 1
+
+        # Build the tag prefix — PUB and SUBJ are independent.
+        tag_parts: list[str] = []
+        if pub_year:
+            tag_parts.append(f"[PUB:{pub_year}]")
+            n_pub += 1
+            if pub_source == "filename": n_pub_fn += 1
+            else: n_pub_ct += 1
+        if subj_era:
+            tag_parts.append(f"[SUBJ:{subj_era}]")
+            n_subj += 1
+            if subj_source == "map":   n_subj_map += 1
+            else:                       n_subj_title += 1
+        if not tag_parts:
+            tag_parts.append("[BOOK]")
+        date_tag = " ".join(tag_parts) + " "
         for i in range(0, len(text), chunk_chars):
             piece = text[i : i + chunk_chars]
             if i + chunk_chars < len(text):
@@ -316,9 +487,11 @@ def emit_books(books_dir: Path, out, byte_budget: int,
             record = f"{date_tag}TITLE: {title}\nBODY: {piece}\n\n"
             chunk = record.encode("utf-8")
             if bytes_w + len(chunk) > byte_budget:
-                return {"n_files": n_files, "n_dated": n_dated,
-                        "n_dated_filename": n_dated_filename,
-                        "n_dated_content": n_dated_content,
+                return {"n_files": n_files,
+                        "n_pub": n_pub, "n_pub_filename": n_pub_fn,
+                        "n_pub_content": n_pub_ct,
+                        "n_subj": n_subj, "n_subj_map": n_subj_map,
+                        "n_subj_title": n_subj_title,
                         "n_records": n_chunks, "bytes_written": bytes_w,
                         "stopped_at": path.name}
             out.write(chunk)
@@ -326,12 +499,154 @@ def emit_books(books_dir: Path, out, byte_budget: int,
             n_chunks += 1
         if n_files % 100 == 0:
             print(f"    books {n_files} files, {n_chunks:,} chunks, "
-                  f"{bytes_w/1e6:.1f} MB ({n_dated} dated: "
-                  f"{n_dated_filename} fn / {n_dated_content} content)",
+                  f"{bytes_w/1e6:.1f} MB (pub {n_pub}: {n_pub_fn} fn / "
+                  f"{n_pub_ct} ct, subj {n_subj}: {n_subj_map} map / "
+                  f"{n_subj_title} title)",
                   file=sys.stderr)
-    return {"n_files": n_files, "n_dated": n_dated,
-            "n_dated_filename": n_dated_filename,
-            "n_dated_content": n_dated_content,
+    return {"n_files": n_files,
+            "n_pub": n_pub, "n_pub_filename": n_pub_fn,
+            "n_pub_content": n_pub_ct,
+            "n_subj": n_subj, "n_subj_map": n_subj_map,
+            "n_subj_title": n_subj_title,
+            "n_records": n_chunks, "bytes_written": bytes_w}
+
+
+# ==Project Gutenberg (factual/) ───────────────────────────────────────────
+
+# Subject field date patterns from Library of Congress headings used in
+# Gutenberg metadata. Examples seen in the corpus:
+#   "World War, 1914-1918"
+#   "United States -- History -- Civil War, 1861-1865"
+#   "France -- History -- Revolution, 1789-1799"
+#   "Verplanck, Gulian C. (Gulian Crommelin), 1786-1870"  (biographical — author dates)
+_SUBJECT_RANGE_RE = re.compile(r"\b(1[0-9]{3}|20[0-2][0-9])\s*[-‐–—]\s*(1[0-9]{3}|20[0-2][0-9])\b")
+_SUBJECT_YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-2][0-9])\b")
+
+
+def _extract_subj_from_subjects(subjects: list) -> str | None:
+    """Subjects field is LoC-style — often contains explicit date ranges
+    or single years (e.g. "Civil War, 1861-1865"). Returns the first
+    range or the min..max of single years across all subjects."""
+    if not isinstance(subjects, list):
+        return None
+    for s in subjects:
+        if not isinstance(s, str):
+            continue
+        m = _SUBJECT_RANGE_RE.search(s)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}"
+    # Fall back: single years across all subject strings
+    years: list[int] = []
+    for s in subjects:
+        if not isinstance(s, str):
+            continue
+        for y_str in _SUBJECT_YEAR_RE.findall(s):
+            y = int(y_str)
+            if 1500 <= y <= 2029:
+                years.append(y)
+    if not years:
+        return None
+    if len(set(years)) == 1:
+        return str(years[0])
+    return f"{min(years)}-{max(years)}"
+
+
+def _extract_pub_from_authors(authors: list) -> int | None:
+    """For Gutenberg public-domain books, the author's death year is a
+    reasonable upper bound on publication date. Returns the latest
+    death_year across all authors, or birth_year + 30 as fallback."""
+    if not isinstance(authors, list):
+        return None
+    deaths: list[int] = []
+    births: list[int] = []
+    for a in authors:
+        if not isinstance(a, dict):
+            continue
+        d = a.get("death_year")
+        if isinstance(d, int) and 1500 <= d <= 2029:
+            deaths.append(d)
+        b = a.get("birth_year")
+        if isinstance(b, int) and 1500 <= b <= 2029:
+            births.append(b)
+    if deaths:
+        return max(deaths)
+    if births:
+        # Mid-career estimate when death is unknown (still-living
+        # author's birth + 30y rule of thumb).
+        return max(births) + 30
+    return None
+
+
+def emit_factual(factual_dir: Path, out, byte_budget: int,
+                 chunk_chars: int = 3000) -> dict:
+    """Walk every ``*_metadata.json`` under ``factual_dir``, pair with
+    its sibling ``<id>.txt``, extract PUB (author dates) + SUBJ
+    (subjects field LoC dates), chunk the text, and emit records.
+
+    Returns counts with the same shape as ``emit_books`` so the summary
+    JSON has consistent fields across both book sources.
+    """
+    meta_files = sorted(factual_dir.glob("*_metadata.json"))
+    n_files = n_chunks = n_pub = n_subj = bytes_w = 0
+    for meta_path in meta_files:
+        n_files += 1
+        text_path = meta_path.with_name(meta_path.name.replace("_metadata.json", ".txt"))
+        if not text_path.exists():
+            continue
+        try:
+            with io.open(str(meta_path), "r", encoding="utf-8", errors="replace") as f:
+                meta = json.load(f)
+        except Exception as e:
+            print(f"  skip factual meta {meta_path.name}: {e}", file=sys.stderr)
+            continue
+        try:
+            with io.open(str(text_path), "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except Exception as e:
+            print(f"  skip factual text {text_path.name}: {e}", file=sys.stderr)
+            continue
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
+            continue
+
+        title = _normalize_text(meta.get("title", ""), 200)
+        pub_year = _extract_pub_from_authors(meta.get("authors", []))
+        subj_era = _extract_subj_from_subjects(meta.get("subjects", []))
+        # If no SUBJ from LoC subjects, try title-hint extraction
+        # (catches era keywords like "Civil War" in the title itself).
+        if subj_era is None:
+            subj_era = _extract_title_subj(title)
+
+        tag_parts: list[str] = []
+        if pub_year:
+            tag_parts.append(f"[PUB:{pub_year}]")
+            n_pub += 1
+        if subj_era:
+            tag_parts.append(f"[SUBJ:{subj_era}]")
+            n_subj += 1
+        if not tag_parts:
+            tag_parts.append("[BOOK]")
+        date_tag = " ".join(tag_parts) + " "
+
+        for i in range(0, len(text), chunk_chars):
+            piece = text[i : i + chunk_chars]
+            if i + chunk_chars < len(text):
+                piece = piece.rsplit(" ", 1)[0]
+            record = f"{date_tag}TITLE: {title}\nBODY: {piece}\n\n"
+            chunk = record.encode("utf-8")
+            if bytes_w + len(chunk) > byte_budget:
+                return {"n_files": n_files, "n_pub": n_pub,
+                        "n_subj": n_subj, "n_records": n_chunks,
+                        "bytes_written": bytes_w,
+                        "stopped_at": meta_path.name}
+            out.write(chunk)
+            bytes_w += len(chunk)
+            n_chunks += 1
+        if n_files % 200 == 0:
+            print(f"    factual {n_files} files, {n_chunks:,} chunks, "
+                  f"{bytes_w/1e6:.1f} MB ({n_pub} pub / {n_subj} subj)",
+                  file=sys.stderr)
+    return {"n_files": n_files, "n_pub": n_pub, "n_subj": n_subj,
             "n_records": n_chunks, "bytes_written": bytes_w}
 
 
@@ -343,47 +658,72 @@ def main() -> None:
     ap.add_argument("--events-glob", action="append", default=[],
                     help="JSONL glob; can be passed multiple times")
     ap.add_argument("--books-dir",   type=Path, required=True)
+    ap.add_argument("--factual-dir", type=Path, default=None,
+                    help="Project Gutenberg-style factual/ dir with paired "
+                         "<id>.txt + <id>_metadata.json files")
+    ap.add_argument("--subj-map",    type=Path, default=None,
+                    help="Optional JSON map {filename: subject_era_string} "
+                         "from a Gemini classifier (see "
+                         "classify_book_subjects.py). Takes priority over "
+                         "title-hint extraction for books in the map.")
     ap.add_argument("--output",      type=Path, required=True)
-    ap.add_argument("--max-mb",      type=float, default=4096.0,
-                    help="Total output size cap in MB (default 4 GB)")
-    ap.add_argument("--nyt-frac",    type=float, default=0.50)
-    ap.add_argument("--events-frac", type=float, default=0.10)
-    ap.add_argument("--books-frac",  type=float, default=0.40)
+    ap.add_argument("--max-mb",      type=float, default=6144.0,
+                    help="Total output size cap in MB (default 6 GB to "
+                         "fit all four sources)")
+    ap.add_argument("--nyt-frac",     type=float, default=0.40)
+    ap.add_argument("--events-frac",  type=float, default=0.05)
+    ap.add_argument("--books-frac",   type=float, default=0.30)
+    ap.add_argument("--factual-frac", type=float, default=0.25)
     ap.add_argument("--book-chunk-chars", type=int, default=3000)
     args = ap.parse_args()
 
-    s = args.nyt_frac + args.events_frac + args.books_frac
+    s = args.nyt_frac + args.events_frac + args.books_frac + args.factual_frac
     if abs(s - 1.0) > 0.01:
         print(f"  WARN: source fractions sum to {s:.2f}, not 1.0", file=sys.stderr)
     total_bytes = int(args.max_mb * 1024 * 1024)
-    nyt_budget    = int(total_bytes * args.nyt_frac)
-    events_budget = int(total_bytes * args.events_frac)
-    books_budget  = int(total_bytes * args.books_frac)
+    nyt_budget     = int(total_bytes * args.nyt_frac)
+    events_budget  = int(total_bytes * args.events_frac)
+    books_budget   = int(total_bytes * args.books_frac)
+    factual_budget = int(total_bytes * args.factual_frac)
+
+    # Optional Gemini subj_map for books
+    subj_map: dict[str, str] | None = None
+    if args.subj_map and args.subj_map.exists():
+        subj_map = json.loads(args.subj_map.read_text(encoding="utf-8"))
+        print(f"  loaded subj_map: {len(subj_map):,} entries from {args.subj_map}")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     print(f"  output:   {args.output}")
     print(f"  budget:   {args.max_mb:.0f} MB total")
-    print(f"    NYT:    {nyt_budget/1e6:.0f} MB ({args.nyt_frac*100:.0f}%)")
-    print(f"    events: {events_budget/1e6:.0f} MB ({args.events_frac*100:.0f}%)")
-    print(f"    books:  {books_budget/1e6:.0f} MB ({args.books_frac*100:.0f}%)")
+    print(f"    NYT:     {nyt_budget/1e6:.0f} MB ({args.nyt_frac*100:.0f}%)")
+    print(f"    events:  {events_budget/1e6:.0f} MB ({args.events_frac*100:.0f}%)")
+    print(f"    books:   {books_budget/1e6:.0f} MB ({args.books_frac*100:.0f}%)")
+    print(f"    factual: {factual_budget/1e6:.0f} MB ({args.factual_frac*100:.0f}%)")
     print()
 
     summary: dict = {"sources": {}}
     with io.open(str(args.output), "wb") as out:
         if args.nyt_dir.exists():
-            print("  == ingesting NYT archive ──")
+            print("  == ingesting NYT archive ==")
             summary["sources"]["nyt"] = emit_nyt(args.nyt_dir, out, nyt_budget)
             print(f"    done: {summary['sources']['nyt']}")
         if args.events_glob:
-            print("  == ingesting historical events ──")
+            print("  == ingesting historical events ==")
             summary["sources"]["events"] = emit_events(args.events_glob, out, events_budget)
             print(f"    done: {summary['sources']['events']}")
         if args.books_dir.exists():
-            print("  == ingesting knowledge books ──")
+            print("  == ingesting knowledge books ==")
             summary["sources"]["books"] = emit_books(
                 args.books_dir, out, books_budget,
-                chunk_chars=args.book_chunk_chars)
+                chunk_chars=args.book_chunk_chars,
+                subj_map=subj_map)
             print(f"    done: {summary['sources']['books']}")
+        if args.factual_dir is not None and args.factual_dir.exists():
+            print("  == ingesting Project Gutenberg (factual/) ==")
+            summary["sources"]["factual"] = emit_factual(
+                args.factual_dir, out, factual_budget,
+                chunk_chars=args.book_chunk_chars)
+            print(f"    done: {summary['sources']['factual']}")
 
     summary["output"] = str(args.output)
     summary["total_bytes"] = args.output.stat().st_size
