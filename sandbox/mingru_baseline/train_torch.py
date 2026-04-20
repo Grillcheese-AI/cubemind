@@ -791,29 +791,59 @@ class RMSNorm(nn.Module):
 def prefix_scan_causal(x: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
     """Causal linear-RNN scan: ``h_t = a_t · h_{t-1} + x_t``.
 
-    Sequential time loop — simple and numerically stable at any seq_len
-    in any dtype (bf16, fp16, fp32). Each step is a cheap ``(B, D)``
-    multiply-add; kernel launch overhead dominates but stays under a ms
-    per layer on a modern GPU at seq=256.
+    Heinsen 2023 parallel associative scan in log-domain with sign split.
+    Computes the same recurrence as the previous Python ``for t in range(S)``
+    loop, but in O(log T) GPU depth (``logcumsumexp``) instead of O(T)
+    sequential Python+CUDA round-trips. Crucial for eager-mode performance:
+    at seq=1024 with L=12 layers the naive loop incurs ~12K sequential
+    kernel launches per forward pass, dropping H200 throughput to ~1K tok/s.
 
-    The parallel log-space version (grilly shader / earlier revision
-    here) is faster but underflows when the cumulative sum of ``log(a)``
-    passes the dtype's min exponent. For ``a ∈ [0.05, 0.95]``,
-    ``log(a) ≥ -3``, so at seq=256 the worst-case cumulative log can hit
-    -768 — ``exp(-768) = 0`` in both bf16 and fp32, producing a division
-    by zero and NaN loss within the first step.
+    Math (sketch):
+        Let ``a*_t = Σ_{j=1..t} log(a_j)`` (cumulative log decay).
+        Then ``h_t = exp(a*_t) · Σ_{k=0..t} x_k · exp(-a*_k)``.
+        Splitting ``x = x_pos - x_neg`` (each ≥ 0) and using ``logcumsumexp``
+        keeps the running ``Σ exp(...)`` stable in its max-shifted form —
+        no underflow even when ``a*`` reaches large negative values.
 
-    A proper parallel associative scan (Heinsen 2023 / Chen 2024) can
-    restore the O(log T) depth while staying numerically stable — wiring
-    that in is a Phase 1.5+ follow-up.
+    Numerical stability: upcasts to fp32 inside the scan and downcasts on
+    return so bf16/fp16 callers don't lose precision. ``a`` is clamped to
+    ``[1e-8, ∞)`` to keep ``log(a)`` finite (the upstream ``proj_d`` head
+    feeds ``a = sigmoid(...)`` which is already in (0, 1)).
+
+    Backward is fully autograd-supported: ``logcumsumexp``, ``exp``, and
+    ``cumsum`` all have analytic gradients in PyTorch.
+
+    Equivalent to (and validated against) the previous reference loop:
+        h = torch.zeros(B, D, ...); out = torch.empty_like(x)
+        for t in range(S):
+            h = a[:, t] * h + x[:, t]
+            out[:, t] = h
     """
-    B, S, D = x.shape
-    h = torch.zeros(B, D, dtype=x.dtype, device=x.device)
-    out = torch.empty_like(x)
-    for t in range(S):
-        h = a[:, t] * h + x[:, t]
-        out[:, t] = h
-    return out
+    orig_dtype = x.dtype
+    x32 = x.float()
+    a32 = a.float().clamp(min=1e-8)
+
+    log_a = a32.log()                     # (B, S, D), all ≤ 0
+    a_star = log_a.cumsum(dim=1)          # (B, S, D), cumulative log decay
+
+    # Sign-split: each parallel scan runs on a non-negative input so we
+    # can take its log cleanly. Use ``clamp + log`` instead of
+    # ``where(x > 0, log(x), -inf)`` because the where pattern propagates
+    # ``log(0) = -inf`` through the unused branch during backward,
+    # producing non-finite ``grad a``. The ``+ eps`` trick keeps
+    # ``log_x`` finite everywhere; ``exp(log(eps)) ≈ 1e-30`` is a
+    # negligible spurious contribution to the running ``logcumsumexp``.
+    EPS = 1e-30
+    x_pos = x32.clamp(min=0)
+    x_neg = (-x32).clamp(min=0)
+    log_x_pos = (x_pos + EPS).log()
+    log_x_neg = (x_neg + EPS).log()
+
+    log_h_pos = a_star + (log_x_pos - a_star).logcumsumexp(dim=1)
+    log_h_neg = a_star + (log_x_neg - a_star).logcumsumexp(dim=1)
+
+    out = log_h_pos.exp() - log_h_neg.exp()
+    return out.to(orig_dtype)
 
 
 class MinGRULayer(nn.Module):
