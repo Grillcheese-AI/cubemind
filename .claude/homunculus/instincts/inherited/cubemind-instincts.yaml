@@ -1,0 +1,637 @@
+# Instincts generated from https://github.com/Grillcheese-AI/cubemind
+# Generated: 2026-04-20T20:26:41.952Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: cubemind-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Commit Length
+
+## Action
+
+Keep commit messages concise (~49 characters)
+
+## Evidence
+
+- Average commit message length: 49 chars
+- Based on 98 commits
+
+---
+id: cubemind-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Naming Files
+
+## Action
+
+Use snake_case naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: snake_case
+
+---
+id: cubemind-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Export Style
+
+## Action
+
+Prefer default exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: default
+
+---
+id: cubemind-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: cubemind-test-naming
+trigger: "when creating a test file"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Test Naming
+
+## Action
+
+Name test files using the pattern: *.test.ts
+
+## Evidence
+
+- File pattern: *.test.ts
+- Consistent across test files
+
+---
+id: cubemind-test-types
+trigger: "when planning tests for a feature"
+confidence: 0.7
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Test Types
+
+## Action
+
+Write unit, integration tests to match project standards
+
+## Evidence
+
+- Test types detected: unit, integration
+- Coverage config: no
+
+---
+id: cubemind-workflow-feature-development
+trigger: "when implementing a new feature"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Feature Development
+
+## Action
+
+Follow the feature-development workflow:
+1. Add feature implementation
+2. Add tests for feature
+3. Update documentation
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~9x per month
+- Files: **/*.test.*, **/api/**
+
+---
+id: cubemind-workflow-refactoring
+trigger: "when refactoring code"
+confidence: 0.7
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Refactoring
+
+## Action
+
+Follow the refactoring workflow:
+1. Ensure tests pass before refactor
+2. Refactor code structure
+3. Verify tests still pass
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~4x per month
+- Files: src/**/*
+
+---
+id: cubemind-workflow-add-or-extend-vsa-vm-opcodes-with-tdd
+trigger: "when doing add or extend vsa vm opcodes with tdd"
+confidence: 0.75
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Add Or Extend Vsa Vm Opcodes With Tdd
+
+## Action
+
+Follow the add-or-extend-vsa-vm-opcodes-with-tdd workflow:
+1. Edit or extend 'cubemind/reasoning/vm.py' to implement new opcode(s) and their logic.
+2. Update or add corresponding TDD tests in 'tests/test_vm.py' (and/or 'tests/test_vm_discover.py', 'tests/test_vm_raven.py' for specialized behaviors).
+3. Update opcode documentation and/or architecture docs (e.g., 'cubemind/reasoning/vm.md', '.claude/plan/architecture-map.md') if needed.
+4. Commit both implementation and tests together.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~5x per month
+- Files: cubemind/reasoning/vm.py, tests/test_vm.py, tests/test_vm_discover.py
+
+---
+id: cubemind-workflow-tdd-feature-development-cycle
+trigger: "when doing tdd feature development cycle"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Tdd Feature Development Cycle
+
+## Action
+
+Follow the tdd-feature-development-cycle workflow:
+1. Implement new feature/module in the appropriate 'cubemind/' subdirectory.
+2. Write or update corresponding tests in 'tests/' (e.g., 'test_vm.py', 'test_mindforge_vm.py', etc.).
+3. Iterate until all tests pass.
+4. Commit both implementation and tests in the same commit.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~10x per month
+- Files: cubemind/**/*.py, tests/**/*.py
+
+---
+id: cubemind-workflow-training-pipeline-iteration-and-fix
+trigger: "when doing training pipeline iteration and fix"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Training Pipeline Iteration And Fix
+
+## Action
+
+Follow the training-pipeline-iteration-and-fix workflow:
+1. Edit the relevant training script in 'cubemind/training/' (e.g., 'vsa_lm.py', 'harrier_pretrain.py').
+2. Adjust loss functions, optimizer logic, or data pipeline as needed.
+3. Test the new training logic (often with real runs, sometimes with tests).
+4. Commit the changes, often with a detailed message about the fix or improvement.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~10x per month
+- Files: cubemind/training/vsa_lm.py, cubemind/training/harrier_pretrain.py
+
+---
+id: cubemind-workflow-cli-wiring-and-argument-passing
+trigger: "when doing cli wiring and argument passing"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Cli Wiring And Argument Passing
+
+## Action
+
+Follow the cli-wiring-and-argument-passing workflow:
+1. Edit 'cubemind/__main__.py' to add or update CLI commands or argument parsing.
+2. Wire the CLI arguments to the appropriate training/inference scripts (e.g., 'cubemind/training/vsa_lm.py').
+3. Test CLI usage to ensure new arguments are respected.
+4. Commit changes.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: cubemind/__main__.py, cubemind/training/vsa_lm.py, cubemind/training/harrier_pretrain.py
+
+---
+id: cubemind-workflow-documentation-and-architecture-update
+trigger: "when doing documentation and architecture update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/Grillcheese-AI/cubemind
+---
+
+# Cubemind Workflow Documentation And Architecture Update
+
+## Action
+
+Follow the documentation-and-architecture-update workflow:
+1. Edit or create documentation files (e.g., 'cubemind/reasoning/vm.md', '.claude/plan/architecture-map.md', 'CLAUDE.md').
+2. Summarize new features, opcodes, integration maps, or design decisions.
+3. Commit documentation updates, sometimes alongside code changes.
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: cubemind/reasoning/vm.md, .claude/plan/architecture-map.md, CLAUDE.md
+
+---
+id: cubemind-naming-files-snake-case
+trigger: "When creating or renaming a Python file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Naming Files Snake Case
+
+## Action
+
+Use snake_case for the filename
+
+## Evidence
+
+- Pattern in namingConventions.files
+- Files in cubemind/ use snake_case
+
+---
+id: cubemind-naming-functions-camelCase
+trigger: "When defining a function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Naming Functions CamelCase
+
+## Action
+
+Use camelCase for the function name
+
+## Evidence
+
+- Pattern in namingConventions.functions
+- Functions in codebase use camelCase
+
+---
+id: cubemind-naming-classes-pascal-case
+trigger: "When defining a class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Naming Classes Pascal Case
+
+## Action
+
+Use PascalCase for the class name
+
+## Evidence
+
+- Pattern in namingConventions.classes
+- Classes in codebase use PascalCase
+
+---
+id: cubemind-naming-constants-screaming-snake-case
+trigger: "When defining a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Naming Constants Screaming Snake Case
+
+## Action
+
+Use SCREAMING_SNAKE_CASE for the constant name
+
+## Evidence
+
+- Pattern in namingConventions.constants
+- Constants in codebase use SCREAMING_SNAKE_CASE
+
+---
+id: cubemind-imports-absolute
+trigger: "When importing modules in Python"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Imports Absolute
+
+## Action
+
+Use absolute import paths
+
+## Evidence
+
+- importStyle: absolute
+- Imports in cubemind/ use absolute paths
+
+---
+id: cubemind-exports-default
+trigger: "When exporting modules or objects"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Exports Default
+
+## Action
+
+Use default export style
+
+## Evidence
+
+- exportStyle: default
+
+---
+id: cubemind-test-location-separate
+trigger: "When adding or updating tests"
+confidence: 0.9
+domain: testing
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Test Location Separate
+
+## Action
+
+Place test files in the separate 'tests/' directory
+
+## Evidence
+
+- testLocation: separate
+- tests/ folder present
+
+---
+id: cubemind-test-pattern-py
+trigger: "When naming a test file"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Test Pattern Py
+
+## Action
+
+Use the pattern '*.test.ts' for TypeScript or '*.py' for Python tests
+
+## Evidence
+
+- testing.filePattern: *.test.ts
+- tests/**/*.py files
+
+---
+id: cubemind-test-types-unit-integration
+trigger: "When writing tests"
+confidence: 0.85
+domain: testing
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Test Types Unit Integration
+
+## Action
+
+Write both unit and integration tests as appropriate
+
+## Evidence
+
+- testTypes: unit, integration
+- tests/test_vm.py and others
+
+---
+id: cubemind-tdd-feature-cycle
+trigger: "When implementing a new feature or module"
+confidence: 0.95
+domain: workflow
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Tdd Feature Cycle
+
+## Action
+
+Develop code and corresponding tests in lockstep, committing both together after all tests pass
+
+## Evidence
+
+- tdd-feature-development-cycle workflow
+- Commits show code and tests together
+
+---
+id: cubemind-add-vm-opcode-tdd
+trigger: "When extending VSA-VM with new opcodes"
+confidence: 0.98
+domain: workflow
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Add Vm Opcode Tdd
+
+## Action
+
+Implement opcode logic in 'cubemind/reasoning/vm.py', add/update TDD tests, update documentation if needed, and commit all together
+
+## Evidence
+
+- add-or-extend-vsa-vm-opcodes-with-tdd workflow
+- Commits and files in workflow example
+
+---
+id: cubemind-training-pipeline-iteration
+trigger: "When improving or fixing training pipelines"
+confidence: 0.97
+domain: workflow
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Training Pipeline Iteration
+
+## Action
+
+Edit relevant training script, adjust loss/optimizer/data pipeline, test changes, and commit with detailed message
+
+## Evidence
+
+- training-pipeline-iteration-and-fix workflow
+- Commits to cubemind/training/vsa_lm.py and harrier_pretrain.py
+
+---
+id: cubemind-cli-wiring
+trigger: "When adding or updating CLI commands or arguments"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Cli Wiring
+
+## Action
+
+Edit 'cubemind/__main__.py', wire arguments to backend scripts, test CLI usage, and commit changes
+
+## Evidence
+
+- cli-wiring-and-argument-passing workflow
+- Commits to cubemind/__main__.py and training scripts
+
+---
+id: cubemind-documentation-update
+trigger: "When new features, opcodes, or architecture changes are introduced"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Documentation Update
+
+## Action
+
+Update documentation files (e.g., 'cubemind/reasoning/vm.md', '.claude/plan/architecture-map.md', 'CLAUDE.md') and commit updates
+
+## Evidence
+
+- documentation-and-architecture-update workflow
+- Commits to documentation files
+
+---
+id: cubemind-commit-prefixes
+trigger: "When writing a commit message"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Commit Prefixes
+
+## Action
+
+Start the commit message with a relevant prefix (e.g., 'fix', 'build_temporal_corpus', 'Refactor', 'Add')
+
+## Evidence
+
+- commits.prefixes: fix, build_temporal_corpus
+- Examples: 'Fix: ...', 'Refactor: ...', 'Add ...'
+
+---
+id: cubemind-commit-length
+trigger: "When writing a commit message"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Commit Length
+
+## Action
+
+Keep the commit message concise, around 49 characters on average
+
+## Evidence
+
+- commits.averageLength: 49
+- Commit examples
+
+---
+id: cubemind-commit-atomic
+trigger: "When committing changes"
+confidence: 0.9
+domain: git
+source: repo-analysis
+source_repo: Grillcheese-AI/cubemind
+---
+
+# Cubemind Commit Atomic
+
+## Action
+
+Group related changes (e.g., implementation and tests) into a single atomic commit
+
+## Evidence
+
+- Workflow commitSequence patterns
+- Commits show code and tests together
+
