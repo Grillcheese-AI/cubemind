@@ -1,38 +1,104 @@
+# Archive (local reference, not tracked)
+# cubemind/_archive/
+
+# Python
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
 dist/
 build/
 .venv/
 .pytest_cache/
-*.egg
 .ruff_cache/
-cubemind_pipeline.html
-/tonote
+.hypothesis/
+
+# IDE / tools
 .claude/settings.local.json
-/docs/project_knowledge
+.claude/elephant-coder.local.md
+.claude/scheduled_tasks.lock
+.superpowers/
+
+# Secrets
+.env
+
+# Data (large, local only)
 /data
 *.npz
-/docs/papers
-*.gguf
 *.npy
+*.gguf
+*.grl
+
+# Docs (embargoed until NeurIPS 2026 submission)
+/docs
+
+# Specific docs that are NOT embargoed and should be tracked.
+# Add new entries here individually — never add "!/docs/papers/" or
+# similar broad un-ignores, as that would expose the embargoed
+# cubemind_iravenx_neurips2026.{md,tex,pdf} files.
+#
+# To un-ignore a file inside docs/, you need to un-ignore each parent
+# directory first, then re-ignore everything inside it, then explicitly
+# allow the file. Pattern:
+#   !/docs/
+#   /docs/*
+#   !/docs/papers/
+#   /docs/papers/*
+#   !/docs/papers/MY_FILE.md
+#
+# Below is the minimal set for the LM training paper:
+!/docs/
+/docs/*
+!/docs/papers/
+/docs/papers/*
+!/docs/papers/cubemind_lm_h200_training.md
+
+# Non-core directories (local experiments, not part of package)
+
+/notebooks
+/scripts
+/cloned
+/tonote
+/configs
+/mowm
+/cubemind_cloud
+/gguf
+
+# Root stray files (one-off scripts, not part of package)
+main.py
+main_v3.py
+refine_expert.py
+checkcam.py
+checkllama.py
+smoketest.py
+test.py
+cubemind_pipeline.html
 ihl_expert_chunks.json
 ihl_purified_chunks.json
 vcpkg-configuration.json
 vcpkg.json
-docs/Medium_Article.md
-docs/distil_to_moqe.ipynb
-/.hypothesis
-checkllama.py
-/cloned
-.claude/elephant-coder.local.md
-.claude/elephant-coder.local.md
-test.py
-smoketest.py
-notebooks/vsa_lm_v3_resume.py
-notebooks/vsa_lm_colab.ipynb
-notebooks/vsa_lm_v3b_resume.py
-notebooks/vsa_lm_colab.ipynb
-notebooks/vsa_lm_v3c_warmrestart.py
-vsa_lm_v3c_grilly_best.grl
-*.grl
+
+# Webapp
+webapp/node_modules/
+webapp/.next/
+
+# RAVEN/I-RAVEN benchmark files — embargoed until NeurIPS 2026 submission
+benchmarks/iraven*.py
+cubemind/perception/raven_renderer.py
+tests/test_raven_world_manager.py
+
+# Images / one-off assets
+*.png
+llama-config.cmake
+
+# C++ build artifacts
+cubemind/cpp/build/
+*.so
+*.pyd
+*.dylib
+CLAUDE.md
+logs/distill_500.log
+logs/distill_5000.log
+CLAUDE.md
+/sandbox/mingru_baseline
+/.claude

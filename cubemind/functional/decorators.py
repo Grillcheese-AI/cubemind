@@ -273,7 +273,7 @@ def layer(layer_type: str, **kwargs) -> Any:
         "cubemind.brain.gif_neuron", "cubemind.brain.synapsis",
         "cubemind.brain.snn_ffn", "cubemind.brain.addition_linear",
         "cubemind.brain.neurogenesis", "cubemind.brain.spike_vsa_bridge",
-        "cubemind.brain.identity", "cubemind.memory.formation",
+        "cubemind.memory.formation",
         "cubemind.execution.mindforge", "cubemind.execution.moqe",
     ]
     for mod_path in _modules:

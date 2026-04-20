@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from cubemind.ops import BlockCodes
-from cubemind.experimental.vs_graph import (
+from cubemind.reasoning.vs_graph import (
     spike_diffusion,
     associative_message_passing,
 )

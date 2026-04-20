@@ -14,9 +14,11 @@ from typing import Any
 
 import numpy as np
 
+from cubemind.core.registry import register
 from cubemind.ops import BlockCodes
 
 
+@register("executor", "decoder")
 class Decoder:
     """Block-code output decoder.
 

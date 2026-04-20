@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # GPU bridge
 _bridge = None
 try:
@@ -52,6 +54,7 @@ class Episode:
 # -- Hippocampal Memory --------------------------------------------------------
 
 
+@register("memory", "hippocampal_legacy")
 class HippocampalMemory:
     """Hippocampal memory with DG sparse encoding and CA3 pattern completion.
 

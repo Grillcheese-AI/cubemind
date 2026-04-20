@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 from cubemind.ops import BlockCodes
+from cubemind.core.registry import register
 
 
 # -- Utilities -----------------------------------------------------------------
@@ -41,6 +42,7 @@ def _logsumexp(x: np.ndarray, axis: int = -1, keepdims: bool = False) -> float |
 # -- HMMRule -------------------------------------------------------------------
 
 
+@register("detector", "hmm_rule")
 class HMMRule:
     """A single HMM reasoning rule grounded in block-code codebook states.
 

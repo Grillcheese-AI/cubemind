@@ -16,7 +16,7 @@ def main(max_stories=0, vocab_size=8192, output_dir="sandbox/vsa_lm/data"):
     from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 
     logger.info("Loading TinyStories (max={})...", max_stories or "all")
-    ds = load_dataset("roneneldan/TinyStories", split="train")
+    ds = load_dataset("roneneldan/TinyStories", split="train", data_dir="data")  # local copy for speed
 
     texts = []
     for i, item in enumerate(ds):

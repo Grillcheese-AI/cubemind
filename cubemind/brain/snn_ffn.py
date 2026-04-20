@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 from cubemind.brain.gif_neuron import GIFNeuron
 from cubemind.brain.synapsis import Synapsis
 
@@ -119,6 +121,7 @@ class SNNFFN:
         return output.astype(np.float32)
 
 
+@register("processor", "hybrid_ffn")
 class HybridFFN:
     """Hybrid FFN blending standard MLP with SNN pathway.
 

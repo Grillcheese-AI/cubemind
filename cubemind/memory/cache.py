@@ -24,6 +24,8 @@ from pathlib import Path
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 try:
     import faiss
 
@@ -78,6 +80,7 @@ def _hamming_distance_matrix(
 # ------------------------------------------------------------------
 
 
+@register("memory", "vsa_cache")
 class VSACache:
     """Hash table of VSA hypervectors with binary Hamming lookup.
 

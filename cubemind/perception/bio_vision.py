@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 
 class OpponentColorNeurons:
     """V1 opponent-color processing channels.
@@ -197,6 +199,7 @@ class LuminanceNeurons:
         return np.stack([steady, transient], axis=-1).ravel().astype(np.float32)
 
 
+@register("encoder", "bio_vision")
 class BioVisionEncoder:
     """Complete biologically-grounded visual feature extractor.
 

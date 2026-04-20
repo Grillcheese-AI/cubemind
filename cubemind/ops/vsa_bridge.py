@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # GPU bridge (grilly)
 _bridge = None
 try:
@@ -153,6 +155,7 @@ def hamming_similarity(a: np.ndarray, b: np.ndarray, dim: int) -> float:
     return 1.0 - hamming_dist / float(dim)
 
 
+@register("ops", "vsa_bridge")
 class ContinuousItemMemory:
     """Over-provisioned VSA item memory with instant learn/retrieve.
 

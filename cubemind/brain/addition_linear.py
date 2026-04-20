@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # grilly GPU bridge
 _bridge = None
 try:
@@ -28,6 +30,7 @@ except Exception:
     pass
 
 
+@register("processor", "addition_linear")
 class AdditionLinear:
     """Multiplication-free linear layer using L1 distance.
 

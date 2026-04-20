@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from cubemind.core import EPS, K_BLOCKS, L_BLOCK
+from cubemind.core.registry import register
 
 # -- GPU bridge (grilly GPU ops) -----------------------------------------------
 
@@ -50,6 +51,7 @@ def gelu(x: np.ndarray) -> np.ndarray:
 # -- HYLA ----------------------------------------------------------------------
 
 
+@register("executor", "hyla")
 class HYLA:
     """Hypernetwork Linear Attention module.
 

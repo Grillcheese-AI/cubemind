@@ -23,6 +23,8 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 
 class MaturationStage(Enum):
     """Neuron lifecycle stages."""
@@ -42,6 +44,7 @@ class NeuronState:
     merit: float = 1.0
 
 
+@register("modulator", "neurogenesis")
 class NeurogenesisController:
     """Dynamic network growth and pruning controller.
 

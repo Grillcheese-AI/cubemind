@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # ── grilly imports (GPU ops) ─────────────────────────────────────────────────
 
 _grilly_cells = None
@@ -50,6 +52,7 @@ class EpisodicMemory:
     strength: float = 1.0
 
 
+@register("memory", "hippocampal")
 class HippocampalFormation:
     """Episodic memory with place, grid, and time cells.
 

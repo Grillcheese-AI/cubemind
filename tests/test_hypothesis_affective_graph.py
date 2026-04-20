@@ -13,7 +13,7 @@ All tests are self-contained — no modifications to existing code.
 import numpy as np
 import pytest
 
-from cubemind.experimental.vs_graph import (
+from cubemind.reasoning.vs_graph import (
     associative_message_passing,
     VSGraph,
 )

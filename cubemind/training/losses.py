@@ -47,16 +47,23 @@ def _maybe_one_hot(labels: np.ndarray, depth: int) -> np.ndarray:
 # -- Standard losses -----------------------------------------------------------
 
 
-def mse_loss(predictions: np.ndarray, targets: np.ndarray) -> float:
+def mse_loss(predictions: np.ndarray, targets: np.ndarray, device=None) -> float:
     """Mean squared error loss.
 
     Args:
         predictions: Predicted values, any shape.
         targets: Target values, same shape as predictions.
+        device: Optional grilly_core.Device for GPU acceleration.
 
     Returns:
         Scalar MSE loss.
     """
+    if device is not None:
+        import grilly_core
+        p = np.ascontiguousarray(predictions, dtype=np.float32).ravel()
+        t = np.ascontiguousarray(targets, dtype=np.float32).ravel()
+        return float(np.mean(grilly_core.mse_loss(device, p, t).numpy()))
+
     diff = np.asarray(predictions, dtype=np.float32) - np.asarray(targets, dtype=np.float32)
     return float(np.mean(diff ** 2))
 
@@ -65,6 +72,7 @@ def cross_entropy_loss(
     logits: np.ndarray,
     labels: np.ndarray,
     from_logits: bool = True,
+    device=None,
 ) -> float:
     """Cross-entropy loss (mean over batch).
 
@@ -72,10 +80,17 @@ def cross_entropy_loss(
         logits: Predictions (n, c) -- logits or probabilities.
         labels: Integer labels (n,) or one-hot (n, c).
         from_logits: If True, logits are raw logits; otherwise probabilities.
+        device: Optional grilly_core.Device for GPU acceleration.
 
     Returns:
         Scalar cross-entropy loss.
     """
+    if device is not None and from_logits and labels.ndim == 1:
+        import grilly_core
+        l = np.ascontiguousarray(logits, dtype=np.float32)
+        t = np.ascontiguousarray(labels, dtype=np.uint32).ravel()
+        return float(np.mean(grilly_core.cross_entropy_loss(device, l, t, 0.0).numpy()))
+
     logits = np.asarray(logits, dtype=np.float32)
     labels = np.asarray(labels)
     num_classes = logits.shape[1]
@@ -93,16 +108,27 @@ def cross_entropy_loss(
 def cosine_similarity_loss(
     predictions: np.ndarray,
     targets: np.ndarray,
+    device=None,
 ) -> float:
     """Cosine similarity loss: 1 - cosine_similarity.
 
     Args:
         predictions: (n, d) predicted vectors.
         targets: (n, d) target vectors.
+        device: Optional grilly_core.Device for GPU acceleration.
 
     Returns:
         Scalar loss in [0, 2].
     """
+    if device is not None:
+        import grilly_core
+        p = np.ascontiguousarray(predictions, dtype=np.float32)
+        t = np.ascontiguousarray(targets, dtype=np.float32)
+        if p.ndim == 1:
+            p = p[None, :]
+            t = t[None, :]
+        return float(np.mean(grilly_core.cosine_similarity_loss(device, p, t).numpy()))
+
     preds = np.asarray(predictions, dtype=np.float32)
     targs = np.asarray(targets, dtype=np.float32)
 
@@ -121,6 +147,8 @@ def _categorical_crossentropy(
     labels_oh: np.ndarray,
     preds: np.ndarray,
     from_logits: bool = True,
+    labels_int: np.ndarray | None = None,
+    device=None,
 ) -> np.ndarray:
     """Per-sample categorical cross-entropy.
 
@@ -128,10 +156,18 @@ def _categorical_crossentropy(
         labels_oh: One-hot labels (n, c).
         preds: Predictions (n, c).
         from_logits: Whether preds are raw logits.
+        labels_int: Integer labels for GPU path.
+        device: Grilly device for GPU evaluation.
 
     Returns:
         Per-sample losses (n,).
     """
+    if device is not None and from_logits and labels_int is not None:
+        import grilly_core
+        l = np.ascontiguousarray(preds, dtype=np.float32)
+        t = np.ascontiguousarray(labels_int, dtype=np.uint32).ravel()
+        return grilly_core.cross_entropy_loss(device, l, t, 0.0).numpy()
+
     if from_logits:
         log_probs = preds - _logsumexp(preds, axis=1, keepdims=True)
     else:
@@ -220,12 +256,14 @@ class CIWLoss:
         self,
         logits: np.ndarray,
         labels: np.ndarray,
+        device=None,
     ) -> float:
         """Compute CIW loss.
 
         Args:
             logits: Predictions (n, c).
             labels: Integer labels (n,) or one-hot (n, c).
+            device: Optional GPU device.
 
         Returns:
             Scalar loss value.
@@ -235,7 +273,10 @@ class CIWLoss:
         num_classes = logits.shape[1]
         labels_oh = _maybe_one_hot(labels, depth=num_classes)
 
-        per_sample_loss = _categorical_crossentropy(labels_oh, logits, self.from_logits)
+        labels_int = labels if labels.ndim == 1 else None
+        per_sample_loss = _categorical_crossentropy(
+            labels_oh, logits, self.from_logits, labels_int, device
+        )
         weights = _get_loss_weights(
             per_sample_loss,
             self.div_type,
@@ -284,12 +325,14 @@ class DROPSLoss:
         self,
         logits: np.ndarray,
         labels: np.ndarray,
+        device=None,
     ) -> float:
         """Compute DROPS loss.
 
         Args:
             logits: Predictions (n, c).
             labels: Integer labels (n,) or one-hot (n, c).
+            device: Optional GPU device.
 
         Returns:
             Scalar loss value.
@@ -299,7 +342,10 @@ class DROPSLoss:
         num_classes = logits.shape[1]
         labels_oh = _maybe_one_hot(labels, depth=num_classes)
 
-        per_sample = _categorical_crossentropy(labels_oh, logits, self.from_logits)
+        labels_int = labels if labels.ndim == 1 else None
+        per_sample = _categorical_crossentropy(
+            labels_oh, logits, self.from_logits, labels_int, device
+        )
 
         # Update EMA statistics
         batch_mean = float(np.mean(per_sample))

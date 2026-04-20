@@ -1,32 +1,43 @@
 """Tests for SDLS (Semantically Decoupled Latent Steering) purification.
 
-Tests the orthogonal null-space projection used in:
-  1. SemanticEncoder._sdls_purify()
-  2. HyperAxialAttention.forward() noise removal
+Tests the orthogonal null-space projection used in HyperAxialAttention and
+MindForge. The reference purify algorithm is inlined below.
 """
 
 import numpy as np
 
 from cubemind.model import HyperAxialAttention
-from cubemind.perception.semantic_encoder import SemanticEncoder
 
 
-# ── SemanticEncoder SDLS tests ─────────────────────────────────────────────
+def sdls_purify(embeddings: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    mean = np.mean(embeddings, axis=0)
+    norm = np.linalg.norm(mean)
+    if norm < 1e-8:
+        return embeddings, mean
+    noise_axis = (mean / norm).astype(np.float32)
+    projections = embeddings @ noise_axis
+    purified = embeddings - np.outer(projections, noise_axis)
+    norms = np.linalg.norm(purified, axis=1, keepdims=True)
+    norms = np.where(norms < 1e-8, 1.0, norms)
+    return (purified / norms).astype(np.float32), noise_axis
+
+
+# ── SDLS algorithm tests ──────────────────────────────────────────────────
 
 class TestSDLSPurify:
-    """Test the static _sdls_purify method on SemanticEncoder."""
+    """Test the SDLS purify algorithm."""
 
     def test_noise_axis_is_unit_vector(self):
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((20, 64)).astype(np.float32)
-        _, noise_axis = SemanticEncoder._sdls_purify(embeddings)
+        _, noise_axis = sdls_purify(embeddings)
         assert abs(np.linalg.norm(noise_axis) - 1.0) < 1e-5
 
     def test_purified_orthogonal_to_noise(self):
         """Purified vectors should have zero projection onto the noise axis."""
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((30, 64)).astype(np.float32)
-        purified, noise_axis = SemanticEncoder._sdls_purify(embeddings)
+        purified, noise_axis = sdls_purify(embeddings)
 
         # Each purified vector should be orthogonal to noise_axis
         projections = purified @ noise_axis
@@ -35,7 +46,7 @@ class TestSDLSPurify:
     def test_purified_are_unit_normalized(self):
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((15, 128)).astype(np.float32)
-        purified, _ = SemanticEncoder._sdls_purify(embeddings)
+        purified, _ = sdls_purify(embeddings)
 
         norms = np.linalg.norm(purified, axis=1)
         assert np.allclose(norms, 1.0, atol=1e-5)
@@ -49,7 +60,7 @@ class TestSDLSPurify:
         unique_b = rng.standard_normal(64).astype(np.float32)
         embeddings = np.stack([shared + unique_a, shared + unique_b])
 
-        purified, _ = SemanticEncoder._sdls_purify(embeddings)
+        purified, _ = sdls_purify(embeddings)
 
         # After removing the shared component, the two should still be distinct
         sim = float(np.dot(purified[0], purified[1]))
@@ -58,7 +69,7 @@ class TestSDLSPurify:
     def test_empty_input(self):
         """Empty embedding matrix should return unchanged."""
         embeddings = np.zeros((0, 64), dtype=np.float32)
-        purified, noise_axis = SemanticEncoder._sdls_purify(embeddings)
+        purified, noise_axis = sdls_purify(embeddings)
         # No crash, returns empty
         assert purified.shape == (0, 64)
 
@@ -66,7 +77,7 @@ class TestSDLSPurify:
         """Single vector: mean = itself, purification projects it to zero."""
         rng = np.random.default_rng(42)
         embeddings = rng.standard_normal((1, 64)).astype(np.float32)
-        purified, noise_axis = SemanticEncoder._sdls_purify(embeddings)
+        purified, noise_axis = sdls_purify(embeddings)
         # Single vector projected onto its own orthogonal complement → near-zero
         # But re-normalization brings it back to unit norm (or handles gracefully)
         assert purified.shape == (1, 64)
@@ -74,7 +85,7 @@ class TestSDLSPurify:
     def test_identical_vectors_zero_mean_norm(self):
         """If all vectors are identical, noise_axis = that direction."""
         v = np.array([[1.0, 0.0, 0.0]] * 5, dtype=np.float32)
-        purified, noise_axis = SemanticEncoder._sdls_purify(v)
+        purified, noise_axis = sdls_purify(v)
         # noise_axis should be [1, 0, 0] (normalized mean)
         assert np.allclose(noise_axis, [1.0, 0.0, 0.0], atol=1e-5)
 
@@ -149,27 +160,6 @@ class TestHyperAxialSDLS:
         assert np.allclose(out1, out2, atol=1e-6)
 
 
-# ── SemanticEncoder encode_corpus / encode_query_purified ──────────────────
-
-class TestSemanticEncoderCorpus:
-    """Test corpus-level SDLS via SemanticEncoder (fallback mode, no model)."""
-
-    def test_encode_corpus_fallback(self):
-        """Without a model loaded, encode_corpus returns hash-based vectors."""
-        enc = SemanticEncoder(k=4, l=32)
-        texts = ["hello world", "foo bar", "baz qux"]
-        vectors, noise_axis = enc.encode_corpus(texts)
-        assert len(vectors) == 3
-        assert vectors[0].shape == (4, 32)
-        # noise_axis is zeros when no model available (all embeddings are zero)
-        assert noise_axis.shape[0] == enc._embed_dim
-
-    def test_encode_corpus_empty(self):
-        enc = SemanticEncoder(k=4, l=32)
-        vectors, noise_axis = enc.encode_corpus([])
-        assert vectors == []
-
-
 # ── Regression: old 0.99*mean subtraction vs SDLS ─────────────────────────
 
 class TestSDLSvsNaive:
@@ -192,7 +182,7 @@ class TestSDLSvsNaive:
         naive_normed = naive / naive_norms
 
         # SDLS approach
-        sdls, _ = SemanticEncoder._sdls_purify(X)
+        sdls, _ = sdls_purify(X)
 
         # Compute pairwise cosine similarity spread (std of off-diagonal)
         def cosine_spread(vecs):

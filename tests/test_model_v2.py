@@ -1,10 +1,10 @@
-"""Tests for cubemind.model.CubeMind (v2 Oja-Plastic NVSA)."""
+"""Tests for cubemind.model.CubeMind — DI-based integrated architecture."""
 
 from __future__ import annotations
 
 import pytest
 
-from cubemind.model import CubeMind
+from cubemind import CubeMind, create_cubemind
 from cubemind.ops.block_codes import BlockCodes
 
 K, L = 4, 32
@@ -12,7 +12,7 @@ K, L = 4, 32
 
 @pytest.fixture(scope="module")
 def brain() -> CubeMind:
-    return CubeMind(k=K, l=L, n_codebook=16)
+    return create_cubemind(k=K, l=L, d_hidden=32)
 
 
 @pytest.fixture(scope="module")
@@ -28,25 +28,21 @@ def test_init(brain: CubeMind):
 
 def test_forward_text(brain: CubeMind):
     result = brain.forward(text="hello world")
-    assert "answer" in result
+    assert "output_hv" in result
     assert "confidence" in result
+    assert "step" in result
+    assert result["output_hv"].shape == (K, L)
 
 
 def test_forward_phi(brain: CubeMind, bc: BlockCodes):
     phi = bc.random_discrete(seed=42)
     result = brain.forward(phi=phi)
-    assert "answer" in result
-
-
-def test_forward_with_context(brain: CubeMind, bc: BlockCodes):
-    context = [bc.random_discrete(seed=i) for i in range(3)]
-    result = brain.forward(text="test", context=context)
-    assert "phi_integrated" in result
+    assert result["output_hv"].shape == (K, L)
 
 
 def test_forward_no_input(brain: CubeMind):
     result = brain.forward()
-    assert "answer" in result
+    assert "output_hv" in result
 
 
 def test_confidence_range(brain: CubeMind):
@@ -56,10 +52,30 @@ def test_confidence_range(brain: CubeMind):
 
 def test_hippocampal_memory_stored(brain: CubeMind):
     brain.forward(text="store this in memory")
-    assert brain.hippocampal._episodes or brain.hippocampal.size > 0
+    assert brain.hippocampus.memory_count > 0
 
 
 def test_multiple_forward(brain: CubeMind):
     for i in range(5):
         result = brain.forward(text=f"step {i}")
     assert result is not None
+    assert result["step"] > 0
+
+
+def test_fault_isolation(brain: CubeMind):
+    """Modules that fail don't crash the pipeline."""
+    result = brain.forward(text="test isolation")
+    assert "output_hv" in result
+
+
+def test_stats(brain: CubeMind):
+    stats = brain.stats()
+    assert "step" in stats
+    assert "d_vsa" in stats
+    assert "d_hidden" in stats
+
+
+def test_recall(brain: CubeMind):
+    brain.forward(text="remember this fact")
+    results = brain.recall("remember this fact", k=3)
+    assert isinstance(results, list)

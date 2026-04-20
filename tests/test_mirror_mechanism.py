@@ -20,7 +20,13 @@ import pytest
 
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.perception.snn import NeurochemicalState
-from cubemind.perception.experiential import generate_orthogonal_matrix
+
+
+def generate_orthogonal_matrix(n: int, seed: int = 42) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    A = rng.standard_normal((n, n)).astype(np.float64)
+    Q, _ = np.linalg.qr(A)
+    return Q.astype(np.float32)
 
 
 # ── Mirror Mechanism Module ──────────────────────────────────────────

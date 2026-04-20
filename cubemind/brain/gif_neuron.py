@@ -20,6 +20,8 @@ import math
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 _bridge = None
 try:
     from grilly.backend import _bridge as _grilly_bridge
@@ -29,6 +31,7 @@ except Exception:
     pass
 
 
+@register("processor", "gif_neuron")
 class GIFNeuron:
     """Generalized Integrate-and-Fire neuron with multi-bit spikes.
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from cubemind.core.registry import register
 from cubemind.ops.block_codes import BlockCodes
 
 try:
@@ -34,6 +35,7 @@ except ImportError:
     L_BLOCK: int = 128
 
 
+@register("executor", "world_manager")
 class WorldManager:
     """Self-organizing specialist world models via spawn-or-consolidate.
 

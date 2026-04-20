@@ -18,8 +18,10 @@ import numpy as np
 from cubemind.core import K_BLOCKS, L_BLOCK
 from cubemind.ops.block_codes import BlockCodes
 from cubemind.routing.moe_gate import DSelectKGate
+from cubemind.core.registry import register
 
 
+@register("router", "prototype")
 class CubeMindRouter:
     """MoWM-based topic router using block-code prototypes + DSelect-k gating.
 

@@ -16,6 +16,8 @@ import math
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # Small constant for numerical stability.
 EPSILON = 1e-6
 
@@ -77,6 +79,7 @@ def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+@register("router", "dselect_k")
 class DSelectKGate:
     """Differentiable top-k expert selection gate.
 

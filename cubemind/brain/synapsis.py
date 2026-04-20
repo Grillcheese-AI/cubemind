@@ -17,6 +17,8 @@ import math
 
 import numpy as np
 
+from cubemind.core.registry import register
+
 # grilly GPU bridge
 _bridge = None
 try:
@@ -27,6 +29,7 @@ except Exception:
     pass
 
 
+@register("processor", "synapsis")
 class Synapsis:
     """Spike-driven linear transform with optional STDP.
 

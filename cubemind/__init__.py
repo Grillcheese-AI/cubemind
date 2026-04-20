@@ -1,8 +1,7 @@
-"""CubeMind v2 — neuro-vector-symbolic reasoning on grilly GPU backend."""
-__version__ = "2.0.0"
+"""CubeMind — neuro-vector-symbolic reasoning on grilly GPU backend."""
 
-from .model import CubeMind
+__version__ = "2.1.0"
 
-__all__ = [
-    CubeMind
-]
+from .model import CubeMind, create_cubemind
+
+__all__ = ["CubeMind", "create_cubemind"]
