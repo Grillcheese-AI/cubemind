@@ -1,6 +1,7 @@
 """Pre-tokenize TinyStories for VSA-LM.
 
-Uses ByteLevel BPE (same as FlashLM v5) with vocab=8192 for fair PPL comparison.
+Uses ByteLevel BPE with vocab=8192 (matches the prior small-scale ternary baseline
+vocabulary so per-token PPL is directly comparable across sandbox experiments).
 Saves all tokens as one .npy file for instant loading (<1s).
 
 Run once: python -u sandbox/vsa_lm/prepare_data.py
@@ -27,7 +28,7 @@ def main(max_stories=0, vocab_size=8192, output_dir="sandbox/vsa_lm/data"):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Train ByteLevel BPE — same algorithm as FlashLM v5
+    # Train ByteLevel BPE
     logger.info("Training ByteLevel BPE tokenizer (vocab={})...", vocab_size)
     tokenizer = Tokenizer(models.BPE(unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)

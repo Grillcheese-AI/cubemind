@@ -1,279 +1,195 @@
-# Chapter 4: The C++/Vulkan GPU Acceleration Layer (grilly)
+# Chapter 4 — grilly: C++/Vulkan GPU Acceleration
 
-**Repository**: `C:\Users\grill\Documents\GitHub\grilly` (dev branch)
-**Experimental shaders**: `C:\Users\grill\Documents\GitHub\grilly-experimental` (MindForge shaders)
-**Python bindings**: `grilly_core.pyd` (pybind11)
-**Target GPU**: AMD RX 6750 XT (RDNA2, gfx1031, Vulkan 1.3)
+**Repository:** `../grilly`
+**Role:** GPU backend for CubeMind. PyTorch-like API, Vulkan compute shaders.
+Runs on AMD / NVIDIA / Intel via Vulkan — no CUDA required.
+**Binary:** `grilly_core.cp312-win_amd64.pyd` (pybind11 C++ extension, rebuilt
+after C++ changes).
 
-## 4.1 Purpose and Positioning
+---
 
-grilly is the GPU compute substrate. It owns:
+## 4.1 Responsibilities
 
-1. Vulkan compute shader compilation, device management, and memory allocation
-2. VSA algebra kernels: blockcode bind, unbind, bundle
-3. MindForge-specific shaders: basis mix forward, backward for coefficients and basis
-4. Distillation loss computation
-5. GQA (Grouped-Query Attention) forward pass
-6. AdamW optimizer update
-7. VSA-LM fused forward and backward passes
-8. Python bindings via pybind11 (`grilly_core.pyd`)
+grilly owns every GPU path the cubemind orchestrator uses:
 
-grilly is the only component that directly manages Vulkan device memory, command buffers,
-and SPIR-V shaders. All other language tiers access GPU compute through grilly.
+1. **VSA algebra on GPU** — `blockcode-bind.glsl`, `blockcode-unbind.glsl`,
+   `blockcode-similarity.glsl`.
+2. **Neural-net layers** — Linear, LoRA, attention, SNN, RNN, Transformer,
+   tokenizer, AdditionLinear.
+3. **Autograd** — `GradientTape`, `ComputationNode`, GPU-backed backward ops.
+4. **Vulkan memory + pipeline management** — buffer alloc, descriptor sets,
+   LRU-cached pipelines.
+5. **230+ GLSL compute shaders** → compiled to SPIR-V at build time.
 
-## 4.2 Architecture Overview
+---
+
+## 4.2 Package Structure
 
 ```
-Python (CubeMind)
-  │
-  │  import grilly_core
-  │  from grilly.backend import _bridge
-  │  from grilly.experimental.vsa.block_ops import BlockCodeOps
-  │
-  ▼
-pybind11 boundary (grilly_core.pyd)
-  │
-  ▼
-C++ layer
-  ├─ Device                — Vulkan instance, physical device, logical device, queues
-  ├─ BufferPool            — batch-shaped Vulkan buffers, reused across calls
-  ├─ ShaderRegistry        — SPIR-V .spv files loaded from disk at runtime
-  ├─ ComputePipeline       — pipeline layout, descriptor sets, push constants
-  └─ DispatchHelper        — command buffer recording, vkCmdDispatch, fence wait
-  │
-  ▼
-SPIR-V shaders (compiled from GLSL, loaded at runtime)
-  ├─ mindforge-basis-mix     — forward basis combination: Σ coeffs[i] * basis[i]
-  ├─ mindforge-bwd-coeff     — gradient w.r.t. mixing coefficients
-  ├─ mindforge-bwd-basis     — gradient w.r.t. basis vectors
-  ├─ distillation-loss       — CE + KL-div + temperature scaling
-  ├─ gqa-attention           — grouped-query attention forward
-  ├─ vsa_lm_forward          — fused N-layer VSA-LM forward pass
-  ├─ vsa_lm_backward         — fused N-layer VSA-LM backward pass
-  ├─ adamw-update            — AdamW parameter update
-  └─ blockcode-bind          — circular convolution per block
+backend/                Low-level Vulkan dispatch
+    core.py             Vulkan instance/device init, buffer alloc, dispatch
+    compute.py          VulkanCompute — single GPU entry point for cubemind
+    pipelines.py        Pipeline + descriptor-set creation, LRU caching
+    shader_registry.py  Architecture-specific shader selection (BERT/GPT/T5 + fallback)
+    autograd_core.py    GradientTape, ComputationNode, backward ops
+    snn.py, snn_compute.py    SNN GPU ops
+    lora.py             LoRA GPU ops (used by MindForge)
+    faiss.py            GPU-accelerated FAISS ops
+    memory.py           Hippocampal + KV cache GPU ops
+    hilbert.py          Hilbert routing ops
+    _bridge.py          Python ↔ C++ bridge
+
+nn/                     PyTorch-like Module subclasses
+    module.py           Base Module (parameters, train/eval, state_dict)
+    linear.py, attention.py, snn.py, lora.py, transformer.py, rnn.py, capsule.py, …
+    addition_linear.py  Matmul-free linear (mirrors cubemind brain/)
+
+functional/             Stateless functional API
+optim/                  Optimizers: AdamW, SGD, NLMS, natural gradient, hypergradient
+torch_api/              PyTorch compatibility layer
+tokenizer_impl/         GPU tokenizer
+utils/                  Checkpoint, HF bridge, visualization, sentence-transformer
+    stable_hash.py      BLAKE3 → bipolar (must match opcode-vsa-rs/src/vsa_hash.rs)
+
+shaders/                230+ GLSL compute shaders → SPIR-V
+    blockcode-bind.glsl, blockcode-unbind.glsl, blockcode-similarity.glsl
+    attention-*.glsl, conv2d-*.glsl, snn-*.glsl, faiss-*.glsl, lora-*.glsl, …
+    experimental/       Experimental shaders
+
+cpp/                    C++ source (CMake + pybind11)
+    include/            Headers
+    src/                Implementation
+    python/             Python bindings
+
+third_party/            BLAKE3, nlohmann/json, pybind11, VulkanMemoryAllocator
 ```
 
-## 4.3 The Three-Level Fallback in Python
+---
 
-Every operation that needs GPU acceleration follows the same pattern in Python:
+## 4.3 The Single GPU Entry Point
+
+`backend/compute.py` → `VulkanCompute` is the only dispatch surface cubemind
+calls into. Everything else in grilly is reached through it.
 
 ```python
-# Level 1: grilly C++ kernel (fastest)
-try:
-    from grilly.backend import _bridge as _grilly_bridge
-    result = _grilly_bridge.blockcode_bind(a, b)
-    return result
+from grilly.backend.compute import VulkanCompute
+gc = VulkanCompute()
 
-# Level 2: grilly Python GPU path
-except Exception:
-    from grilly.experimental.vsa.block_ops import BlockCodeOps
-    return BlockCodeOps.bind(a, b)
+# VSA ops
+out = gc.blockcode_bind(a, b)
+sim = gc.blockcode_similarity(query, candidates)
 
-# Level 3: numpy fallback
-except Exception:
-    return numpy_circular_conv_per_block(a, b)
+# Neural layers
+h   = gc.linear_forward(x, W, b)
+y   = gc.attention_forward(q, k, v, mask, window=128)
+h2  = gc.snn_forward(h, theta, tau, dt)
 ```
 
-This is implemented once in `cubemind/ops/block_codes.py` and shared by all callers.
-The convention in CLAUDE.md is absolute: **always use grilly GPU ops, not raw numpy**.
-Direct numpy calls are a bug, not a fallback.
+Route every new GPU op through `VulkanCompute`. A shader that doesn't have a
+`VulkanCompute` method is unreachable from cubemind.
 
-## 4.4 MindForge Shaders (grilly-experimental)
+---
 
-MindForge is a VSA-conditioned hypernetwork that generates LoRA adapters. Its three
-GPU shaders are in `grilly-experimental` rather than the main grilly tree because they
-are domain-specific to the hypernetwork:
+## 4.4 Shader → SPIR-V Pipeline
 
-### mindforge-basis-mix (forward)
+GLSL source in `shaders/*.glsl` is compiled to SPIR-V at build time. Shaders are
+architecture-specialised through `shader_registry.py`: BERT-style attention uses
+one variant, GPT-style another, T5 another, with a fallback for unknown shapes.
 
-Computes the basis combination step:
-```
-coeffs = context_projection → W_coeff                 (d_hidden → n_basis)
-A = Σ_{i=0}^{n_basis-1} coeffs[i] × basis_A[i]       ((rank, d_in))
-B = Σ_{i=0}^{n_basis-1} coeffs[i] × basis_B[i]       ((d_out, rank))
-```
+- **Windows:** `.\scripts\compile_all_shaders.ps1`
+- **Rebuild C++ extension:** `.\rebuild.ps1` (or CMake + MSBuild via `build/`,
+  `build2/`)
 
-The shader dispatches one workgroup per output element. The continuous mixing (no softmax)
-is intentional: softmax would cause mode collapse where only one basis vector receives
-gradient.
+`build/` and `build2/` are MSBuild outputs — **never edit files there directly**.
 
-### mindforge-bwd-coeff
+---
 
-Computes `d_coeffs[i] = sum_j d_A[j] × basis_A[i][j]` — the gradient of the mixing loss
-back through the coefficient vector. This enables end-to-end gradient flow from the LoRA
-adapter residual all the way to the MindForge projection weights.
+## 4.5 Autograd
 
-### mindforge-bwd-basis
-
-Computes `d_basis_A[i] += coeffs[i] × d_A` — the gradient accumulation into the shared
-basis vectors. Because the basis is shared across all layers and all forward passes,
-this accumulation must be atomic in the GPU kernel.
-
-## 4.5 VSA-LM GPU Shaders
-
-The fused VSA-LM forward and backward passes (`vsa_lm_forward`, `vsa_lm_backward`) avoid
-repeated GPU-CPU transfers for each of the 18 VSA layers by uploading all weights once and
-fusing all layer computations on the GPU.
-
-### Upload path (`grilly_core.vsa_lm_upload`)
+`backend/autograd_core.py` implements a tape-based autograd with GPU backward
+ops. Manual backward is forbidden in cubemind — the prior MoQE Run 1 diverged
+when hand-written backward was used.
 
 ```python
-self._gpu_handle = _gc.vsa_lm_upload(
-    self._gpu_dev,
-    self.embed, self.pe,          # (vocab, d_model), (seq_len, d_model)
-    ffn_up_w, ffn_up_b,           # list of n_layers arrays
-    ffn_down_w, ffn_down_b,
-    ln_g, ln_b,
-    self.out_w,
-    self.cfg.n_layers, self.cfg.d_model, self.cfg.d_ffn,
-)
+from grilly.nn.autograd import Variable
+logits = Variable(model.forward(tokens), requires_grad=True)
+loss = grilly.nn.loss.cross_entropy(logits, targets)
+loss.backward(use_gpu=True)
+optimizer.step()
 ```
 
-The GPU handle is an opaque integer identifying the resident weights on the Vulkan device.
-Subsequent forward passes pass this handle rather than re-uploading weights:
+This is the only supported training path for the grilly-native trainer (see
+`07-migration-roadmap.md`).
 
-```python
-logits = _gc.vsa_lm_forward(self._gpu_dev, self._gpu_handle,
-                              input_ids.astype(np.int32))
+---
+
+## 4.6 Commands
+
+```bash
+# Install (editable)
+pip install -e .
+pip install -e ".[dev]"        # adds ruff, black, mypy, pytest-cov
+
+# Tests
+uv run pytest tests/ -v
+uv run pytest tests/ -m "not gpu" -v   # CPU-only (no Vulkan)
+
+# Lint
+ruff check .                   # line-length=100
+black . --check                # line-length=100, py312
+isort . --check-only
+
+# Compile shaders (Windows)
+.\scripts\compile_all_shaders.ps1
+
+# Rebuild C++ extension
+.\rebuild.ps1
+
+# Publish
+powershell -ExecutionPolicy Bypass -File .\scripts\publish_pypi.ps1
 ```
 
-After an optimizer step, `vsa_lm_update_weights` re-uploads only the modified weight
-buffers rather than doing a full re-upload.
+---
 
-### Distillation loss (`grilly_core.distillation_loss`)
+## 4.7 BLAKE3 Hash Consistency
 
-The distillation pipeline uses a custom GPU kernel for the combined loss:
+`utils/stable_hash.py` provides deterministic hash → bipolar. This must match
+`opcode-vsa-rs/src/vsa_hash.rs` byte-for-byte — the two repos share keyed item
+memory (see `02-vsa-foundations.md` §2.6). Do not change the hashing scheme
+unilaterally.
 
-```
-L = 0.3 × CE(student_logits, hard_labels)
-  + 0.6 × KL(softmax(student/T), softmax(teacher/T))
-  + 0.1 × router_balance_loss
-```
+---
 
-Temperature-scaled KL-divergence is a numerically sensitive operation (can produce NaN
-when student logits have very negative values). The shader implements log-sum-exp
-stabilization to avoid this.
+## 4.8 Hardware Targets
 
-## 4.6 AMD RX 6750 XT Target Architecture
+| GPU | Status | Notes |
+|---|---|---|
+| AMD RX 6750 XT (RDNA2, gfx1031) | ✅ Primary — live brain + inference | Vulkan 1.3; all production tests run here |
+| NVIDIA (any Vulkan-capable) | ✅ Supported | No CUDA required; Vulkan path only |
+| Intel Arc / iGPU | ✅ Supported in principle | Not routinely tested |
+| H200 SXM (CUDA) | 🚫 Not used by grilly | Sandbox PyTorch trainer runs there; grilly doesn't target CUDA directly |
 
-Hardware characteristics relevant to shader design:
+The H200 sandbox trainer (`sandbox/mingru_baseline/train_torch.py`) runs on
+PyTorch CUDA, not grilly. The PyTorch implementation is the **canonical public
+trainer** — grilly is the in-house GPU backend for the live brain and Vulkan
+targets, not the primary research surface. The grilly port is deferred until
+the PyTorch stack is stable and tested for ALL components (see
+`07-migration-roadmap.md` §7.2.1).
 
-| Property | Value | Implication |
-|----------|-------|------------|
-| Architecture | RDNA2 (gfx1031) | Wave32 default, Wave64 available |
-| Vulkan version | 1.3 | Full compute subgroup support |
-| Compute units | 40 | 40 × 64 = 2560 shaders per clock |
-| Memory bandwidth | ~400 GB/s | Bottleneck for Hamming scan |
-| Subgroup size | 32 (Wave32) or 64 (Wave64) | 64-bit XOR+popcount per invocation |
-| Key extensions | VK_KHR_shader_integer_dot_product, VK_EXT_shader_subgroup_ballot | Integer dotprod, ballot reductions |
+---
 
-For the planned Vulkan Hamming distance kernel:
+## 4.9 Rules for Working Here
 
-```glsl
-layout(local_size_x = 256) in;
-// query: [words_per_vec] u64
-// corpus: [n_vecs × words_per_vec] u64
-// output: [n_vecs] u32
-
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    uint acc = 0;
-    for (uint w = 0; w < words_per_vec; w++) {
-        uint64_t xorVal = query[w] ^ corpus[idx * words_per_vec + w];
-        acc += bitCount(xorVal);
-    }
-    output[idx] = acc;
-}
-```
-
-Estimated throughput: ~400 GB/s ÷ 0.512 KB/vec (D=4096) ≈ 780 million vectors/s.
-With launch overhead, realistic sustained throughput is ~32 million vectors/s.
-
-## 4.7 The Buffer Pool Pattern
-
-A critical correctness constraint in grilly is documented in memory note `reference_grilly_pitfalls.md`:
-
-> **Buffer pool needs matching batch shapes.** The pool reuses allocated Vulkan buffers.
-> If the batch shape changes between calls, the old buffer cannot be reused and a new
-> allocation is made. This is fine for correctness but incurs allocation overhead.
-> Avoid shape changes in hot loops.
-
-The second documented pitfall:
-
-> **Prefix scan gate must be bounded [0.05, 0.95].** The prefix scan kernel uses floating-point
-> gates. Values outside [0.05, 0.95] produce NaN in the cumulative sum step. Always clamp
-> gate values before passing to the scan.
-
-## 4.8 pybind11 Interface (`grilly_core.pyd`)
-
-The pybind11 module is the bridge between Python and the C++ GPU layer. Python calls
-are synchronous from the Python side: the function returns when the GPU computation
-completes (fence wait inside C++).
-
-Relevant operations exposed through `grilly_core`:
-
-| Operation | Signature | Used by |
-|-----------|-----------|---------|
-| `Device()` | `→ Device` | All GPU users |
-| `Device.load_shaders(path: str)` | `→ None` | All GPU users |
-| `vsa_lm_upload(dev, ...)` | `→ int` (handle) | VSALM GPU init |
-| `vsa_lm_forward(dev, handle, ids)` | `→ ndarray` | VSALM forward |
-| `vsa_lm_backward(dev, handle, d_logits)` | `→ ndarray` | VSALM backward |
-| `vsa_lm_update_weights(dev, handle, ...)` | `→ None` | VSALM optimizer step |
-| `distillation_loss(logits, teacher, labels, T)` | `→ float` | MoQE distillation |
-| `mindforge_basis_mix(coeffs, basis_A, basis_B)` | `→ (A, B)` | MindForge forward |
-| `mindforge_bwd_coeff(d_A, d_B, basis_A, basis_B)` | `→ d_coeffs` | MindForge backward |
-| `mindforge_bwd_basis(d_A, d_B, coeffs)` | `→ (d_basis_A, d_basis_B)` | MindForge backward |
-| `adamw_update(param, grad, m, v, ...)` | `→ dict` | AdamW step |
-| `blockcode_bind(a, b)` | `→ ndarray` | BlockCodes.bind |
-| `gelu(x)` | `→ ndarray` | HYLA, MindForge |
-
-## 4.9 Shader Loading Path
-
-Shader SPIR-V files are loaded from disk at runtime by `Device.load_shaders(path)`. The
-path resolution order is:
-
-1. `{project_root}/grilly/shaders/spv/` — development install (sibling repo)
-2. `{grilly_package_path}/shaders/spv/` — installed via pip/uv
-
-The `_mindforge_gpu_ok()` function in `mindforge.py` performs lazy initialization and
-caches the result. This avoids re-initializing the Vulkan device on every MindForge call:
-
-```python
-def _mindforge_gpu_ok() -> bool:
-    global _mf_device, _mf_available
-    if _mf_available is not None:
-        return _mf_available
-    needed = ("mindforge_basis_mix", "mindforge_bwd_coeff", "mindforge_bwd_basis")
-    if not all(hasattr(_gc_core, n) for n in needed):
-        _mf_available = False
-        return False
-    # ... Vulkan device init ...
-```
-
-## 4.10 Planned IPC Channel (protobuf)
-
-The current architecture uses pybind11 for Python↔C++ communication. The planned
-evolution adds a **protobuf IPC channel** that will allow Rust to communicate with
-grilly directly, without going through Python:
-
-```
-Rust (compute engine)
-  │
-  │  protobuf messages over Unix socket / shared memory
-  ▼
-grilly (C++/Vulkan)
-  │
-  │  Vulkan dispatch + results
-  ▼
-AMD RX 6750 XT
-```
-
-This unlocks the scenario where the Rust training loop dispatches GPU kernels to grilly
-without Python as an intermediary. The protobuf message schema for this channel is
-described in Chapter 6.
-
-Until this IPC channel is implemented, Rust's `gpu.rs` module contains a CPU-fallback
-`CpuKernel` that serves as the in-process adapter, and the heavy GPU work is initiated
-from Python.
+- **Do not modify shaders without understanding SPIR-V compilation.** GLSL edits
+  do not take effect until `compile_all_shaders.ps1` runs and the resulting
+  `.spv` files ship.
+- **`backend/compute.py` is the single GPU entry point for cubemind.** New GPU
+  ops must route through `VulkanCompute`.
+- **BLAKE3 hash-to-bipolar matches `opcode-vsa-rs`.** Do not change scheme
+  unilaterally.
+- **`experimental/` is high-risk.** Discuss before changing — same rule as
+  `cubemind/experimental/`.
+- **`build/` and `build2/` are MSBuild outputs.** Never edit files there
+  directly.
+- **grilly_core.pyd needs rebuild after C++ changes.** Use `.\rebuild.ps1` or
+  the CMake flow.

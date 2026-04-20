@@ -1,13 +1,13 @@
 """VSA-LM: Vector Symbolic Architecture Language Model.
 
-Beat FlashLM's 1.36 PPL on TinyStories with:
+Sandbox experiment targeting low-PPL small-scale TinyStories generation with:
 - BlockCode embeddings (discrete, compositional)
 - AdditionLinear (no matmul, L1 distance)
 - MindForge adaptive weights (context-dependent LoRA)
 - HippocampalFormation temporal memory (place/grid/time cells)
 - GIFNeuron gating (spiking dynamics for temporal flow)
 
-Target: PPL < 1.36, ~30M params, CPU trainable.
+Target: PPL < 1.36 (prior ternary-baseline level), ~30M params, CPU trainable.
 
 Architecture:
   token → BlockCode embed → [VSA Layer × N] → output projection → logits
@@ -62,9 +62,9 @@ class VSALMConfig:
     k: int = 16              # blocks (smaller than production K=80 for speed)
     l: int = 24              # block length
     # Model
-    d_model: int = 384       # matches FlashLM
-    n_layers: int = 18       # matches FlashLM
-    d_ffn: int = 1152        # matches FlashLM (3x d_model)
+    d_model: int = 384
+    n_layers: int = 18
+    d_ffn: int = 1152        # 3x d_model
     # MindForge
     forge_rank: int = 8      # LoRA rank for forged adapters
     forge_basis: int = 16    # number of basis adapters
@@ -73,8 +73,8 @@ class VSALMConfig:
     n_time: int = 16
     n_grid: int = 24
     # Training
-    vocab_size: int = 8192   # matches FlashLM BPE
-    seq_len: int = 256       # matches FlashLM
+    vocab_size: int = 8192   # ByteLevel BPE
+    seq_len: int = 256
     batch_size: int = 1      # online learning
     lr: float = 5e-4
     lr_min: float = 1e-5
@@ -91,7 +91,7 @@ class LiquidCell:
 
     From AURA_GENESIS: tau(x) = tau_min + softplus(V@x + c),
     dh/dt = -h/tau + tanh(W@h + U@x + b). Euler integrated.
-    Equivalent to FlashLM's ParallelGatedRecurrence but physics-based.
+    Continuous-time alternative to gated-recurrence mixers.
     """
 
     def __init__(self, in_dim: int, hidden_dim: int, dt: float = 0.02,
@@ -396,10 +396,10 @@ def compute_ppl(model, x_data, y_data, max_samples=100):
 def main():
     cfg = VSALMConfig(
         train_steps=10000,
-        n_layers=6,          # Half of FlashLM's 18, enough to show scaling
-        seq_len=64,         # Half of FlashLM, 2x our test
+        n_layers=6,          # 1/3 of the 18-layer target, enough to show scaling
+        seq_len=64,          # small for quick iteration
         val_every=50,
-        d_model=256,         # 2/3 of FlashLM, good balance speed/capacity
+        d_model=256,         # good balance speed/capacity for sandbox run
         d_ffn=768,           # 3x d_model
         k=16,
         l=16,                # d_vsa = 256 = d_model

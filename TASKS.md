@@ -11,7 +11,7 @@ that is the only definition of done.
 | Decision | Rationale |
 |---|---|
 | **MinGRU gated recurrence, standard float weights** | Qwen3.5 (Gated Delta Networks + sparse MoE) validates this direction at production scale. MinGRU is the proven small-scale formulation. |
-| **Drop matmul-free / ternary as the sequence mixer** | FlashLM v5 achieves PPL 1.36 but produces incoherent text. Ternary weights fail at <100M params on generation quality. Scale problem, not fixable. |
+| **Drop matmul-free / ternary as the sequence mixer** | Prior ternary-weight baseline achieved PPL 1.36 on TinyStories but produced incoherent text. Ternary weights fail at <100M params on generation quality. Scale problem, not fixable. |
 | **Keep `AdditionLinear` in FFN only** | Valid as an efficiency layer in channel mixing (VRAM reduction). Not valid as the primary language capability layer. |
 | **TinyStories coherence as baseline, not PPL** | PPL measures compression, not generation quality. The TinyStories paper (Eldan & Li 2023) establishes GPT-4-graded story quality as the correct benchmark. |
 | **grilly autograd only** | MoQE Run 1 diverged with manual backward. Run 2 with grilly autograd converged cleanly. This is not revisited. |
@@ -601,8 +601,8 @@ Recorded here so these decisions don't get re-litigated:
 
 | Idea | Why not |
 |---|---|
-| FlashLM as backbone | PPL 1.36, incoherent text. Ternary weights fail at <100M params on generation. |
+| Ternary-weight LM as backbone | PPL 1.36 on TinyStories with incoherent text. Ternary weights fail at <100M params on generation. Superseded by the CubeMind-213M MinGRU sandbox (val PPL 5.17 on news prose). |
 | MoQE as training architecture | PPL 58 at vocab=1000 ≈ unigram baseline. Archived. |
 | VSA-LM delta rule (AdditionLinear without backprop) | Same problem as HE-MoE: Oja does PCA not regression. Archived. |
 | Manual backward pass | Diverged in MoQE Run 1. grilly autograd only. |
-| PPL as the sole success metric | FlashLM proved PPL and coherence are decoupled at small scale. |
+| PPL as the sole success metric | Prior small-scale experiments proved PPL and coherence are decoupled at small scale. |
