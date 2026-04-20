@@ -650,6 +650,148 @@ def emit_factual(factual_dir: Path, out, byte_budget: int,
             "n_records": n_chunks, "bytes_written": bytes_w}
 
 
+# ==Wikipedia (enwiki / frwiki namespace_0 JSONL) ──────────────────────────
+
+# Wikimedia Enterprise schema element types we actually want to keep
+# in the flattened text. Skipped: image, table, template, math, code,
+# nav (navbox), citation (refs only) — these add noise without
+# narrative value at training time.
+_WIKI_KEEP_TYPES = frozenset({
+    "section", "paragraph", "list", "list_item", "description_list",
+    "description_list_item", "blockquote", "preformatted",
+})
+
+
+def _flatten_wikipedia_sections(nodes, depth: int = 0,
+                                max_depth: int = 8) -> list[str]:
+    """Walk Wikimedia Enterprise's nested ``sections`` / ``has_parts``
+    structure and return a flat list of human-readable text fragments.
+
+    Schema (as of Wikimedia Enterprise v2):
+      Each node is a dict with ``type`` ∈ {section, paragraph, list,
+      list_item, image, table, ...}. Section nodes carry an optional
+      ``name`` (heading). Leaf content (paragraph / list_item) lives
+      in ``value`` as a string. Children live in ``has_parts``.
+
+    We keep section names + paragraph/list values, recurse into
+    ``has_parts``, and silently drop image/table/template/etc nodes.
+    Bounded to ``max_depth`` so a pathological page can't recurse
+    without limit. Strings starting with 'REDIRECT' are dropped (they
+    are stub redirect markers, not content).
+    """
+    out: list[str] = []
+    if depth > max_depth or not isinstance(nodes, list):
+        return out
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type", "")
+        if ntype and ntype not in _WIKI_KEEP_TYPES:
+            continue
+        # Heading (only on section nodes)
+        if ntype == "section":
+            name = (node.get("name") or "").strip()
+            if name and name.lower() != "abstract":
+                out.append(name)
+        # Leaf content — paragraph / list_item / description_list_item etc
+        value = node.get("value")
+        if isinstance(value, str):
+            v = value.strip()
+            if v and not v.startswith("REDIRECT"):
+                out.append(v)
+        elif isinstance(value, list):
+            for v in value:
+                if isinstance(v, str) and v.strip() and not v.startswith("REDIRECT"):
+                    out.append(v.strip())
+        # Recurse
+        children = node.get("has_parts")
+        if children:
+            out.extend(_flatten_wikipedia_sections(children, depth + 1, max_depth))
+    return out
+
+
+def emit_wikipedia(wiki_dir: Path, out, byte_budget: int,
+                   lang: str = "en",
+                   max_chars_per_article: int = 6000,
+                   sample_every: int = 1) -> dict:
+    """Walk every ``*.jsonl`` chunk under ``wiki_dir``, emit one record
+    per article. Each record:
+
+      ``[LANG:<lang>] [SUBJ:<from-title>?] WIKI: <title>
+        ABSTRACT: <abstract>
+        BODY: <flattened sections, truncated to max_chars_per_article>``
+
+    The ``[SUBJ:]`` tag uses the existing title-hint extractor — many
+    Wikipedia article titles encode dates ("Battle of Hastings",
+    "1066 (year)", "World War I", "Renaissance"). Articles whose title
+    yields nothing have no ``[SUBJ:]`` tag (just the LANG marker).
+
+    Skips ``[PUB:]`` deliberately — Wikipedia's ``date_modified`` is
+    when the page was last edited, NOT when the article subject
+    happened. Conflating those would teach the wrong association.
+
+    ``sample_every=N`` keeps every Nth article (random offset per file)
+    so a small subset fits in budget without spatial bias toward the
+    first chunks. Use ``sample_every=1`` to take everything (until
+    byte budget runs out).
+    """
+    files = sorted(wiki_dir.glob("*.jsonl"))
+    n_files = n_in = n_out = n_subj = bytes_w = 0
+    for path in files:
+        n_files += 1
+        try:
+            with io.open(str(path), "r", encoding="utf-8", errors="replace") as f:
+                for i, line in enumerate(f):
+                    n_in += 1
+                    if sample_every > 1 and (i % sample_every) != 0:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    title = _normalize_text(row.get("name", ""), 200)
+                    if not title:
+                        continue
+                    abstract = _normalize_text(row.get("abstract", ""), 600)
+                    sections = row.get("sections")
+                    body_parts = _flatten_wikipedia_sections(sections)
+                    body = " ".join(_normalize_text(p, 1200) for p in body_parts)
+                    body = _normalize_text(body, max_chars_per_article)
+                    if not body and not abstract:
+                        continue   # stub article with neither
+
+                    # SUBJ from title hint (optional — many titles don't
+                    # encode an era). PUB skipped (see docstring).
+                    subj = _extract_title_subj(title)
+                    tag_parts = [f"[LANG:{lang}]"]
+                    if subj:
+                        tag_parts.append(f"[SUBJ:{subj}]")
+                        n_subj += 1
+                    head = " ".join(tag_parts)
+
+                    abstract_tag = f"\nABSTRACT: {abstract}" if abstract else ""
+                    body_tag = f"\nBODY: {body}" if body else ""
+                    record = f"{head} WIKI: {title}{abstract_tag}{body_tag}\n\n"
+                    chunk = record.encode("utf-8")
+                    if bytes_w + len(chunk) > byte_budget:
+                        return {"n_files": n_files, "n_articles_in": n_in,
+                                "n_records": n_out, "n_subj": n_subj,
+                                "bytes_written": bytes_w,
+                                "stopped_at": str(path.name), "lang": lang}
+                    out.write(chunk)
+                    bytes_w += len(chunk)
+                    n_out += 1
+        except Exception as e:
+            print(f"  skip wiki {path.name}: {e}", file=sys.stderr)
+        if n_files % 5 == 0:
+            print(f"    wiki[{lang}] {n_files} files, {n_out:,} articles, "
+                  f"{bytes_w/1e6:.1f} MB ({n_subj} with SUBJ)",
+                  file=sys.stderr)
+    return {"n_files": n_files, "n_articles_in": n_in,
+            "n_records": n_out, "n_subj": n_subj,
+            "bytes_written": bytes_w, "lang": lang}
+
+
 # ==Driver ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -661,23 +803,36 @@ def main() -> None:
     ap.add_argument("--factual-dir", type=Path, default=None,
                     help="Project Gutenberg-style factual/ dir with paired "
                          "<id>.txt + <id>_metadata.json files")
+    ap.add_argument("--wiki-en-dir", type=Path, default=None,
+                    help="English Wikipedia namespace_0 JSONL chunks dir "
+                         "(e.g. H:/wikipedia/enwiki_namespace_0)")
+    ap.add_argument("--wiki-fr-dir", type=Path, default=None,
+                    help="French Wikipedia namespace_0 JSONL chunks dir")
+    ap.add_argument("--wiki-sample-every", type=int, default=1,
+                    help="Keep every Nth Wikipedia article (1 = all). Use "
+                         "10 to subsample 10% if you'd rather have breadth "
+                         "across all chunks than depth in the first few.")
+    ap.add_argument("--wiki-max-chars-per-article", type=int, default=6000)
     ap.add_argument("--subj-map",    type=Path, default=None,
                     help="Optional JSON map {filename: subject_era_string} "
                          "from a Gemini classifier (see "
                          "classify_book_subjects.py). Takes priority over "
                          "title-hint extraction for books in the map.")
     ap.add_argument("--output",      type=Path, required=True)
-    ap.add_argument("--max-mb",      type=float, default=6144.0,
-                    help="Total output size cap in MB (default 6 GB to "
-                         "fit all four sources)")
-    ap.add_argument("--nyt-frac",     type=float, default=0.40)
-    ap.add_argument("--events-frac",  type=float, default=0.05)
-    ap.add_argument("--books-frac",   type=float, default=0.30)
-    ap.add_argument("--factual-frac", type=float, default=0.25)
+    ap.add_argument("--max-mb",      type=float, default=12288.0,
+                    help="Total output size cap in MB (default 12 GB to "
+                         "fit all six sources including Wikipedia EN+FR)")
+    ap.add_argument("--nyt-frac",     type=float, default=0.20)
+    ap.add_argument("--events-frac",  type=float, default=0.03)
+    ap.add_argument("--books-frac",   type=float, default=0.15)
+    ap.add_argument("--factual-frac", type=float, default=0.12)
+    ap.add_argument("--wiki-en-frac", type=float, default=0.35)
+    ap.add_argument("--wiki-fr-frac", type=float, default=0.15)
     ap.add_argument("--book-chunk-chars", type=int, default=3000)
     args = ap.parse_args()
 
-    s = args.nyt_frac + args.events_frac + args.books_frac + args.factual_frac
+    s = (args.nyt_frac + args.events_frac + args.books_frac
+         + args.factual_frac + args.wiki_en_frac + args.wiki_fr_frac)
     if abs(s - 1.0) > 0.01:
         print(f"  WARN: source fractions sum to {s:.2f}, not 1.0", file=sys.stderr)
     total_bytes = int(args.max_mb * 1024 * 1024)
@@ -685,6 +840,8 @@ def main() -> None:
     events_budget  = int(total_bytes * args.events_frac)
     books_budget   = int(total_bytes * args.books_frac)
     factual_budget = int(total_bytes * args.factual_frac)
+    wiki_en_budget = int(total_bytes * args.wiki_en_frac)
+    wiki_fr_budget = int(total_bytes * args.wiki_fr_frac)
 
     # Optional Gemini subj_map for books
     subj_map: dict[str, str] | None = None
@@ -699,6 +856,8 @@ def main() -> None:
     print(f"    events:  {events_budget/1e6:.0f} MB ({args.events_frac*100:.0f}%)")
     print(f"    books:   {books_budget/1e6:.0f} MB ({args.books_frac*100:.0f}%)")
     print(f"    factual: {factual_budget/1e6:.0f} MB ({args.factual_frac*100:.0f}%)")
+    print(f"    wiki_en: {wiki_en_budget/1e6:.0f} MB ({args.wiki_en_frac*100:.0f}%)")
+    print(f"    wiki_fr: {wiki_fr_budget/1e6:.0f} MB ({args.wiki_fr_frac*100:.0f}%)")
     print()
 
     summary: dict = {"sources": {}}
@@ -724,6 +883,20 @@ def main() -> None:
                 args.factual_dir, out, factual_budget,
                 chunk_chars=args.book_chunk_chars)
             print(f"    done: {summary['sources']['factual']}")
+        if args.wiki_en_dir is not None and args.wiki_en_dir.exists():
+            print("  == ingesting Wikipedia (EN) ==")
+            summary["sources"]["wiki_en"] = emit_wikipedia(
+                args.wiki_en_dir, out, wiki_en_budget, lang="en",
+                max_chars_per_article=args.wiki_max_chars_per_article,
+                sample_every=args.wiki_sample_every)
+            print(f"    done: {summary['sources']['wiki_en']}")
+        if args.wiki_fr_dir is not None and args.wiki_fr_dir.exists():
+            print("  == ingesting Wikipedia (FR) ==")
+            summary["sources"]["wiki_fr"] = emit_wikipedia(
+                args.wiki_fr_dir, out, wiki_fr_budget, lang="fr",
+                max_chars_per_article=args.wiki_max_chars_per_article,
+                sample_every=args.wiki_sample_every)
+            print(f"    done: {summary['sources']['wiki_fr']}")
 
     summary["output"] = str(args.output)
     summary["total_bytes"] = args.output.stat().st_size
