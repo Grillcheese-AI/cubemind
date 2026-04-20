@@ -86,6 +86,57 @@ def _extract_book_year(filename: str) -> int | None:
     return y if 1000 <= y <= 2029 else None
 
 
+# Content-based publication-year fallback. Patterns are intentionally
+# restricted to *explicit publication markers* (copyright lines, "First
+# published in YYYY", etc.) so encyclopedias and history books — which
+# mention hundreds of historical years like "in 1875, the Civil War..."
+# — don't get falsely tagged with their *content* dates. We only match
+# years that appear inside one of these phrases.
+#
+# We pick the MOST RECENT year matched: revisions and reprints push
+# the publication date forward, so taking max() across hits captures
+# the latest edition's date.
+_CONTENT_YEAR_PATTERNS = [
+    re.compile(r"(?:©|\(c\)|Copyright)\s+(?:\d{4}\s*[-,]\s*)?(\d{4})", re.IGNORECASE),
+    re.compile(r"First\s+published\s+(?:in\s+)?(\d{4})", re.IGNORECASE),
+    re.compile(r"First\s+edition\s+(?:in\s+)?(\d{4})", re.IGNORECASE),
+    re.compile(r"Originally\s+published\s+(?:in\s+)?(\d{4})", re.IGNORECASE),
+    re.compile(r"Published\s+(?:in\s+)?(\d{4})", re.IGNORECASE),
+    re.compile(r"Printed\s+in\s+(?:\w+\s+)?(\d{4})", re.IGNORECASE),
+    re.compile(r"This\s+edition\s+(?:was\s+)?(?:first\s+)?published\s+(?:in\s+)?(\d{4})", re.IGNORECASE),
+    re.compile(r"All\s+rights\s+reserved\.?\s*[\(\)\s\-,c©]*(\d{4})", re.IGNORECASE),
+    re.compile(r"ISBN[\s:-]*[\d\-X]+\s*[\(\)\s,]*(\d{4})", re.IGNORECASE),
+]
+
+
+def _extract_content_year(text: str,
+                          head_chars: int = 16000,
+                          tail_chars: int = 6000) -> int | None:
+    """Scan first ``head_chars`` + last ``tail_chars`` of book text for
+    explicit publication markers. Front matter usually carries the
+    copyright line; back matter often repeats it (publisher info,
+    'About the Author', reprint history). Returns the most recent year
+    found across all patterns, range-limited to 1500-2029.
+    """
+    if not text:
+        return None
+    head = text[:head_chars]
+    tail = text[-tail_chars:] if len(text) > head_chars else ""
+    haystack = head + "\n" + tail
+    candidates: list[int] = []
+    for pat in _CONTENT_YEAR_PATTERNS:
+        for m in pat.finditer(haystack):
+            try:
+                y = int(m.group(1))
+            except (ValueError, IndexError):
+                continue
+            if 1500 <= y <= 2029:
+                candidates.append(y)
+    if not candidates:
+        return None
+    return max(candidates)
+
+
 def _normalize_text(s: str, max_chars: int = 4000) -> str:
     """Collapse whitespace, strip, optionally truncate. Long passages
     truncated to ``max_chars`` to keep individual records manageable
@@ -181,8 +232,13 @@ def emit_events(globs: list[str], out, byte_budget: int) -> dict:
                     try: row = json.loads(line)
                     except json.JSONDecodeError: continue
                     # Date: try several keys, take the first that yields a year.
+                    # Includes the schema used by the historical_events_*.jsonl
+                    # files in temporal/historical/ which key dates as
+                    # earliest_date_year + latest_date_year.
                     year = None
-                    for k in ("year", "date", "pub_date", "event_date", "timestamp"):
+                    for k in ("year", "date", "pub_date", "event_date", "timestamp",
+                              "earliest_date_year", "latest_date_year",
+                              "earliestDateYear"):
                         v = row.get(k)
                         if isinstance(v, int) and 1000 <= v <= 2029:
                             year = v; break
@@ -223,11 +279,14 @@ def emit_books(books_dir: Path, out, byte_budget: int,
     are emitted as ``[BOOK]`` with no date — still useful as undated
     historical context."""
     files = sorted(books_dir.glob("*.txt"))
-    n_files = n_chunks = n_dated = bytes_w = 0
+    n_files = n_chunks = n_dated = n_dated_filename = n_dated_content = bytes_w = 0
     for path in files:
         n_files += 1
+        # Try filename-leading year first (rare, ~6% in this corpus); fall
+        # back to scanning the first 8 KB of book content for explicit
+        # copyright / "First published" markers.
         year = _extract_book_year(path.name)
-        title = _normalize_text(path.stem, 200)
+        year_source = "filename" if year else None
         try:
             with io.open(str(path), "r", encoding="utf-8", errors="replace") as f:
                 text = f.read()
@@ -237,9 +296,18 @@ def emit_books(books_dir: Path, out, byte_budget: int,
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
+        if year is None:
+            year = _extract_content_year(text)
+            if year is not None:
+                year_source = "content"
+        title = _normalize_text(path.stem, 200)
         date_tag = f"[DATE:{year}] " if year else "[BOOK] "
         if year:
             n_dated += 1
+            if year_source == "filename":
+                n_dated_filename += 1
+            else:
+                n_dated_content += 1
         for i in range(0, len(text), chunk_chars):
             piece = text[i : i + chunk_chars]
             if i + chunk_chars < len(text):
@@ -249,6 +317,8 @@ def emit_books(books_dir: Path, out, byte_budget: int,
             chunk = record.encode("utf-8")
             if bytes_w + len(chunk) > byte_budget:
                 return {"n_files": n_files, "n_dated": n_dated,
+                        "n_dated_filename": n_dated_filename,
+                        "n_dated_content": n_dated_content,
                         "n_records": n_chunks, "bytes_written": bytes_w,
                         "stopped_at": path.name}
             out.write(chunk)
@@ -256,9 +326,12 @@ def emit_books(books_dir: Path, out, byte_budget: int,
             n_chunks += 1
         if n_files % 100 == 0:
             print(f"    books {n_files} files, {n_chunks:,} chunks, "
-                  f"{bytes_w/1e6:.1f} MB ({n_dated} dated)",
+                  f"{bytes_w/1e6:.1f} MB ({n_dated} dated: "
+                  f"{n_dated_filename} fn / {n_dated_content} content)",
                   file=sys.stderr)
     return {"n_files": n_files, "n_dated": n_dated,
+            "n_dated_filename": n_dated_filename,
+            "n_dated_content": n_dated_content,
             "n_records": n_chunks, "bytes_written": bytes_w}
 
 
