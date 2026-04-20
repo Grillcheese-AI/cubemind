@@ -32,6 +32,27 @@ build/
 # Docs (embargoed until NeurIPS 2026 submission)
 /docs
 
+# Specific docs that are NOT embargoed and should be tracked.
+# Add new entries here individually — never add "!/docs/papers/" or
+# similar broad un-ignores, as that would expose the embargoed
+# cubemind_iravenx_neurips2026.{md,tex,pdf} files.
+#
+# To un-ignore a file inside docs/, you need to un-ignore each parent
+# directory first, then re-ignore everything inside it, then explicitly
+# allow the file. Pattern:
+#   !/docs/
+#   /docs/*
+#   !/docs/papers/
+#   /docs/papers/*
+#   !/docs/papers/MY_FILE.md
+#
+# Below is the minimal set for the LM training paper:
+!/docs/
+/docs/*
+!/docs/papers/
+/docs/papers/*
+!/docs/papers/cubemind_lm_h200_training.md
+
 # Non-core directories (local experiments, not part of package)
 
 /notebooks
