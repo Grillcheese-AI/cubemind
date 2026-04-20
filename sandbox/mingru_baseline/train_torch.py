@@ -1811,11 +1811,115 @@ def _top_p_filter(logits: torch.Tensor, top_p: float) -> torch.Tensor:
     return logits.masked_fill(mask, float("-inf"))
 
 
+# Forced single-token markup symbols emitted by the multitask SVC pipeline
+# (see ``opcode-vsa-rs/examples/emit_multitask_jsonl.rs``). These appear as
+# 1-token IDs in ``grillcheese_spm32k_v2`` and can leak into LM-mode
+# generation when the model has seen them in pretraining text (HTML/scraped
+# corpora occasionally contain literal substrings like ``<RULE>``). Banned
+# by default in ``generate()`` for news/prose use; CoT-style generation
+# can opt back in by passing ``forbid_special_tokens=False``.
+DEFAULT_FORBIDDEN_MARKUP: tuple[str, ...] = (
+    "<TASK:SCHEMA2RULE>",
+    "<SCHEMA>",  "</SCHEMA>",
+    "<INSTR>",   "</INSTR>",
+    "<TRACE>",   "</TRACE>",
+    "<RULE>",    "</RULE>",
+    "<OPCODE>",  "</OPCODE>",
+    "<VALID>",   "</VALID>",
+)
+
+
+def _resolve_forbidden_token_ids(tokenizer, extra: list[str] | None = None,
+                                 ) -> list[int]:
+    """Look up each forbidden marker string in the tokenizer's vocab. Tokens
+    that aren't present (different tokenizer) are silently skipped.
+
+    Cached on the tokenizer instance so repeated calls during generation
+    don't re-encode the same strings.
+    """
+    cache_key = "_forbidden_ids_cache"
+    cached = getattr(tokenizer, cache_key, None)
+    if cached is not None and extra is None:
+        return cached
+    ids: set[int] = set()
+    candidates = list(DEFAULT_FORBIDDEN_MARKUP) + list(extra or [])
+    for s in candidates:
+        try:
+            enc = tokenizer.encode(s).ids
+        except Exception:
+            continue
+        # Only count it as "the dedicated single-token symbol" when the
+        # tokenizer encodes the marker as exactly one token. Otherwise
+        # the marker is being decomposed and there's no single id to ban.
+        if len(enc) == 1:
+            ids.add(int(enc[0]))
+    out = sorted(ids)
+    if extra is None:
+        try:
+            setattr(tokenizer, cache_key, out)
+        except Exception:
+            pass
+    return out
+
+
+def _ban_token_ids(logits: torch.Tensor, banned_ids: list[int]) -> torch.Tensor:
+    """Mask the given token IDs to ``-inf`` so they're unreachable by
+    softmax/multinomial. ``logits`` is mutated in-place when possible."""
+    if not banned_ids:
+        return logits
+    idx = torch.as_tensor(banned_ids, dtype=torch.long, device=logits.device)
+    logits.index_fill_(-1, idx, float("-inf"))
+    return logits
+
+
+def _apply_repetition_penalty(logits: torch.Tensor, recent_ids: list[int],
+                              penalty: float) -> torch.Tensor:
+    """Down-weight recently-emitted tokens. ``penalty > 1.0`` discourages
+    repeats: positive logits divide by ``penalty``, negative multiply
+    (HuggingFace convention — preserves sign-aware ranking).
+    """
+    if penalty <= 1.0 or not recent_ids:
+        return logits
+    idx = torch.as_tensor(list(set(recent_ids)),
+                          dtype=torch.long, device=logits.device)
+    sel = logits.index_select(-1, idx)
+    sel = torch.where(sel > 0, sel / penalty, sel * penalty)
+    logits.index_copy_(-1, idx, sel)
+    return logits
+
+
+def _ban_repeating_ngrams(logits: torch.Tensor, prev_ids: list[int],
+                          n: int) -> torch.Tensor:
+    """For each n-gram seen in ``prev_ids``, if the last ``n-1`` tokens
+    match its prefix, ban the completion token. Implements
+    ``no_repeat_ngram_size`` semantics from HuggingFace ``generate``.
+    """
+    if n <= 0 or len(prev_ids) < n:
+        return logits
+    prefix = tuple(prev_ids[-(n - 1):]) if n > 1 else ()
+    banned: set[int] = set()
+    for i in range(len(prev_ids) - n + 1):
+        ngram = tuple(prev_ids[i : i + n])
+        if ngram[: n - 1] == prefix:
+            banned.add(ngram[-1])
+    return _ban_token_ids(logits, list(banned))
+
+
 @dataclass
 class GenParams:
     temperature: float = 0.8
     top_p: float = 0.9
     max_new_tokens: int = 120
+    # Sampling-side decoding fixes (added 2026-04-20) — defaults match the
+    # behaviour we found necessary on the H200 step-4000 checkpoint to
+    # eliminate (a) opcode/role-token leakage in news prose, and
+    # (b) "10th anniversary of the 10th anniversary..." repetition
+    # attractors that nucleus sampling alone can't escape.
+    repetition_penalty: float = 1.15            # 1.0 = off; 1.15-1.2 typical
+    repetition_window: int = 64                 # last-N tokens for penalty
+    no_repeat_ngram_size: int = 3               # 0 = off; 3 kills loops cold
+    forbid_special_tokens: bool = True          # mask DEFAULT_FORBIDDEN_MARKUP
+    extra_forbidden_strings: tuple[str, ...] = ()  # additional bans (e.g. "FILTER")
 
 
 @torch.no_grad()
@@ -1826,16 +1930,55 @@ def generate(model: MinGRUModel, tokenizer, prompt: str, params: GenParams,
     tokens = torch.tensor([ids], dtype=torch.long, device=device)
     seq_len = model.cfg.seq_len
 
+    # Resolve banned token IDs once per call (cached on tokenizer for repeat
+    # generations). Combines the default markup ban + any extra strings the
+    # caller passed in (e.g. ``FILTER`` opcode mnemonic if it shows up).
+    forbidden_ids: list[int] = []
+    if params.forbid_special_tokens:
+        extra = list(params.extra_forbidden_strings) or None
+        forbidden_ids = _resolve_forbidden_token_ids(tokenizer, extra=extra)
+
+    generated_ids: list[int] = []  # only the new tokens, for repetition logic
+
     for _ in range(params.max_new_tokens):
         context = tokens[:, -seq_len:]
-        logits = model(context)[:, -1, :]  # (1, V)
+        logits = model(context)[:, -1, :]      # (1, V)
+        logits_1d = logits[0]                  # (V,) — work in-place from here
+
+        # Sampling-side decoding fixes (in this order):
+        #   1. Ban forced markup tokens (<RULE>, <INSTR>, ...) so they can
+        #      never be sampled, regardless of how the model rates them.
+        #   2. Down-weight recently-emitted tokens (repetition penalty).
+        #   3. Ban completions that would form a banned n-gram repeat.
+        #   4. Temperature → top-p → multinomial.
+        # All four steps are pure logit transforms; no model retraining.
+        if forbidden_ids:
+            _ban_token_ids(logits_1d, forbidden_ids)
+
+        if not greedy and params.repetition_penalty > 1.0 and generated_ids:
+            window = generated_ids[-params.repetition_window:]
+            _apply_repetition_penalty(logits_1d, window,
+                                      params.repetition_penalty)
+
+        if not greedy and params.no_repeat_ngram_size > 0:
+            _ban_repeating_ngrams(logits_1d, generated_ids,
+                                  params.no_repeat_ngram_size)
+
         if greedy:
-            next_id = int(torch.argmax(logits, dim=-1).item())
+            next_id = int(torch.argmax(logits_1d, dim=-1).item())
         else:
-            logits = logits / max(params.temperature, 1e-5)
-            filt = _top_p_filter(logits[0], params.top_p)
+            logits_1d = logits_1d / max(params.temperature, 1e-5)
+            filt = _top_p_filter(logits_1d, params.top_p)
             probs = torch.softmax(filt, dim=-1)
-            next_id = int(torch.multinomial(probs, 1).item())
+            # Top-p + bans can produce all-(-inf) logits (probs sum to 0 →
+            # multinomial errors). Fall back to the unfiltered argmax in
+            # that rare case so we always emit something.
+            if torch.isfinite(probs).any() and probs.sum() > 0:
+                next_id = int(torch.multinomial(probs, 1).item())
+            else:
+                next_id = int(torch.argmax(logits[0], dim=-1).item())
+
+        generated_ids.append(next_id)
         tokens = torch.cat([tokens, tokens.new_tensor([[next_id]])], dim=1)
 
     model.train()
