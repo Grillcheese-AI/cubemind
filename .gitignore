@@ -101,3 +101,4 @@ logs/distill_500.log
 logs/distill_5000.log
 CLAUDE.md
 /sandbox/mingru_baseline
+/.claude

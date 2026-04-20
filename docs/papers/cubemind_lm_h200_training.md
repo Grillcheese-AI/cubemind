@@ -1,6 +1,6 @@
-# CubeMind-200M: A Hybrid VSA-Recurrent-MoE Language Model with In-Place Online Learning
+# CubeMind-213M: A Hybrid VSA-Recurrent-MoE Language Model with In-Place Online Learning
 
-**Status:** Draft — training in progress on H200 SXM, target completion 2026-04-21
+**Status:** Draft — stage 1 run 1 complete (8,000 steps, val PPL 5.17, 5.3 h / ≈ $22 on H200 SXM). Stages 1.5 (temporal/identity) and 2 (multitask heads) pending.
 **Working title:** *Compute-Efficient Hybrid Architecture for Language Modeling
 with In-Place Multitask Heads and Online LoRA Plasticity*
 **Owner:** Grillcheese Research Labs
@@ -14,22 +14,24 @@ with In-Place Multitask Heads and Online LoRA Plasticity*
 
 ## Abstract *(draft)*
 
-We present CubeMind-200M, a 200M-parameter language model whose backbone composes
-a MinGRU recurrence (Feng et al., 2024) with local sliding-window attention,
-4-expert top-2 MoE routing, and a hippocampal episodic memory. The output head is
-a fixed VSA bipolar codebook lookup (~3× fewer learned parameters than a tied
-Linear LM head at the same vocabulary). Per-layer hypergradient modulation
-(Yerkes-Dodson surprise tracker) gates the recurrence. Five MindForge LoRA
-hypernet heads (opcode, intent, schema, rule, validity) sit on top of the
-shared backbone and admit single-step NLMS online updates on a plastic
-``basis_B`` parameter at inference time, leaving the backbone and other heads
-frozen.
+We present CubeMind-213M, a 213.8M-parameter language model whose backbone
+composes a MinGRU recurrence (Feng et al., 2024) with local sliding-window
+attention, 4-expert top-2 MoE routing, and a hippocampal episodic memory. The
+output head is a fixed VSA bipolar codebook lookup (~3× fewer learned
+parameters than a tied Linear LM head at the same vocabulary). Per-layer
+hypergradient modulation (Yerkes-Dodson surprise tracker) gates the
+recurrence. Five MindForge LoRA hypernet heads (opcode, intent, schema, rule,
+validity) sit on top of the shared backbone and admit single-step NLMS
+online updates on a plastic ``basis_B`` parameter at inference time, leaving
+the backbone and other heads frozen.
 
-We train at 5.2B tokens with a two-stage protocol — language-model pretrain at
-seq=768, then a frozen-backbone multitask head fine-tune — on an H200 SXM
-single GPU in under XX hours. The model reaches val perplexity **TBD** on a
-news-prose held-out set, **outperforming Pythia-1.4B** (PPL ~12) at 1/7 the
-parameter count and a tiny fraction of the training tokens. The bipolar VSA
+We train with a three-stage protocol — (1) language-model pretrain on news
+prose + reasoning traces, (1.5) temporal / identity fine-tune that teaches
+time-aware factuality and a first-person referent, and (2) a frozen-backbone
+multitask head fine-tune — on a single H200 SXM GPU. **Stage 1 run 1 completed
+8,000 steps / 589 M tokens in 5.32 h at ≈ $22, reaching val perplexity 5.17
+on a held-out news-prose set, outperforming Pythia-1.4B (PPL ~12) at 1/7 the
+parameter count and a fraction of the training tokens.** The bipolar VSA
 binding head, MoE expert specialization, and Heinsen 2023 parallel scan are
 the three architectural choices that make eager-mode H200 training viable
 without `torch.compile`.
@@ -54,10 +56,10 @@ deployment flexibility (does the model adapt at inference, or is it frozen?).
 Pure-transformer architectures at the 100M-1B scale typically fix the first
 two and forfeit the third — once trained, the model is a static artifact.
 
-CubeMind-200M aims at the middle ground: a small model (200M) that trains
-cheaply (single-GPU, ~10 hours, ~$50) and admits online learning at
-inference time (single-step NLMS on plastic LoRA parameters) without
-risking the backbone.
+CubeMind-213M aims at the middle ground: a 213.8M-parameter model whose
+stage-1 run trained cheaply (single-GPU H200 SXM, 5.32 hours, ≈ $22 at $4/h)
+and admits online learning at inference time (single-step NLMS on plastic
+LoRA parameters) without risking the backbone.
 
 ### 1.2 Contributions
 
@@ -250,29 +252,81 @@ downcast to caller's dtype on return.
 H200 SXM at $d=768, L=12, S=1024$. The original Python loop is preserved
 in the docstring as the reference for future ports.
 
-### 4.2 Two-stage protocol
+### 4.2 Three-stage protocol
 
-**Stage 1 — LM pretrain (~10h, $50 on H200 SXM):**
+**Stage 1 — LM pretrain** *(run 1: 5.32 h / ≈ $22 on H200 SXM at 8,000 steps;
+full 20k-step plan: ~10 h / ~$50):*
+
+| Hyperparameter | Run 1 | Notes |
+|---|---|---|
+| $d_\text{model}$ | 768 | |
+| $L$ | 12 | |
+| $d_\text{ffn}$ | 3072 | |
+| $V$ (vocab) | 32,128 | `grillcheese_spm32k_v2` SentencePiece BPE |
+| Sequence length | 768 | reduced from 1024 mid-run for throughput |
+| batch_size × grad_accum | 24 × 4 | effective 96 samples / step |
+| Effective tokens / step | 73,728 | 96 × 768 |
+| Steps | 8,000 (stopped) | 20,000 planned across runs 1 + 2 |
+| Tokens seen | 589 M | ~5.2 B at full plan |
+| LR schedule | cosine, $6\text{e-}4 \to 6\text{e-}5$, 1,500-step warmup | |
+| Weight decay | 0.01 | |
+| Grad clip | 1.0 | |
+| dtype | bf16 (autocast) | |
+| Optimizer | AdamW (fused) | |
+| Params | 213,784,368 (213.8 M) | |
+
+Hybrid stack flags: `--vsa-binding-head --moe --attention --memory --hypergrad`.
+MoE: 4 experts, top-2. Local attention: 4 heads, window 128, every 3rd layer.
+Memory: `mem_max=200`, write threshold 0.4, every 4th layer, consolidate every
+1,000. VSA binding: D = 10,240, seed 3235819532. Aux opcode loss: weight 0.4
+(55 classes) — other heads defer to stage 2.
+
+Run-1 artifacts: `D:\grillcheese_training_data\h200_run1\summary.json`,
+`best.pt` + `checkpoint.pt` (each ~3.1 GB), and per-500-step generation
+samples `gen_step_*.md`.
+
+**Stage 1.5 — temporal / identity fine-tune on pre-trained backbone**
+*(next run, ~$25 incremental on H200 SXM):*
+
+Between stage 1 and stage 2 we interleave a targeted fine-tune that teaches two
+things the news-prose corpus underrepresents:
+
+1. **Time-aware factuality.** The corpus is assembled by
+   `sandbox/mingru_baseline/build_temporal_corpus.py` from NYT (1851→present),
+   historical-events datasets, Gemini-classified Gutenberg factual books,
+   Wikipedia English (75 GB) and Wikipedia French (32 GB). Each document
+   carries a **PUB/SUBJ date split** — `pub_date` (copyright / issue date) vs
+   `subj_date` (the period the content *refers to*). Without this, a 2020
+   encyclopedia passage about the US Civil War trains the model to associate
+   *1860s content* with the year 2020. A Gemini classifier
+   (`sandbox/mingru_baseline/classify_book_subjects.py`) resolves ambiguous
+   cases. Data is emitted as `[<TASK:PUB:1869>]…` and `[<TASK:SUBJ:1860s>]…`
+   forced-token-tagged streams.
+2. **First-person identity.** The corpus is assembled by
+   `sandbox/mingru_baseline/build_identity_corpus.py` from
+   `D:\grillcheese_training_data\pre\identityA.jsonl` and `affect_from_convos.jsonl`,
+   chat-tagged with the four forced single-token symbols (`<|system|>`,
+   `<|user|>`, `<|assistant|>`, `<|tool|>`) so chat framing costs a constant
+   4 tokens per turn. The corpus is rebranded at content level from legacy
+   "grillcheese AI" to **CubeMind** (repo / URL strings preserved — content
+   rebrand only).
+
+Stage-1.5 launcher: `sandbox/mingru_baseline/run_h200_stage15_temporal.sh`.
 
 | Hyperparameter | Value |
 |---|---|
-| $d_\text{model}$ | 768 |
-| $L$ | 12 |
-| $d_\text{ffn}$ | 3072 |
-| $V$ (vocab) | 32,128 |
-| Sequence length | 768-1024 (configurable) |
-| Effective batch | 256 (32 × accum 8) |
-| Steps | 20,000 |
-| Tokens seen | ~5.2B |
-| LR schedule | cosine, $6\text{e-}4 \to 6\text{e-}5$, 1500-step warmup |
-| Weight decay | 0.01 |
-| Grad clip | 1.0 |
-| dtype | bf16 (autocast) |
-| Optimizer | AdamW (fused) |
+| `--init-from` | `checkpoints/stage1_final.pt` |
+| Primary stream | temporal corpus v3 (PUB + SUBJ tagged shards) |
+| Aux stream | identity corpus, `--aux-weight 0.1` |
+| Steps | ~2,000 |
+| LR | 1e-4 constant (no warmup — backbone already at operating point) |
+| Sequence length | 768 |
+| Loss | same stack: LM CE + opcode aux |
 
-Hybrid stack flags: `--vsa-binding-head --moe --attention --memory --hypergrad`.
+Resulting checkpoint is the target artifact for `live_adapter.py` hot-load and
+the input to stage 2.
 
-**Stage 2 — multitask head fine-tune on frozen backbone (~30-60min, $3-5):**
+**Stage 2 — multitask head fine-tune on frozen backbone (~30-60 min, $3-5):**
 
 `--init-from <stage1.pt> --freeze-backbone` loads stage-1 weights and freezes
 the backbone (215 tensors), leaving only the 5 MindForge head modules
@@ -387,22 +441,34 @@ loops) without retraining.
 
 ## 6. Results *(in progress)*
 
-### 6.1 Stage 1 perplexity trajectory
+### 6.1 Stage 1 perplexity trajectory *(run 1, complete)*
 
-*To fill in from final summary.json.*
+Source: `D:\grillcheese_training_data\h200_run1\summary.json` + `gen_step_*.md`
+validation headers. Tokens/step = 73,728 (seq 768 × effective batch 96).
 
 | Step | Tokens seen | Val CE | Val PPL |
 |---|---|---|---|
-| 500 | 131M | 3.10 | 22.3 |
-| 1000 | 262M | 2.52 | 12.4 |
-| 1500 | 393M | 2.28 | 9.76 |
-| 2000 | 524M | 2.12 | 8.31 |
-| 3500 | 918M | 1.90 | 6.66 |
-| 4000 | 1.05B | 1.85 | 6.35 |
-| 4479 | ~1.17B | TBD | **4.x** ← first sub-5 |
-| 5000 | TBD | TBD | TBD |
-| 10000 | TBD | TBD | TBD |
-| 20000 | TBD | TBD | TBD |
+| 500 | 37M | 3.1036 | 22.28 |
+| 1,000 | 74M | 2.5198 | 12.43 |
+| 1,500 | 111M | 2.2784 | 9.76 |
+| 2,000 | 147M | 2.1180 | 8.31 |
+| 2,500 | 184M | 2.0170 | 7.52 |
+| 3,000 | 221M | 1.9482 | 7.02 |
+| 3,500 | 258M | 1.8963 | 6.66 |
+| 4,000 | 295M | 1.8489 | 6.35 |
+| 4,500 | 332M | 1.8076 | 6.10 |
+| 5,000 | 368M | 1.7753 | 5.90 |
+| 5,500 | 405M | 1.7425 | 5.71 *(first sub-6 val)* |
+| 6,000 | 442M | 1.7192 | 5.58 |
+| 6,500 | 479M | 1.6981 | 5.46 |
+| 7,000 | 516M | 1.6827 | 5.38 |
+| **8,000 (final)** | **589M** | **1.6430** | **5.17** |
+
+Best-saved-checkpoint val PPL (`best.pt`): 5.271 (CE 1.6622). The **final-step
+val is better than best-saved** because the eval-every-500 tracker captures
+`best.pt` at the last intra-interval eval, and the step-8,000 post-training
+evaluation happened to record the run's lowest CE. `best.pt` and
+`checkpoint.pt` (≈ 3.1 GB each) both ship in the run-1 directory.
 
 ### 6.2 Comparison to peer 100M-1B models
 
@@ -413,7 +479,7 @@ loops) without retraining.
 | OPT-125M | 125M | 180B | ~30 |
 | Pythia-410M | 410M | 300B | ~18 |
 | Pythia-1.4B | 1.4B | 300B | ~12 |
-| **CubeMind-200M @ step 4479** | **200M** | **1.17B** | **4.x** |
+| **CubeMind-213M @ step 8,000 (run 1 final)** | **213.8M** | **589M** | **5.17** |
 
 ### 6.3 Multitask head accuracies (Stage 2)
 
@@ -444,12 +510,17 @@ Sleep consolidation log over the run:
 
 ### 6.6 Throughput and cost
 
-| Phase | Wall clock | Cost on H200 SXM ($5/h) |
-|---|---|---|
-| Tokenization (one-time) | ~10 min on H200 NVMe (vs 7h on RTX 5090 community) | ~$1 |
-| Stage 1 (20K steps, 5.2B tok) | ~10-13h | ~$50-65 |
-| Stage 2 (3K steps) | ~30-60min | ~$3-5 |
-| **Total end-to-end** | **~11-14h** | **~$55-70** |
+Run-1 throughput (from `summary.json`): **30,765 tok/s average**, eager mode,
+no `torch.compile`. Peak step rate ≈ 31.1 K tok/s (step 8,000 tail).
+
+| Phase | Wall clock | Cost on H200 SXM ($4/h) | Status |
+|---|---|---|---|
+| Tokenization upload (one-time) | ~10 min on H200 NVMe (vs 7 h RTX 5090 community) | ≈ $1 | done |
+| **Stage 1 run 1** (8,000 steps, 589 M tok) | **5.32 h** | **≈ $22** | ✅ complete (val PPL 5.17) |
+| Stage 1 run 2 (continuation to 20,000 steps, ~5.2 B tok) | ~7 h | ~$28 | planned |
+| Stage 1.5 (temporal + identity, ~2,000 steps) | ~1–1.5 h | ~$5 | planned (§4.2) |
+| Stage 2 (multitask heads, ~3,000 steps) | 30–60 min | $3–5 | planned |
+| **Total end-to-end (plan)** | **~14–15 h** | **~$58–61** | |
 
 ---
 
