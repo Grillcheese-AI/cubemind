@@ -16,7 +16,7 @@ The Python layer is the highest-level coordination tier. It owns:
 2. The VSA-VM interpreter with 45 + 10 opcodes (`reasoning/vm.py`)
 3. The cognitive pipeline modules: SNN, neurochemistry, memory, neurogenesis
 4. MindForge: VSA-conditioned hypernetwork for LoRA adapter generation
-5. The CubeMind-LM trainer bridge — sandbox PyTorch is canonical (grilly port deferred, see `07-migration-roadmap.md` §7.2.1)
+5. The CubeMind-LM trainer bridge — sandbox PyTorch is the canonical LM implementation; grilly port of the LM trainer is deferred (see `07-migration-roadmap.md` §7.2.1). Non-LM pieces (VSA, SNN, hippocampus, MindForge in-layer) continue to use grilly.
 6. The 5-head MindForgeLoRAHead multitask stack
 7. The LiveAdapter online-learning surface
 8. The CLI (`__main__.py`) and FastAPI server (`cloud/api.py`)

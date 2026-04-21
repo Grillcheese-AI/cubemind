@@ -38,29 +38,57 @@ row states what lands, what unlocks, and what it costs.
 | ANN search | Rust `MmapIndex` + LSH |
 | Live brain | Same hardware, new components (stage-2 CubeMind-LM + LiveAdapter) |
 
-### 7.2.1 Why the PyTorch sandbox stays canonical
+### 7.2.1 Why the PyTorch sandbox stays canonical (LM-only scope)
 
-The grilly port **does not happen until the torch version is stable and tested
-for ALL components** — not "some", not "most", all of them.
+**This deferral applies to the CubeMind-LM trainer only.** The rest of the
+framework — grilly VSA ops, SNN / GIF neurons, HippocampalFormation,
+MindForge in-layer adapters, Neurochemistry, STDP / Synapsis, Neurogenesis,
+the live-brain perception loop — continues to rely on grilly as it does
+today. CLAUDE.md rule #1 ("Always use grilly GPU ops, never raw numpy, for
+VSA operations") is in force. This section is not an instruction to stop
+using grilly — it is an instruction about where the *canonical LM trainer*
+lives.
+
+The CubeMind-LM grilly port **does not happen until the PyTorch version of
+the LM is stable and tested for ALL LM components** — not "some", not "most",
+all of them.
 
 Rationale: CubeMind-LM is a research artefact. The intended audience is
-industry ML researchers, who all use PyTorch at this stage. Porting to grilly
-(Vulkan + custom shaders) before the architecture stabilises means external
-researchers can't reproduce, ablate, or fork the work. A grilly-only codebase
-is a closed-world tool; a PyTorch codebase is a research contribution.
+industry ML researchers, who all use PyTorch at this stage. Porting the LM
+trainer to grilly (Vulkan + custom shaders) before the architecture
+stabilises means external researchers can't reproduce, ablate, or fork the
+work. A grilly-only LM trainer is a closed-world tool; a PyTorch LM trainer
+is a research contribution.
 
-Consequences for this roadmap:
-- **Sandbox/PyTorch is not a bridge** to grilly. It is the canonical public
-  implementation until ALL components are stable, tested, and published.
-- **Grilly port is a later-stage internal optimisation**, not a research
-  milestone. It does not block stage 1.5, stage 2, long-context extension,
-  ablations, or publication.
-- **Parity gates (§7.5) are not prerequisites for anything on the critical
-  path.** They are nice-to-haves that happen after the PyTorch version has
-  been fully validated end-to-end.
-- **HuggingFace / PyPI release ships the PyTorch stack**, not the grilly
-  stack. Grilly remains the in-house GPU backend for the live brain and
-  Vulkan targets, not the primary public surface.
+Consequences for this roadmap (**scope: CubeMind-LM trainer only**):
+
+- **Sandbox/PyTorch is not a bridge** to grilly for the LM. It is the
+  canonical public LM implementation until all LM components are stable,
+  tested, and published.
+- **Grilly LM-trainer port is a later-stage internal optimisation**, not a
+  research milestone. It does not block stage 1.5, stage 2, long-context
+  extension, ablations, or publication.
+- **Parity gates in §7.5 apply to LM components only.** They happen after the
+  PyTorch LM version has been fully validated end-to-end.
+- **HuggingFace / PyPI release ships the PyTorch LM stack**, not a grilly-only
+  LM. Grilly stays the GPU backend for everything non-LM.
+
+Out of scope for this deferral (continues to use grilly normally):
+
+| Component | grilly role |
+|---|---|
+| VSA block-code ops (bind, unbind, bundle, similarity) | grilly shaders via `ops/block_codes.py` 3-level fallback — unchanged |
+| SNN / GIF neurons (`brain/gif_neuron.py`, `brain/snn_ffn.py`) | grilly `snn.py` / `snn_compute.py` + shaders |
+| HippocampalFormation | grilly `faiss-topk.glsl` + `blockcode-similarity.glsl` |
+| MindForge in-layer form (`execution/mindforge.py`) | grilly `lora.glsl` + `mindforge_basis_mix` shader |
+| STDP / Synapsis / Neurogenesis / Neurochemistry | grilly backend |
+| Live brain (`scripts/live_brain.py`) | AMD RX 6750 XT via grilly Vulkan |
+| EWC Fisher + penalty | grilly shaders already ship |
+| VSA-VM execution (at scale) | grilly-accelerated HammingIndex / cleanup memory |
+
+Only **the LM trainer** (`sandbox/mingru_baseline/train_torch.py` and its
+future descendants) stays on PyTorch until the LM trainer is end-to-end stable
+and published. Everything else stays on grilly today.
 
 ---
 
@@ -74,7 +102,7 @@ This is the critical-path sequence. Each stage depends on the previous.
 | **1.5** — Temporal + identity fine-tune | PUB/SUBJ-dated corpus (NYT + Wikipedia EN/FR + Gutenberg) + chat-tagged identity corpus. Teaches time-aware factuality and first-person referent. | ~2,000 steps / ~$5 | Launcher `run_h200_stage15_temporal.sh` ready; pending next RunPod session |
 | **2** — Multitask heads | Frozen backbone, train 5 MindForgeLoRAHead modules (opcode / intent / schema / rule / validity) | ~3,000 steps / $3–5 | Pending 1.5 |
 | **LC** — Long-context extension | Ladder fine-tune seq=4096 → 16K → 32K. Promote `HyperAxialAttention` into the stack. | ~1,500 steps across three ladder steps / ~$25 | Planned after stage 2 |
-| **Port** — grilly parity | Re-implement each hybrid component as a grilly shader. **Does not run until the PyTorch version is stable and tested for ALL components** (see §7.2.1). Not on the research critical path; not a prerequisite for publication or HF release. | ~person-week per component | Deferred — gated on full PyTorch stack validation, not on any individual stage completing |
+| **Port** — grilly parity (**LM only**) | Re-implement each CubeMind-LM hybrid component as a grilly shader. **Does not run until the PyTorch LM version is stable and tested for ALL LM components** (§7.2.1). Not on the research critical path; not a prerequisite for publication or HF release. Non-LM framework pieces (SNN, VSA ops, hippocampus, MindForge in-layer, live brain) already run on grilly and stay there. | ~person-week per LM component | Deferred — gated on full PyTorch LM-stack validation |
 
 Stage 1.5 is **not optional** — without it, stage 2's heads latch onto the
 pure-news prior and the model answers "how are you?" with a news-style
@@ -99,16 +127,21 @@ Blocker: cubemind doesn't yet call opcode-vsa-rs. Landing the gRPC bridge
 
 ---
 
-## 7.5 Sandbox → grilly Port Plan (CubeMind-LM) — DEFERRED
+## 7.5 Sandbox → grilly Port Plan (CubeMind-LM only) — DEFERRED
 
-**This section is a plan, not a schedule.** The grilly port does not begin
-until the PyTorch sandbox version is stable and tested for **ALL** components
-(§7.2.1). Industry researchers use PyTorch; the PyTorch stack is the canonical
-public implementation.
+**Scope: CubeMind-LM trainer only.** This section is a plan, not a schedule.
+The grilly port of the **LM** does not begin until the PyTorch LM is stable
+and tested for all LM components (§7.2.1). Industry researchers use PyTorch;
+the PyTorch stack is the canonical public LM implementation.
 
-Each component's grilly target is listed here so the port is well-scoped when
-it eventually runs, but no entry in this table is on the current roadmap's
-critical path.
+Non-LM framework components (SNN, VSA ops, HippocampalFormation, MindForge
+in-layer, Neurochemistry, STDP, Neurogenesis, live brain) already run on
+grilly and **are not affected by this deferral** — they continue to use grilly
+today and stay there.
+
+Each LM component's grilly target is listed here so the port is well-scoped
+when it eventually runs, but no entry in this table is on the current
+roadmap's critical path.
 
 | Sandbox component | grilly target | Port complexity |
 |---|---|---|

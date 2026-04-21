@@ -170,11 +170,17 @@ unilaterally.
 | H200 SXM (CUDA) | 🚫 Not used by grilly | Sandbox PyTorch trainer runs there; grilly doesn't target CUDA directly |
 
 The H200 sandbox trainer (`sandbox/mingru_baseline/train_torch.py`) runs on
-PyTorch CUDA, not grilly. The PyTorch implementation is the **canonical public
-trainer** — grilly is the in-house GPU backend for the live brain and Vulkan
-targets, not the primary research surface. The grilly port is deferred until
-the PyTorch stack is stable and tested for ALL components (see
-`07-migration-roadmap.md` §7.2.1).
+PyTorch CUDA, not grilly. **This split is scoped to the CubeMind-LM trainer
+only.** For everything else — VSA block-code ops, SNN / GIF neurons,
+HippocampalFormation, MindForge in-layer adapters, STDP / Synapsis,
+Neurogenesis, Neurochemistry, the live brain — grilly is the primary and
+only GPU surface. CLAUDE.md rule #1 ("Always use grilly GPU ops, never raw
+numpy, for VSA operations") applies.
+
+The grilly port of **the LM trainer specifically** is deferred until the
+PyTorch LM is stable and tested for all LM components (see
+`07-migration-roadmap.md` §7.2.1). Non-LM framework pieces continue to use
+grilly today without change.
 
 ---
 

@@ -456,7 +456,7 @@ a mistake.
 | Identity corpus builder | `sandbox/mingru_baseline/build_identity_corpus.py` | ✅ Chat-tagged self-awareness |
 | Book-subject classifier | `sandbox/mingru_baseline/classify_book_subjects.py` | ✅ Gemini-driven |
 | Stage 1.5 launcher | `sandbox/mingru_baseline/run_h200_stage15_temporal.sh` | ✅ Ready to run |
-| Orchestrator ↔ training-loop CL integration | `cubemind/training/vsa_lm.py` | ❌ Legacy trainer (retired architecture); CL integration lives in the sandbox PyTorch trainer. The grilly-native port is deferred — see `07-migration-roadmap.md` §7.2.1. |
+| Orchestrator ↔ training-loop CL integration | `cubemind/training/vsa_lm.py` | ❌ Legacy trainer (retired architecture); CL integration for the LM lives in the sandbox PyTorch trainer. The grilly port of the **LM trainer** is deferred — see `07-migration-roadmap.md` §7.2.1. Non-LM CL components (SNN, STDP, hippocampus, neurogenesis) remain on grilly as today. |
 
 ---
 

@@ -66,11 +66,15 @@ and why before touching anything. Never silently edit across repos.
 ## 1.3 CubeMind-LM at a Glance
 
 The learned LM is built in `sandbox/mingru_baseline/train_torch.py` as a single-file
-PyTorch program. **The PyTorch implementation stays canonical** — it is the public
-research artefact, the reproduction surface for industry researchers (who all use
-PyTorch), and the HuggingFace Hub release target. The grilly port is a deferred
-internal optimisation that does not run until the PyTorch stack is stable and
-tested for ALL components. See `07-migration-roadmap.md` §7.2.1.
+PyTorch program. **The PyTorch implementation stays canonical for the LM** — it is
+the public research artefact, the reproduction surface for industry researchers
+(who all use PyTorch), and the HuggingFace Hub release target. The grilly port
+**of the LM trainer specifically** is deferred until the PyTorch LM is stable and
+tested across all LM components. See `07-migration-roadmap.md` §7.2.1.
+
+This deferral is scoped to the LM trainer only. The rest of the framework — VSA
+ops, SNN, HippocampalFormation, MindForge in-layer adapters, STDP, neurogenesis,
+the live brain — continues to run on grilly today (CLAUDE.md rule #1).
 
 **Stage 1 run 1 — complete (2026-04-20):**
 
@@ -221,7 +225,8 @@ See `CLAUDE.md` for the full rule set with rationale.
 | Aspect | Current (April 2026) | Target |
 |---|---|---|
 | VSA algebra | Python with grilly fallback | Rust (`opcode-vsa-rs`) |
-| LM trainer | PyTorch single-file sandbox on H200 — **this is the canonical public implementation** | grilly port deferred until the full PyTorch stack is stable + tested |
+| CubeMind-LM trainer | PyTorch single-file sandbox on H200 — **canonical public LM implementation** | grilly LM-trainer port deferred until the full PyTorch LM is stable + tested (§7.2.1) |
+| VSA algebra, SNN, hippocampus, MindForge in-layer, live brain | grilly (Vulkan, production) | grilly (unchanged — not affected by LM deferral) |
 | GPU kernels | C++/Vulkan via grilly | C++/Vulkan via grilly (stable) |
 | API | Python FastAPI | Go gRPC + REST |
 | Cross-language | pybind11 | protobuf / gRPC |
