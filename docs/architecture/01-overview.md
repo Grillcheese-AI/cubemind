@@ -92,14 +92,20 @@ the live brain — continues to run on grilly today (CLAUDE.md rule #1).
 Comparison: Pythia-1.4B reaches ~12 PPL on similar data at 6.5× the parameter count
 and >500× the training tokens.
 
-**Three-stage protocol:** detail in `08-cubemind-lm.md` §5 and
+**Staged protocol:** detail in `08-cubemind-lm.md` §5 and
 `docs/papers/cubemind_lm_h200_training.md` §4.2.
 
 | Stage | Purpose | Step budget | Cost | Status |
 |---|---|---|---|---|
 | 1 | LM pretrain on news + reasoning | 20,000 (8,000 done) | ≈$50 plan / $22 so far | ✅ run 1 done |
-| 1.5 | Temporal (PUB/SUBJ dated) + identity (chat-tagged) fine-tune | ~2,000 | ~$5 | planned |
+| 1-ext | Pretrain continuation on fresh corpora (Nemotron CC v2 + Wikibooks, ~2 B tokens). Diagnostic for the Run-1 val PPL plateau: data-limited → keep 213 M; capacity-limited → scale next | ~5,000 | ~$48 | Launcher `run_h200_stage1_ext_nemotron.sh` ready |
+| 1.5 | Temporal (PUB/SUBJ dated) + identity (chat-tagged) fine-tune | ~2,000 | ~$5 | pending 1-ext outcome |
 | 2 | Frozen-backbone 5-head multitask training (opcode / intent / schema / rule / validity) | ~3,000 | $3–5 | pending 1.5 |
+
+Run 1 saw only 2.75 tokens/param (589 M tokens × 213 M params) — badly under
+Chinchilla-optimal ~20. Stage 1-ext disambiguates whether the 5.17 val PPL
+plateau came from data exhaustion or capacity saturation before committing to
+a larger-model from-scratch rerun.
 
 Stage 1.5 is not optional — it teaches time-aware factuality and a first-person
 referent before stage-2 heads latch on to stage-1's pure-news prior.
