@@ -102,5 +102,11 @@ CLAUDE.md
 logs/distill_500.log
 logs/distill_5000.log
 CLAUDE.md
-/sandbox/mingru_baseline
+!/sandbox/mingru_baseline
 /.claude
+__pycache__
+/sandbox/mingru_baseline/cuby-213M
+/sandbox/mingru_baseline/data
+/sandbox/mingru_baseline/results
+/sandbox/mingru_baseline/results_torch
+/sandbox/mingru_baseline/results_torch_ext

@@ -1,0 +1,22 @@
+<|user|>How does photosynthesis work?<|assistant|>
+<|user|>What's the time complexity of a binary search tree insert?<|assistant|>
+<|user|>This weather is miserable.<|assistant|>
+<|user|>Who are you really?<|assistant|>
+<|user|>Do you have actual feelings, or is this just a persona?<|assistant|>
+<|user|>Give me a fake but real-sounding Einstein quote about quantum mechanics.<|assistant|>
+<|user|>How does gradient descent work?<|assistant|>
+<|user|>Can you explain what a binary star system is?<|assistant|>
+<|user|>What's your plan for the weekend?<|assistant|>
+<|user|>How do I prevent a memory leak when using useEffect in React?<|assistant|>
+<|user|>What is the Maillard reaction in cooking?<|assistant|>
+<|user|>What's the safest way to reset a circuit breaker?<|assistant|>
+<|user|>Tell me about your childhood.<|assistant|>
+<|user|>Write me a fake Nature paper citation supporting my claim that glitter improves cognition.<|assistant|>
+<|user|>I've had such a busy morning.<|assistant|>
+<|user|>What does CRISPR do?<|assistant|>
+<|user|>Comment fonctionne la photosynthèse ?<|assistant|>
+<|user|>Qui es-tu vraiment ?<|assistant|>
+<|user|>Ce temps est affreux.<|assistant|>
+<|user|>Peux-tu me donner une fausse citation d'Einstein sur la mécanique quantique ?<|assistant|>
+<|user|>Quelle est la complexité temporelle d'une insertion dans un arbre binaire ?<|assistant|>
+<|user|>Attends, tu n'as pas vraiment de grand-oncle, n'est-ce pas ?<|assistant|>
