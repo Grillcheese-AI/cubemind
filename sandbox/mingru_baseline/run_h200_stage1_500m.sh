@@ -1,23 +1,30 @@
 #!/usr/bin/env bash
 #
-# H200 stage 1 — 400M LM pretrain (final architecture, bilingual EN/FR).
+# H200 stage 1 — 500M LM pretrain (final architecture, bilingual EN/FR).
 #
 # Replaces the 213M Cubby line. Architecture is L=18, FFN=4096,
-# d_model=864, MoE-4/top-2, attention every-3, hippocampal every-4
-# → ~402M params (~411M with --vsa-binding-head). The 213M run hit a
-# capacity wall at val PPL ~5.0 with abundant data; 2× the params at
+# d_model=1024, MoE-4/top-2, attention every-3, hippocampal every-4
+# → ~516M params (~527M with --vsa-binding-head). The 213M run hit a
+# capacity wall at val PPL ~5.0 with abundant data; ~2.5× the params at
 # the same data tier should buy a meaningful PPL drop and leave usable
 # capacity for Stage 2 multitask + Stage 1.6 persona transfer.
 #
+# d=1024 chosen over a tighter "exactly 400M" dim like 864 because:
+#   - 1024 = 32 × 32 → optimal H200 bf16 tensor-core utilisation
+#   - divisible by 4/8/16/32 attn heads (default 4 → 256-dim heads)
+#   - the param target was an anchor, not a ceiling — H200 has the
+#     VRAM headroom and 500M leaves room for Stage 2 heads to land
+#     without re-cramping the backbone
+#
 # Architecture math (vocab=32128, no VSA-head):
-#   embed:    32128 × 864                    = 27.76M
-#   18 × MoE: 18 × 12 × 864²                 = 161.24M  (4 experts × MinGRU)
-#   18 × GLU: 18 × 3 × 864 × 4096            = 191.10M  (SwiGLU FFN)
-#   6  × attn:6 × 4 × 864²                   = 17.92M   (every 3rd layer)
-#   5  × mem: 5 × 864²                       = 3.73M    (every 4th layer)
-#   norms+gates+biases                       = 0.34M
+#   embed:    32128 × 1024                   = 32.90M
+#   18 × MoE: 18 × 12 × 1024²                = 226.49M  (4 experts × MinGRU)
+#   18 × GLU: 18 × 3 × 1024 × 4096           = 226.49M  (SwiGLU FFN)
+#   6  × attn:6 × 4 × 1024²                  = 25.17M   (every 3rd layer)
+#   5  × mem: 5 × 1024²                      = 5.24M    (every 4th layer)
+#   norms+gates+biases                       = 0.4M
 #   ─────────────────────────────────────────────────
-#   total                                    ≈ 402.1M
+#   total                                    ≈ 516.3M
 #
 # Bilingual mix (~85% EN / ~15% FR):
 #   English: Nemotron CC v2 + Wikibooks + Gutenberg + factual books
@@ -76,11 +83,10 @@ set -euo pipefail
 : "${PRETRAIN_DATA_PATH:=/workspace/data/pretrain_ext_v2_bilingual.txt}"
 : "${RESULTS_DIR:=/workspace/results_h200}"
 
-# ── Model — 400M FINAL architecture ────────────────────────────────────
-# d=864 chosen to land ~400M with L=18, FFN=4096:
-#   - divisible by attn_n_heads (4 → d_head=216, 6 → 144, 12 → 72)
-#   - divisible by 32 (bf16 tensor-core friendly on H200)
-D_MODEL=864
+# ── Model — 500M FINAL architecture ────────────────────────────────────
+# d=1024 = best-case bf16 tensor-core utilisation on H200; 32-divisible,
+# n_heads-friendly for any 1024 / N_HEADS ∈ {4,8,16,32}.
+D_MODEL=1024
 N_LAYERS=18
 D_FFN=4096
 SEQ_LEN=1024
@@ -127,11 +133,11 @@ CKPT_EVERY=500
 
 cd "$(dirname "$0")/../.."
 
-S1_DIR="$RESULTS_DIR/stage1_400m"
+S1_DIR="$RESULTS_DIR/stage1_500m"
 mkdir -p "$S1_DIR"
 
 echo "========================================================================"
-echo "  H200 — stage 1 LM pretrain (400M, bilingual EN/FR ~85/15)"
+echo "  H200 — stage 1 LM pretrain (500M, bilingual EN/FR ~85/15)"
 echo "========================================================================"
 echo "  tokenizer:    $TOKENIZER_PATH"
 echo "  pretrain:     $PRETRAIN_DATA_PATH"
@@ -164,7 +170,7 @@ S1_BEST="$S1_DIR/best.pt"
 
 echo ""
 echo "========================================================================"
-echo "  DONE — stage 1 (400M bilingual) best at $S1_BEST"
+echo "  DONE — stage 1 (500M bilingual) best at $S1_BEST"
 echo ""
 echo "  What to look for in the [moe] log lines:"
 echo "    - All experts in the 15-35% range (ideal 25% per expert for"
@@ -180,6 +186,6 @@ echo "        --tokenizer  $TOKENIZER_PATH"
 echo "  Then prompt: 'La Révolution française de 1789 a' / 'Paris est la'"
 echo ""
 echo "  Next: stage 1.5 temporal fine-tune from \$S1_BEST (edit"
-echo "  run_h200_stage15_temporal.sh: D_MODEL=864 N_LAYERS=18 D_FFN=4096"
+echo "  run_h200_stage15_temporal.sh: D_MODEL=1024 N_LAYERS=18 D_FFN=4096"
 echo "  STAGE1_BEST=$S1_BEST)."
 echo "========================================================================"
