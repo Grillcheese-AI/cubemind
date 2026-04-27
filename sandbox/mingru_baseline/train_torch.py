@@ -2554,6 +2554,15 @@ def train(cfg: TrainConfig, args) -> dict:
                 with autocast_ctx():
                     logits = model(x, surprise_gain=surprise_gain)
                     loss = compute_loss(logits, y) / cfg.grad_accum
+            # Switch-Transformer load-balancing aux loss — added when
+            # MoE is enabled. Without this, top-K routing typically
+            # collapses to a couple of dominant experts within the first
+            # ~500 steps and the rest never learn. ``moe_aux_loss``
+            # returns a 0-d tensor on the model device.
+            if cfg.enable_moe and cfg.moe_aux_loss_weight > 0:
+                _moe_owner = getattr(model, "_orig_mod", model)
+                aux = _moe_owner.moe_aux_loss()
+                loss = loss + (cfg.moe_aux_loss_weight * aux) / cfg.grad_accum
             if not torch.isfinite(loss):
                 print(f"  WARN non-finite loss at step {step}, skipping")
                 continue
@@ -2612,6 +2621,31 @@ def train(cfg: TrainConfig, args) -> dict:
             log_count += 1
             if log_count % header_every == 0:
                 print(divider); print(header); print(divider)
+
+        # MoE health check — print per-layer expert utilization and
+        # warn on collapse. Reads + resets the routing buffers so each
+        # window covers exactly the steps since the last print.
+        moe_log_freq = cfg.moe_log_every or (cfg.log_every * 5)
+        if cfg.enable_moe and step % moe_log_freq == 0:
+            _moe_owner = getattr(model, "_orig_mod", model)
+            snaps = _moe_owner.moe_health(reset=True)
+            if snaps:
+                ideal = 1.0 / cfg.moe_n_experts
+                warn  = cfg.moe_health_warn_threshold * ideal
+                print(f"  [moe] step {step:,} expert token fraction "
+                      f"(ideal {ideal*100:.1f}% per expert):")
+                any_collapsed = False
+                for li, snap in enumerate(snaps):
+                    frac = snap["token_frac"]
+                    cells = " ".join(f"{f*100:5.1f}%" for f in frac)
+                    tag = ""
+                    if min(frac) < warn:
+                        tag = "  COLLAPSED"; any_collapsed = True
+                    print(f"    L{li:02d}: {cells}{tag}")
+                if any_collapsed:
+                    print(f"    NOTE: at least one expert below "
+                          f"{warn*100:.1f}% — consider raising "
+                          f"--moe-aux-weight (current {cfg.moe_aux_loss_weight})")
 
         if step % cfg.eval_every == 0 or step == cfg.max_steps:
             metrics = None
@@ -2784,6 +2818,19 @@ def main() -> None:
                     help="Enable MoE-MinGRU (4 experts, top-2 routing)")
     ap.add_argument("--moe-experts", type=int, default=cfg.moe_n_experts)
     ap.add_argument("--moe-top-k", type=int, default=cfg.moe_top_k)
+    ap.add_argument("--moe-aux-weight", type=float,
+                    default=cfg.moe_aux_loss_weight,
+                    help="Switch-style load-balancing aux loss weight "
+                         "(default 0.01). Set 0 to disable.")
+    ap.add_argument("--moe-log-every", type=int,
+                    default=cfg.moe_log_every,
+                    help="Log per-layer expert utilization every N steps "
+                         "(0 → log_every × 5).")
+    ap.add_argument("--moe-warn-threshold", type=float,
+                    default=cfg.moe_health_warn_threshold,
+                    help="Warn when any expert's token fraction falls below "
+                         "this × (1 / n_experts). Default 0.5 (so for M=4, "
+                         "warn when an expert sees < 12.5% of routing slots).")
     ap.add_argument("--attention", action="store_true",
                     help="Enable local sliding-window attention every N layers")
     ap.add_argument("--attn-heads", type=int, default=cfg.attn_n_heads)
@@ -2873,6 +2920,9 @@ def main() -> None:
         mem_consolidate_every=args.mem_consolidate_every,
         enable_moe=args.moe, moe_n_experts=args.moe_experts,
         moe_top_k=args.moe_top_k,
+        moe_aux_loss_weight=args.moe_aux_weight,
+        moe_log_every=args.moe_log_every,
+        moe_health_warn_threshold=args.moe_warn_threshold,
         enable_attention=args.attention, attn_n_heads=args.attn_heads,
         attn_window=args.attn_window, attn_every_n=args.attn_every_n,
         enable_hypergrad=args.hypergrad,
