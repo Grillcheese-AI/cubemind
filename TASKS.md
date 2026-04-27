@@ -568,6 +568,78 @@ These apply to every new experiment, module, and opcode:
 
 ---
 
+## Post-1-ext Research Queue
+
+Queued after Stage 1-ext completes. Ordering is load-bearing: (1) must land
+before (3)/(7) can be evaluated for the paper; (2) must land before (4) has
+anywhere to store domain knowledge. Full design specs live in
+`sandbox/mingru_baseline/observations.md` under 2026-04-21 entries.
+
+### 1. `EnergyMeter` port (2 h — independent of 1-ext; can start any time)
+- [ ] Port `H:\AURA_GENESIS\aura\core\liquid_moe.py:EnergyMeter` → `cubemind/core/energy.py`
+- [ ] Wire MAC counting into `train_torch.py` forward path (`nn.Linear`, attention, MoE, MinGRU)
+- [ ] Cross-calibrate `e_mac_j` (default 3 pJ) against `pynvml` GPU power on H200
+- [ ] Emit per-query Joule line during eval
+
+**Done when:** `cubemind/core/energy.py` exports `EnergyMeter`; eval logs print per-query Joule count; calibration notes committed to `observations.md`.
+
+### 2. RSS grounding bridge (2-3 days)
+- [ ] Cronjob fetches feeds from `cubemind/.claude/elephant-coder.local.md` config
+- [ ] Tokenize with SPM, bind with VSA roles (`source`, `date`, `topic`), write to HippocampalFormation
+- [ ] Add `<|source:…|>` forced tokens to SPM (bundle with any other token additions — one retrain)
+
+**Done when:** RSS items appear as HippocampalFormation episodes, queryable via RECALL with source/date/topic role filtering.
+
+### 3. SNN-gated MoE — Stage 1.8 (~2 h H200 / ~$8)
+- [ ] Port AURA `spiking_attention.py:SpikingAttention` → PyTorch `SpikeGatedMoE` class (~80 lines)
+- [ ] `SpikeFunction(torch.autograd.Function)` with fast-sigmoid surrogate (~30 lines)
+- [ ] Spike-rate regularization aux loss (target ≈ `top_k / n_experts`)
+- [ ] Softmax→spike gating annealing over first 500 steps
+- [ ] 2 K-step fine-tune from Stage 1-ext `best.pt`
+- [ ] Measure sparsity histogram + energy/PPL delta (needs task 1)
+
+**Done when:** spike-MoE val PPL within 5% of softmax baseline AND measurable per-layer sparsity ≥ 50%.
+
+### 4. Liquid MoWM prototype (2-3 world models)
+- [ ] Port AURA `liquid_moe.py:LiquidCell` → PyTorch (~80 lines)
+- [ ] 2-3 domain specialist LoRA adapters: `general`, `ml-research` (arxiv-bound), `governance` (NYT/WSJ-bound)
+- [ ] UCB + cosine routing over adapters (replaces DSelect-k for the prototype)
+- [ ] Per-session VSA bindings in hippocampus (humor, preferences, etc.)
+- [ ] Drift regression protection: rollback adapter if eval drops below snapshot
+
+**Done when:** ≥ 2 world models beat the unified backbone on their respective domains AND per-user drift stays within regression bounds over 7 days of simulated traffic.
+
+### 5. Multilingual fine-tune (future Stage)
+- [ ] Decide: `<|lang:fr|>` forced tokens vs context-only language signal
+- [ ] Flatten `D:\grillcheese_training_data\unified\allenai_c4_multilingual.500m_tokens.jsonl` via `build_pretrain_corpus.py`
+- [ ] Consider SPM retrain on multilingual corpus if mid-word script merges (e.g. `newان`) persist
+- [ ] Fine-tune from Stage 1.6 / 1.8 checkpoint
+
+**Done when:** model cleanly produces text in ≥ 10 languages without mid-word script merges; bilingual coherence eval passes.
+
+### 6. Humor-timing `CONSIDER_ASIDE` opcode (speculative, post-paper)
+- [ ] Boredom scalar from text features (reply length, politeness drop, question-density drop over last 3 turns)
+- [ ] `user_humor_friendliness` VSA role stored per session in hippocampus
+- [ ] Gated aside emission: `boredom > 0.6 AND humor_friendliness > 0.4 AND random < 0.3`
+- [ ] Bandit reward signal from next-turn user reaction (laugh tokens, engagement)
+- [ ] Training corpus: ~2-5 K `(explanation, deadpan-aside)` pairs via `gemini_factory.py`
+- [ ] Persona-doc update: explicitly permit inventing fictional family / impossible dates / nonsense medicine as humor device (safety rail: never *plausibly* true)
+
+**Done when:** model slips a deadpan aside per the character-sheet pattern in appropriate contexts; user studies show ≥ 70% recognition as intentional humor.
+
+### 7. Benchmark harness for the "greener than hyperscalers" paper
+- [ ] I-RAVEN formal report (already 90.3% zero-shot — needs table)
+- [ ] Long-context recall (NIAH / RULER) backed by HippocampalFormation
+- [ ] Multi-domain switching eval (code → medicine → law in one session) — MoWM showcase
+- [ ] Personality coherence over 100-turn sessions
+- [ ] Energy-per-query table (depends on task 1)
+- [ ] Total training kWh vs 70B baseline
+- [ ] Active-parameter budget per token vs 18 T / 70B baseline
+
+**Done when:** single-artifact comparison table with 7 columns against a published frontier baseline.
+
+---
+
 ## Quick Reference — Current Status
 
 | Area | Status |

@@ -98,7 +98,7 @@ and >500× the training tokens.
 | Stage | Purpose | Step budget | Cost | Status |
 |---|---|---|---|---|
 | 1 | LM pretrain on news + reasoning | 20,000 (8,000 done) | ≈$50 plan / $22 so far | ✅ run 1 done |
-| 1-ext | Pretrain continuation on fresh corpora (Nemotron CC v2 + Wikibooks, ~2 B tokens). Diagnostic for the Run-1 val PPL plateau: data-limited → keep 213 M; capacity-limited → scale next | ~5,000 | ~$48 | Launcher `run_h200_stage1_ext_nemotron.sh` ready |
+| 1-ext | Pretrain continuation on fresh corpora (Nemotron CC v2 + Wikibooks + Gutenberg + factual books, ~2.5 B tokens). Diagnostic for the Run-1 val PPL plateau: data-limited → keep 213 M; capacity-limited → scale next. Matches Run 1 config exactly (seq=768, bs=24, ga=4). | ~15,000 | ~$40 | Launcher `run_h200_stage1_ext_nemotron.sh` ready |
 | 1.5 | Temporal (PUB/SUBJ dated) + identity (chat-tagged) fine-tune | ~2,000 | ~$5 | pending 1-ext outcome |
 | 2 | Frozen-backbone 5-head multitask training (opcode / intent / schema / rule / validity) | ~3,000 | $3–5 | pending 1.5 |
 
