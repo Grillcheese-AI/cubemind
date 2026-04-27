@@ -96,7 +96,9 @@ VOCAB=32128
 HYBRID_FLAGS=(
     --vsa-binding-head --vsa-binding-d 10240
     --moe --moe-experts 4 --moe-top-k 2
-    --moe-aux-weight 0.01
+    --moe-aux-weight 0.3
+    --moe-gate-noise 1.0
+    --moe-gate-init-std 0.01
     --moe-warn-threshold 0.5
     --attention --attn-heads 4 --attn-window 128 --attn-every-n 3
     --memory --mem-max 200 --mem-write-threshold 0.4 --mem-every-n 4

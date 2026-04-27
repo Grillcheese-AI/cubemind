@@ -191,6 +191,16 @@ class TrainConfig:
     moe_aux_loss_weight: float = 0.01
     moe_log_every: int = 0
     moe_health_warn_threshold: float = 0.5
+    # Router-noise stddev added to gate logits during training.
+    # Forces routing exploration so gates don't lock before the aux
+    # loss can pull experts apart. Switch / Sparse Mixers both use
+    # noise injection — required for K>1 routing on recurrent stacks.
+    # 0.0 disables (legacy behaviour). Recommended: 1.0 for d≥1024.
+    moe_gate_noise_std: float = 0.0
+    # Stddev for the gate weight init. Small init = near-uniform
+    # initial routing → aux loss has time to set up before the LM
+    # gradient locks anything. 0.0 → use Linear default.
+    moe_gate_init_std: float = 0.0
 
     # Local sliding-window attention (supplements recurrence every N layers)
     enable_attention: bool = False
@@ -930,10 +940,13 @@ class MoEMinGRULayer(nn.Module):
     def __init__(self, d_model: int, n_experts: int = 4, top_k: int = 2,
                  decay_bias_init: float = 1.0,
                  enable_hypergrad: bool = False,
-                 hypergrad_scale_init: float = 0.1):
+                 hypergrad_scale_init: float = 0.1,
+                 gate_noise_std: float = 0.0,
+                 gate_init_std: float = 0.0):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
+        self.gate_noise_std = float(gate_noise_std)
         self.experts = nn.ModuleList([
             MinGRULayer(
                 d_model, decay_bias_init,
@@ -943,6 +956,8 @@ class MoEMinGRULayer(nn.Module):
             for _ in range(n_experts)
         ])
         self.gate = nn.Linear(d_model, n_experts, bias=False)
+        if gate_init_std > 0:
+            nn.init.normal_(self.gate.weight, mean=0.0, std=float(gate_init_std))
 
         # ── MoE health tracking ───────────────────────────────────────
         # Buffers accumulate routing stats across a logging window.
@@ -962,6 +977,14 @@ class MoEMinGRULayer(nn.Module):
         B, S, D = x.shape
         # Router: per-token top-K expert selection
         gate_logits = self.gate(x)                          # (B, S, M)
+        # Routing noise (training only) — stops gates from locking
+        # before the aux loss can pull experts apart. Same noise applied
+        # to both top-K selection and softmax over top values, so the
+        # routing decision and weight share noise (Switch / GShard pattern).
+        if self.training and self.gate_noise_std > 0:
+            gate_logits = gate_logits + (
+                torch.randn_like(gate_logits) * self.gate_noise_std
+            )
         gate_probs  = torch.softmax(gate_logits, dim=-1)    # (B, S, M) — full router dist
         top_vals, top_idx = gate_logits.topk(self.top_k, dim=-1)  # (B, S, K)
         weights = torch.softmax(top_vals, dim=-1)           # (B, S, K)
@@ -1241,6 +1264,8 @@ class HybridBlock(nn.Module):
                 d, cfg.moe_n_experts, cfg.moe_top_k,
                 enable_hypergrad=cfg.enable_hypergrad,
                 hypergrad_scale_init=cfg.hypergrad_scale_init,
+                gate_noise_std=getattr(cfg, "moe_gate_noise_std", 0.0),
+                gate_init_std=getattr(cfg, "moe_gate_init_std", 0.0),
             )
         else:
             self.mix = MinGRULayer(
@@ -2831,6 +2856,16 @@ def main() -> None:
                     help="Warn when any expert's token fraction falls below "
                          "this × (1 / n_experts). Default 0.5 (so for M=4, "
                          "warn when an expert sees < 12.5% of routing slots).")
+    ap.add_argument("--moe-gate-noise", type=float,
+                    default=cfg.moe_gate_noise_std,
+                    help="Stddev of Gaussian noise added to gate logits "
+                         "during training. 0=off. Recommended 1.0 for d≥1024. "
+                         "Required to prevent routing collapse on K>1 + "
+                         "recurrent stacks.")
+    ap.add_argument("--moe-gate-init-std", type=float,
+                    default=cfg.moe_gate_init_std,
+                    help="Stddev for gate weight init. 0=Linear default. "
+                         "Recommended 0.01 for tighter initial logits.")
     ap.add_argument("--attention", action="store_true",
                     help="Enable local sliding-window attention every N layers")
     ap.add_argument("--attn-heads", type=int, default=cfg.attn_n_heads)
@@ -2923,6 +2958,8 @@ def main() -> None:
         moe_aux_loss_weight=args.moe_aux_weight,
         moe_log_every=args.moe_log_every,
         moe_health_warn_threshold=args.moe_warn_threshold,
+        moe_gate_noise_std=args.moe_gate_noise,
+        moe_gate_init_std=args.moe_gate_init_std,
         enable_attention=args.attention, attn_n_heads=args.attn_heads,
         attn_window=args.attn_window, attn_every_n=args.attn_every_n,
         enable_hypergrad=args.hypergrad,
