@@ -108,7 +108,7 @@ RESULTS_DIR_OVERRIDE="$S15_DIR" python -u sandbox/mingru_baseline/train_torch.py
     --lr $S15_LR --min-lr $S15_MIN_LR --warmup $S15_WARMUP \
     --wd $WD --clip $CLIP --dtype $DTYPE \
     --log-every $LOG_EVERY --eval-every $EVAL_EVERY --ckpt-every $CKPT_EVERY \
-    --prompts sandbox/mingru_baseline/prompts_news.txt \
+    --prompts sandbox/mingru_baseline/prompts_temporal.txt \
     --data-path "$TEMPORAL_DATA_PATH" \
     --init-from "$STAGE1_BEST" \
     "${HYBRID_FLAGS[@]}"

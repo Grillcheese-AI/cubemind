@@ -52,6 +52,8 @@ build/
 !/docs/papers/
 /docs/papers/*
 !/docs/papers/cubemind_lm_h200_training.md
+!/docs/architecture/*
+
 
 # Non-core directories (local experiments, not part of package)
 

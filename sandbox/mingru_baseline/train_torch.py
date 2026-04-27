@@ -178,6 +178,20 @@ class TrainConfig:
     moe_n_experts: int = 4
     moe_top_k: int = 2
 
+    # MoE health check.
+    # ``moe_aux_loss_weight``: Switch-Transformer-style load-balancing
+    # auxiliary loss = M · Σ_e (f_e · P_e). Pushes routing toward
+    # uniform across experts. Without it, MoE typically collapses to
+    # 1-2 dominant experts and the rest never learn. 0.01 matches the
+    # Switch paper.
+    # ``moe_log_every``: print per-layer expert utilization every N
+    # steps (0 → log_every × 5).
+    # ``moe_health_warn_threshold``: warn when any expert's token
+    # fraction falls below threshold × ideal (1 / n_experts).
+    moe_aux_loss_weight: float = 0.01
+    moe_log_every: int = 0
+    moe_health_warn_threshold: float = 0.5
+
     # Local sliding-window attention (supplements recurrence every N layers)
     enable_attention: bool = False
     attn_n_heads: int = 4
@@ -930,12 +944,50 @@ class MoEMinGRULayer(nn.Module):
         ])
         self.gate = nn.Linear(d_model, n_experts, bias=False)
 
+        # ── MoE health tracking ───────────────────────────────────────
+        # Buffers accumulate routing stats across a logging window.
+        # ``persistent=False`` keeps them out of state_dict so old
+        # checkpoints stay loadable and new checkpoints don't bloat.
+        self.register_buffer("expert_token_counts",
+                             torch.zeros(n_experts), persistent=False)
+        self.register_buffer("expert_gate_mass",
+                             torch.zeros(n_experts), persistent=False)
+        self.register_buffer("total_tokens",
+                             torch.zeros(1), persistent=False)
+        # Switch-style aux loss for the most recent forward. Read by
+        # MinGRUModel.moe_aux_loss() and added to the training loss.
+        self.aux_loss: torch.Tensor = torch.zeros(())
+
     def forward(self, x: torch.Tensor, surprise_gain: float = 0.0) -> torch.Tensor:
         B, S, D = x.shape
         # Router: per-token top-K expert selection
         gate_logits = self.gate(x)                          # (B, S, M)
+        gate_probs  = torch.softmax(gate_logits, dim=-1)    # (B, S, M) — full router dist
         top_vals, top_idx = gate_logits.topk(self.top_k, dim=-1)  # (B, S, K)
         weights = torch.softmax(top_vals, dim=-1)           # (B, S, K)
+
+        # Switch-Transformer load-balancing aux loss:
+        #   L_aux = M · Σ_e (f_e · P_e)
+        # f_e: fraction of routing slots dispatched to expert e (non-diff,
+        #      from argmax topk → detached).
+        # P_e: mean router probability assigned to expert e (differentiable).
+        # Minimised when both are uniform (1/M each) → discourages
+        # collapse to a few dominant experts.
+        BS_K = max(B * S * self.top_k, 1)
+        flat_idx = top_idx.reshape(-1)                                    # (B·S·K,)
+        ones = torch.ones_like(flat_idx, dtype=torch.float32)
+        tokens_to_expert = torch.zeros(self.n_experts, device=x.device,
+                                       dtype=torch.float32)
+        tokens_to_expert.scatter_add_(0, flat_idx, ones)                  # (M,)
+        f = tokens_to_expert / BS_K                                        # (M,) sums to 1
+        P = gate_probs.float().mean(dim=(0, 1))                            # (M,) sums to 1
+        self.aux_loss = self.n_experts * (f.detach() * P).sum()
+
+        # Update health buffers (no-grad).
+        with torch.no_grad():
+            self.expert_token_counts += tokens_to_expert
+            self.expert_gate_mass    += gate_probs.float().sum(dim=(0, 1))
+            self.total_tokens        += float(B * S)
 
         # Run all experts — each sees the same surprise_gain
         expert_outs = [exp(x, surprise_gain=surprise_gain) for exp in self.experts]      # M × (B, S, D)
@@ -951,6 +1003,28 @@ class MoEMinGRULayer(nn.Module):
                 mask = (idx_k == m).unsqueeze(-1).to(x.dtype)  # (B, S, 1)
                 result = result + w_k * mask * expert_outs[m]
         return result
+
+    @torch.no_grad()
+    def health_snapshot(self, reset: bool = True) -> dict:
+        """Return per-expert utilization since last reset.
+
+        Returns dict with keys:
+          ``token_frac``     — list[float], routing slot fraction per expert
+          ``gate_mass_frac`` — list[float], mean router prob per expert
+          ``total_tokens``   — int, tokens observed in this window
+        """
+        n = float(self.total_tokens.item()) or 1.0
+        slots = n * self.top_k
+        token_frac = (self.expert_token_counts / slots).cpu().tolist()
+        gate_frac  = (self.expert_gate_mass / n).cpu().tolist()
+        snap = {"token_frac": token_frac,
+                "gate_mass_frac": gate_frac,
+                "total_tokens": int(n)}
+        if reset:
+            self.expert_token_counts.zero_()
+            self.expert_gate_mass.zero_()
+            self.total_tokens.zero_()
+        return snap
 
 
 class LocalCausalAttention(nn.Module):
@@ -1361,6 +1435,35 @@ class MinGRUModel(nn.Module):
             return {}
         return self.memory.consolidate()
 
+    # ── MoE introspection ──────────────────────────────────────────────
+    def moe_layers(self) -> list["MoEMinGRULayer"]:
+        """Return all MoE mixer layers in block order."""
+        return [blk.mix for blk in self.blocks
+                if isinstance(getattr(blk, "mix", None), MoEMinGRULayer)]
+
+    def moe_aux_loss(self) -> torch.Tensor:
+        """Mean Switch-style load-balancing aux loss across MoE layers.
+
+        Returns a 0-d tensor on the model device. Multiply by
+        ``cfg.moe_aux_loss_weight`` before adding to the training loss.
+        """
+        layers = self.moe_layers()
+        device = self.embed.weight.device
+        if not layers:
+            return torch.zeros((), device=device)
+        # After the most recent forward, every MoE layer's aux_loss is
+        # populated on the same device as activations. If a layer hasn't
+        # been forwarded yet (shape ()), upgrade to the model device.
+        losses = [l.aux_loss if l.aux_loss.device == device
+                  else l.aux_loss.to(device)
+                  for l in layers]
+        return torch.stack(losses).mean()
+
+    @torch.no_grad()
+    def moe_health(self, reset: bool = True) -> list[dict]:
+        """Per-layer MoE expert utilization. See ``MoEMinGRULayer.health_snapshot``."""
+        return [l.health_snapshot(reset=reset) for l in self.moe_layers()]
+
 
 class MindForgeLoRAHead(nn.Module):
     """Hypernetwork-forged LoRA head — PyTorch port of cubemind.execution.mindforge.
@@ -1635,6 +1738,13 @@ class MinGRUMultiTask(nn.Module):
 
     def consolidate(self) -> dict:
         return self.backbone.consolidate()
+
+    def moe_aux_loss(self) -> torch.Tensor:
+        return self.backbone.moe_aux_loss()
+
+    @torch.no_grad()
+    def moe_health(self, reset: bool = True) -> list[dict]:
+        return self.backbone.moe_health(reset=reset)
 
 
 # ── Training utilities ───────────────────────────────────────────────────
@@ -2444,6 +2554,15 @@ def train(cfg: TrainConfig, args) -> dict:
                 with autocast_ctx():
                     logits = model(x, surprise_gain=surprise_gain)
                     loss = compute_loss(logits, y) / cfg.grad_accum
+            # Switch-Transformer load-balancing aux loss — added when
+            # MoE is enabled. Without this, top-K routing typically
+            # collapses to a couple of dominant experts within the first
+            # ~500 steps and the rest never learn. ``moe_aux_loss``
+            # returns a 0-d tensor on the model device.
+            if cfg.enable_moe and cfg.moe_aux_loss_weight > 0:
+                _moe_owner = getattr(model, "_orig_mod", model)
+                aux = _moe_owner.moe_aux_loss()
+                loss = loss + (cfg.moe_aux_loss_weight * aux) / cfg.grad_accum
             if not torch.isfinite(loss):
                 print(f"  WARN non-finite loss at step {step}, skipping")
                 continue
@@ -2502,6 +2621,31 @@ def train(cfg: TrainConfig, args) -> dict:
             log_count += 1
             if log_count % header_every == 0:
                 print(divider); print(header); print(divider)
+
+        # MoE health check — print per-layer expert utilization and
+        # warn on collapse. Reads + resets the routing buffers so each
+        # window covers exactly the steps since the last print.
+        moe_log_freq = cfg.moe_log_every or (cfg.log_every * 5)
+        if cfg.enable_moe and step % moe_log_freq == 0:
+            _moe_owner = getattr(model, "_orig_mod", model)
+            snaps = _moe_owner.moe_health(reset=True)
+            if snaps:
+                ideal = 1.0 / cfg.moe_n_experts
+                warn  = cfg.moe_health_warn_threshold * ideal
+                print(f"  [moe] step {step:,} expert token fraction "
+                      f"(ideal {ideal*100:.1f}% per expert):")
+                any_collapsed = False
+                for li, snap in enumerate(snaps):
+                    frac = snap["token_frac"]
+                    cells = " ".join(f"{f*100:5.1f}%" for f in frac)
+                    tag = ""
+                    if min(frac) < warn:
+                        tag = "  COLLAPSED"; any_collapsed = True
+                    print(f"    L{li:02d}: {cells}{tag}")
+                if any_collapsed:
+                    print(f"    NOTE: at least one expert below "
+                          f"{warn*100:.1f}% — consider raising "
+                          f"--moe-aux-weight (current {cfg.moe_aux_loss_weight})")
 
         if step % cfg.eval_every == 0 or step == cfg.max_steps:
             metrics = None
@@ -2674,6 +2818,19 @@ def main() -> None:
                     help="Enable MoE-MinGRU (4 experts, top-2 routing)")
     ap.add_argument("--moe-experts", type=int, default=cfg.moe_n_experts)
     ap.add_argument("--moe-top-k", type=int, default=cfg.moe_top_k)
+    ap.add_argument("--moe-aux-weight", type=float,
+                    default=cfg.moe_aux_loss_weight,
+                    help="Switch-style load-balancing aux loss weight "
+                         "(default 0.01). Set 0 to disable.")
+    ap.add_argument("--moe-log-every", type=int,
+                    default=cfg.moe_log_every,
+                    help="Log per-layer expert utilization every N steps "
+                         "(0 → log_every × 5).")
+    ap.add_argument("--moe-warn-threshold", type=float,
+                    default=cfg.moe_health_warn_threshold,
+                    help="Warn when any expert's token fraction falls below "
+                         "this × (1 / n_experts). Default 0.5 (so for M=4, "
+                         "warn when an expert sees < 12.5% of routing slots).")
     ap.add_argument("--attention", action="store_true",
                     help="Enable local sliding-window attention every N layers")
     ap.add_argument("--attn-heads", type=int, default=cfg.attn_n_heads)
@@ -2763,6 +2920,9 @@ def main() -> None:
         mem_consolidate_every=args.mem_consolidate_every,
         enable_moe=args.moe, moe_n_experts=args.moe_experts,
         moe_top_k=args.moe_top_k,
+        moe_aux_loss_weight=args.moe_aux_weight,
+        moe_log_every=args.moe_log_every,
+        moe_health_warn_threshold=args.moe_warn_threshold,
         enable_attention=args.attention, attn_n_heads=args.attn_heads,
         attn_window=args.attn_window, attn_every_n=args.attn_every_n,
         enable_hypergrad=args.hypergrad,

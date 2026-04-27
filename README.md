@@ -182,7 +182,8 @@ Phased delivery is tracked in `TASKS.md`:
 | Phase | Status |
 |---|---|
 | 0 — Repo cleanup | ✅ Done (2026-04-15) |
-| 1 — FlashLM v8.3 baseline (PPL ≤ 2.60) | Pending |
+| 1 — CubeMind-213M MinGRU sandbox baseline (val PPL ≤ 6 on news prose) | ✅ Done (2026-04-20, val PPL 5.17 at step 8,000 / 589M tok on H200 SXM) |
+| 1.5 — Temporal / identity fine-tune on stage-1 checkpoint | Pending |
 | 2 — VSALMModel wiring | Pending |
 | 3 — Training loop + sleep cycle + api rewire | Pending |
 | 4 — CubeMind extension ablations (snn, forge, mem) | Pending |
